@@ -1,4 +1,4 @@
 import "@lilia/ui/styles.css";
-import { createTemplateApp } from "./app";
+import { createNanaBetterCubismApp } from "./app";
 
-createTemplateApp().app.mount("#root");
+createNanaBetterCubismApp().app.mount("#root");

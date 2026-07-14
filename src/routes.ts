@@ -1,10 +1,10 @@
 import { LiliaSettingsPage } from "@lilia/ui";
 import type { RouteRecordRaw } from "vue-router";
 
-const HomePage = () => import("./features/home/HomePage.vue");
+const ParameterBatchPage = () => import("./features/parameters/ParameterBatchPage.vue");
 
 export const routes: RouteRecordRaw[] = [
-  { path: "", component: HomePage, meta: { sidebar: "main", returnable: true } },
+  { path: "", component: ParameterBatchPage, meta: { sidebar: "main", returnable: true } },
   {
     path: "settings",
     component: LiliaSettingsPage,

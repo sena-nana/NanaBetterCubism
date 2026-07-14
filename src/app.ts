@@ -4,7 +4,7 @@ import { appConfig } from "./app.config";
 import { commands } from "./commands";
 import { routes } from "./routes";
 
-export function createTemplateApp(history?: RouterHistory) {
+export function createNanaBetterCubismApp(history?: RouterHistory) {
   return createLiliaApp({
     config: appConfig,
     routes,
@@ -14,7 +14,7 @@ export function createTemplateApp(history?: RouterHistory) {
   });
 }
 
-export function createTemplateRouter(history?: RouterHistory) {
+export function createNanaBetterCubismRouter(history?: RouterHistory) {
   setLiliaAppConfig(appConfig);
   return createLiliaRouter(routes, LiliaDesktopShell, history);
 }
