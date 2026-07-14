@@ -1,6 +1,7 @@
 use super::{CommandError, EditorService};
 use crate::domain::{
     EditorSnapshot, OperationAccepted, ParameterBatchInput, ParameterBatchPreview,
+    PartParameterQueryResult,
 };
 use tauri::{AppHandle, State};
 
@@ -26,6 +27,13 @@ pub async fn get_editor_snapshot(
     service: State<'_, EditorService>,
 ) -> Result<EditorSnapshot, CommandError> {
     Ok(service.snapshot().await)
+}
+
+#[tauri::command]
+pub async fn find_selected_part_parameters(
+    service: State<'_, EditorService>,
+) -> Result<PartParameterQueryResult, CommandError> {
+    service.find_part_parameters().await
 }
 
 #[tauri::command]

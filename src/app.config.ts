@@ -18,6 +18,12 @@ export const appConfig = {
         label: "批量参数",
         icon: "workflow",
       },
+      {
+        key: "part-parameters",
+        to: "/part-parameters",
+        label: "部件参数",
+        icon: "search",
+      },
     ],
     footerLinks: [{ key: "settings", to: "/settings", label: "设置", icon: "settings" }],
     footerStatus: {

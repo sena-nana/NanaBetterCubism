@@ -15,11 +15,12 @@ Use `confirmed` facts as contracts. Treat `provisional` facts only as research l
 | 5.4 Alpha edit permission | Alpha1 / API `1.1.0` adds a separate Edit permission and `GetIsEditApproval`; editing APIs are available only in Modeling mode. | [5.4 Alpha1 External App Integration](https://cubism.live2d.com/editor-alpha/doc/manual/alpha1/en/external-api-intergration/index.html) |
 | 5.4 Alpha transactions | `EditBegin` is required before editing APIs; `EditEnd` commits or cancels, and a confirmed cancel restores the pre-edit state. `EditSendProgress` and `NotifyUndoCancel` expose real progress and Editor-side cancellation. | [5.4 Alpha1 External App Integration](https://cubism.live2d.com/editor-alpha/doc/manual/alpha1/en/external-api-intergration/index.html) |
 | 5.4 Alpha parameters | API `1.1.0` confirms `GetParameterStructure`, `AddParameterGroup`, `AddParameter`, and `EditParameter`. `AddParameter` supports name, ID, group ID, min/default/max, and blend-shape state; repeat is set through `EditParameter`. | [5.4 Alpha1 External App Integration](https://cubism.live2d.com/editor-alpha/doc/manual/alpha1/en/external-api-intergration/index.html) |
+| 5.4 Alpha Part parameter lookup | API `1.1.0` confirms the read-only chain `GetSelectedObjecs({ModelUID}) -> {Ids}`, `GetPartStructure({ModelUID}) -> {PartStructure: {Name, Id, Type, Children}}`, and `GetParameterKeys({ModelUID, ObjectId}) -> {Parameters: [{Id, KeyValues}]}`. The documented errors are `UnsupportedVersion`, `InvalidData`, `InvalidModel`, and, where listed, `InvalidDocument`; these methods are in the edit API surface used after access/Edit approval in Modeling mode. | [5.4 Alpha1 External App Integration](https://cubism.live2d.com/editor-alpha/doc/manual/alpha1/en/external-api-intergration/index.html) |
 | 5.4 Alpha sample | The official Alpha sample sends version `1.1.0`, waits for access and Edit permission, wraps mutations in `EditBegin` / `EditEnd`, and correlates requests by ID. | [Live2D GARAGE EditSample](https://github.com/Live2D-Garage/CubismExternalAppPluginSamples/tree/54alpha/04_EditSample) |
 
 ## Provisional 5.4 Alpha / API 1.1.0 Leads
 
-- Parameter keys, object associations, selection, Parts, hierarchy, Deformers, and supported display properties beyond the confirmed parameter workflow above.
+- Selection mutation, object mutation, hierarchy mutation, Deformer editing, and supported display properties beyond the confirmed read-only Part lookup above.
 
 Promote a lead only after recording the official source, Editor build, API version, exact schema, mode, errors, and preferably a real-Editor observation.
 

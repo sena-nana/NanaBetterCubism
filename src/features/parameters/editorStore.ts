@@ -27,7 +27,7 @@ const defaultSnapshot: EditorSnapshot = {
   apiVersion: null,
   modelLabel: null,
   groups: [],
-  capabilities: { batchCreateParameters: false },
+  capabilities: { batchCreateParameters: false, findPartParameters: false },
   message: "尚未连接 Cubism Editor。",
 };
 
@@ -46,6 +46,9 @@ let initializePromise: Promise<void> | null = null;
 export function useEditorStore() {
   const canCreate = computed(
     () => state.snapshot.state === "ready" && state.snapshot.capabilities.batchCreateParameters,
+  );
+  const canFindPartParameters = computed(
+    () => state.snapshot.state === "ready" && state.snapshot.capabilities.findPartParameters,
   );
   const operationActive = computed(() => Boolean(state.activeOperationId));
 
@@ -152,6 +155,7 @@ export function useEditorStore() {
   return {
     state,
     canCreate,
+    canFindPartParameters,
     operationActive,
     initialize,
     connect,

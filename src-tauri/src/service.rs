@@ -1,17 +1,18 @@
 mod commands;
 mod credentials;
 mod model_structure;
+mod part_parameters;
 mod transaction;
 
 pub use commands::{
     cancel_parameter_batch, connect_editor, disconnect_editor, execute_parameter_batch,
-    get_editor_snapshot, preview_parameter_batch,
+    find_selected_part_parameters, get_editor_snapshot, preview_parameter_batch,
 };
 
 use crate::domain::{
     build_preview, BatchFinished, BatchOutcome, BatchPhase, EditorCapabilities,
     EditorConnectionState, EditorSnapshot, ModelStructure, OperationAccepted, ParameterBatchInput,
-    ParameterBatchPreview, StoredPlan, EDIT_API_VERSION,
+    ParameterBatchPreview, PartParameterQueryResult, StoredPlan, EDIT_API_VERSION,
 };
 use crate::protocol::{RpcClient, RpcError};
 use credentials::{load_token, save_token};
@@ -88,6 +89,7 @@ struct ServiceState {
     structure: ModelStructure,
     previews: HashMap<String, StoredPlan>,
     operation: Option<ActiveOperation>,
+    part_query_in_progress: bool,
 }
 
 impl Default for EditorService {
@@ -121,6 +123,7 @@ impl EditorService {
             inner.snapshot.state = state;
             inner.snapshot.message = message.into();
             inner.snapshot.capabilities.batch_create_parameters = capabilities;
+            inner.snapshot.capabilities.find_part_parameters = capabilities;
         }
         self.emit_snapshot(app).await;
     }
@@ -160,12 +163,14 @@ impl EditorService {
                 groups: Vec::new(),
                 capabilities: EditorCapabilities {
                     batch_create_parameters: false,
+                    find_part_parameters: false,
                 },
                 message: "正在连接 Cubism Editor…".into(),
             };
             inner.model_uid = None;
             inner.structure = ModelStructure::default();
             inner.previews.clear();
+            inner.part_query_in_progress = false;
             let previous = inner.rpc.take();
             (inner.connection_request, previous)
         };
@@ -225,6 +230,7 @@ impl EditorService {
                 inner.generation = inner.generation.wrapping_add(1);
                 inner.rpc = Some(rpc.clone());
                 inner.previews.clear();
+                inner.part_query_in_progress = false;
             }
 
             match self.run_session(&app, request, rpc.clone()).await {
@@ -451,7 +457,8 @@ impl EditorService {
                 inner.snapshot.model_label = Some("当前建模模型".into());
                 inner.snapshot.groups = structure.groups.clone();
                 inner.snapshot.capabilities.batch_create_parameters = true;
-                inner.snapshot.message = "已连接，可以校验并创建参数。".into();
+                inner.snapshot.capabilities.find_part_parameters = true;
+                inner.snapshot.message = "已连接，可以查询部件并创建参数。".into();
             }
             self.emit_snapshot(app).await;
             tokio::time::sleep(Duration::from_secs(2)).await;
@@ -489,6 +496,7 @@ impl EditorService {
             inner.model_uid = None;
             inner.structure = ModelStructure::default();
             inner.previews.clear();
+            inner.part_query_in_progress = false;
             inner.snapshot = EditorSnapshot::default();
             inner.rpc.take()
         };
@@ -565,6 +573,71 @@ impl EditorService {
         Ok(preview)
     }
 
+    async fn find_part_parameters(&self) -> Result<PartParameterQueryResult, CommandError> {
+        let (rpc, model_uid, generation, model_label) = {
+            let mut inner = self.inner.lock().await;
+            if inner.operation.is_some() {
+                return Err(CommandError::new(
+                    "operation_active",
+                    "参数事务进行中，暂时不能查询部件关联。",
+                ));
+            }
+            if inner.part_query_in_progress {
+                return Err(CommandError::new(
+                    "query_active",
+                    "已有部件关联查询正在进行。",
+                ));
+            }
+            if inner.snapshot.state != EditorConnectionState::Ready
+                || !inner.snapshot.capabilities.find_part_parameters
+            {
+                return Err(CommandError::new(
+                    "editor_not_ready",
+                    inner.snapshot.message.clone(),
+                ));
+            }
+            let rpc = inner
+                .rpc
+                .clone()
+                .ok_or_else(|| CommandError::new("disconnected", "Editor 连接不可用。"))?;
+            let model_uid = inner
+                .model_uid
+                .clone()
+                .ok_or_else(|| CommandError::new("missing_model", "当前没有可编辑模型。"))?;
+            inner.part_query_in_progress = true;
+            (
+                rpc,
+                model_uid,
+                inner.generation,
+                inner
+                    .snapshot
+                    .model_label
+                    .clone()
+                    .unwrap_or_else(|| "当前建模模型".into()),
+            )
+        };
+
+        let result = part_parameters::find_selected(&rpc, &model_uid, &model_label).await;
+        let current = {
+            let mut inner = self.inner.lock().await;
+            let current = inner.generation == generation
+                && inner.model_uid.as_deref() == Some(&model_uid)
+                && inner.snapshot.state == EditorConnectionState::Ready
+                && inner.operation.is_none();
+            if inner.generation == generation {
+                inner.part_query_in_progress = false;
+            }
+            current
+        };
+        if !current {
+            return Err(CommandError::new(
+                "stale_query",
+                "连接或模型在查询期间发生变化，请重试。",
+            ));
+        }
+        result
+    }
+
     async fn execute_batch(
         &self,
         app: AppHandle,
@@ -576,6 +649,12 @@ impl EditorService {
                 return Err(CommandError::new(
                     "operation_active",
                     "已有参数事务正在执行。",
+                ));
+            }
+            if inner.part_query_in_progress {
+                return Err(CommandError::new(
+                    "query_active",
+                    "部件关联查询进行中，请等待查询结束后再创建参数。",
                 ));
             }
             let plan = inner
@@ -603,6 +682,7 @@ impl EditorService {
             });
             inner.snapshot.state = EditorConnectionState::Editing;
             inner.snapshot.capabilities.batch_create_parameters = false;
+            inner.snapshot.capabilities.find_part_parameters = false;
             inner.snapshot.message = format!("正在创建 {} 个参数…", plan.rows.len());
             (operation_id, plan, rpc, cancel)
         };
@@ -1042,6 +1122,7 @@ impl EditorService {
                 EditorConnectionState::Failed
             };
             inner.snapshot.capabilities.batch_create_parameters = safe_to_continue;
+            inner.snapshot.capabilities.find_part_parameters = safe_to_continue;
             inner.snapshot.message = message.clone();
         }
         let finished = BatchFinished {

@@ -44,7 +44,7 @@ pub(super) async fn mutation_request(
     tokio::pin!(request);
     loop {
         tokio::select! {
-            response = &mut request => return response.map_err(ExecutionError::Rpc),
+            biased;
             event = events.recv() => {
                 match event {
                     Ok(event) if event.method == "NotifyUndoCancel" => {
@@ -61,6 +61,7 @@ pub(super) async fn mutation_request(
                     _ => {}
                 }
             }
+            response = &mut request => return response.map_err(ExecutionError::Rpc),
         }
     }
 }

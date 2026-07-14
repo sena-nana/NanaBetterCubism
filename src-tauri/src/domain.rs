@@ -23,6 +23,7 @@ pub enum EditorConnectionState {
 #[serde(rename_all = "camelCase")]
 pub struct EditorCapabilities {
     pub batch_create_parameters: bool,
+    pub find_part_parameters: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -54,6 +55,7 @@ impl Default for EditorSnapshot {
             groups: Vec::new(),
             capabilities: EditorCapabilities {
                 batch_create_parameters: false,
+                find_part_parameters: false,
             },
             message: "尚未连接 Cubism Editor。".into(),
         }
@@ -225,6 +227,43 @@ pub struct ExistingParameter {
 pub struct ModelStructure {
     pub groups: Vec<ParameterGroupSummary>,
     pub parameters: Vec<ExistingParameter>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase")]
+pub struct PartSelectionSummary {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PartAssociatedObject {
+    pub id: String,
+    pub name: String,
+    pub object_type: String,
+    pub key_values: Vec<f64>,
+    pub source_part_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PartAssociatedParameter {
+    pub id: String,
+    pub name: String,
+    pub group: Option<ParameterGroupSummary>,
+    pub key_values: Vec<f64>,
+    pub objects: Vec<PartAssociatedObject>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PartParameterQueryResult {
+    pub model_label: String,
+    pub selected_parts: Vec<PartSelectionSummary>,
+    pub ignored_selection_count: usize,
+    pub scanned_object_count: usize,
+    pub parameters: Vec<PartAssociatedParameter>,
 }
 
 impl ModelStructure {
@@ -703,6 +742,7 @@ mod tests {
         let value = serde_json::to_value(EditorSnapshot::default()).unwrap();
         assert_eq!(value["state"], "disconnected");
         assert_eq!(value["capabilities"]["batchCreateParameters"], false);
+        assert_eq!(value["capabilities"]["findPartParameters"], false);
         assert!(value.get("modelUid").is_none());
         assert!(value.get("documentUid").is_none());
         assert!(value.get("token").is_none());

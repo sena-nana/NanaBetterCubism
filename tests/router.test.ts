@@ -50,6 +50,15 @@ describe("基础路由", () => {
     expect(status).toHaveAttribute("title", APP_SHELL_COPY.statusTitle);
   });
 
+  it("提供独立的部件参数查询页面和侧边栏入口", async () => {
+    await renderAt("/part-parameters");
+
+    expect(await screen.findByRole("heading", { level: 1, name: "部件关联参数" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "部件参数" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查找关联参数" })).toBeDisabled();
+    expect(screen.getByText("尚未查询")).toBeInTheDocument();
+  });
+
   it("设置页默认显示外观设置并使用设置侧栏", async () => {
     await renderAt("/settings");
 

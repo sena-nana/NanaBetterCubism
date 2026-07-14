@@ -20,7 +20,10 @@ export interface EditorSnapshot {
   apiVersion: string | null;
   modelLabel: string | null;
   groups: ParameterGroupSummary[];
-  capabilities: { batchCreateParameters: boolean };
+  capabilities: {
+    batchCreateParameters: boolean;
+    findPartParameters: boolean;
+  };
   message: string;
 }
 
