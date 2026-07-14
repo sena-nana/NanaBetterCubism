@@ -101,7 +101,7 @@ impl Default for EditorService {
 }
 
 impl EditorService {
-    async fn snapshot(&self) -> EditorSnapshot {
+    pub(crate) async fn snapshot(&self) -> EditorSnapshot {
         self.inner.lock().await.snapshot.clone()
     }
 
@@ -133,7 +133,7 @@ impl EditorService {
         inner.desired_connected && inner.connection_request == request
     }
 
-    async fn start_connection(
+    pub(crate) async fn start_connection(
         &self,
         app: AppHandle,
         port: u16,
@@ -481,7 +481,7 @@ impl EditorService {
         }
     }
 
-    async fn disconnect(&self, app: &AppHandle) -> Result<(), CommandError> {
+    pub(crate) async fn disconnect(&self, app: &AppHandle) -> Result<(), CommandError> {
         let rpc = {
             let mut inner = self.inner.lock().await;
             if inner.operation.is_some() {
@@ -507,7 +507,7 @@ impl EditorService {
         Ok(())
     }
 
-    async fn preview_batch(
+    pub(crate) async fn preview_batch(
         &self,
         input: ParameterBatchInput,
     ) -> Result<ParameterBatchPreview, CommandError> {
@@ -573,7 +573,7 @@ impl EditorService {
         Ok(preview)
     }
 
-    async fn find_part_parameters(&self) -> Result<PartParameterQueryResult, CommandError> {
+    pub(crate) async fn find_part_parameters(&self) -> Result<PartParameterQueryResult, CommandError> {
         let (rpc, model_uid, generation, model_label) = {
             let mut inner = self.inner.lock().await;
             if inner.operation.is_some() {
@@ -638,7 +638,7 @@ impl EditorService {
         result
     }
 
-    async fn execute_batch(
+    pub(crate) async fn execute_batch(
         &self,
         app: AppHandle,
         preview_id: String,
@@ -699,7 +699,7 @@ impl EditorService {
         Ok(accepted)
     }
 
-    async fn cancel_batch(&self, app: &AppHandle, operation_id: &str) -> Result<(), CommandError> {
+    pub(crate) async fn cancel_batch(&self, app: &AppHandle, operation_id: &str) -> Result<(), CommandError> {
         {
             let mut inner = self.inner.lock().await;
             let operation = inner
