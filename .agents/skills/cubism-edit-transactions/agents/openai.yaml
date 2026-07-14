@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cubism Edit Transactions"
+  short_description: "Guard cancellable Cubism Editor modeling edits"
+  default_prompt: "Use $cubism-edit-transactions to design a safe cancellable modeling edit."

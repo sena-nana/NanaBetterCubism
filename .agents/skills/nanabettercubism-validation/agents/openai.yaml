@@ -1,0 +1,4 @@
+interface:
+  display_name: "NanaBetterCubism Validation"
+  short_description: "Validate protocol app contracts and Editor flows"
+  default_prompt: "Use $nanabettercubism-validation to verify a Cubism Editor feature end to end."

@@ -30,4 +30,4 @@ description: Git workflow for final Lilia desktop application changes. Use when 
 ## Dependency Updates
 
 - Keep dependency update commits dependency-only unless the user asked for extra work.
-- After changing LiliaUI dependencies or lockfiles, include the validation required by `$lilia-app-validation`.
+- After changing LiliaUI dependencies or lockfiles, include the validation required by `$nanabettercubism-validation`.

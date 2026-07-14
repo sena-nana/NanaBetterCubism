@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cubism Model Editing"
+  short_description: "Plan supported Cubism model structure operations"
+  default_prompt: "Use $cubism-model-editing to plan supported model structure changes."
