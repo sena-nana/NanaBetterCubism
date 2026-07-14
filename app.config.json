@@ -1,0 +1,15 @@
+{
+  "appName": "tauri-template",
+  "productTitle": "Tauri Template",
+  "version": "0.1.0",
+  "identifier": "com.tauritemplate.desktop",
+  "storageKeyPrefix": "tauri-template",
+  "shell": {
+    "homeTitle": "Tauri 应用模板",
+    "homeDescription": "应用已准备就绪。",
+    "workspaceSectionTitle": "导航",
+    "statusLabel": "Ready",
+    "statusTitle": "模板状态正常。点击进入设置。",
+    "settingsDescription": "偏好设置会保存到本地。"
+  }
+}
