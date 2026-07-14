@@ -13,19 +13,19 @@ export const appConfig = {
   sidebar: {
     nav: [
       {
-        key: "overview",
+        key: "parameters",
         to: "/",
-        label: "首页",
-        icon: "home",
+        label: "批量参数",
+        icon: "workflow",
       },
     ],
     footerLinks: [{ key: "settings", to: "/settings", label: "设置", icon: "settings" }],
     footerStatus: {
-      to: "/settings",
+      to: "/",
       label: appConfigJson.shell.statusLabel,
       title: appConfigJson.shell.statusTitle,
-      tone: "ok",
-      icon: "sparkles",
+      tone: "warn",
+      icon: "server",
     },
   },
 } satisfies LiliaAppConfig;

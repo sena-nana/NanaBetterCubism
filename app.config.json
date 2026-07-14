@@ -1,15 +1,17 @@
 {
-  "appName": "tauri-template",
-  "productTitle": "Tauri Template",
+  "appName": "nanabettercubism",
+  "productTitle": "NanaBetterCubism",
   "version": "0.1.0",
-  "identifier": "com.tauritemplate.desktop",
-  "storageKeyPrefix": "tauri-template",
+  "identifier": "com.senanana.nanabettercubism",
+  "storageKeyPrefix": "nanabettercubism",
   "shell": {
-    "homeTitle": "Tauri 应用模板",
-    "homeDescription": "应用已准备就绪。",
-    "workspaceSectionTitle": "导航",
-    "statusLabel": "Ready",
-    "statusTitle": "模板状态正常。点击进入设置。",
-    "settingsDescription": "偏好设置会保存到本地。"
+    "homeTitle": "批量生成参数",
+    "homeDescription": "为当前 Cubism 模型生成统一、可复用的参数 ID。",
+    "workspaceSectionTitle": "建模工具",
+    "workspaceName": "参数工作区",
+    "workspaceEmptyText": "连接 Cubism Editor 后开始。",
+    "statusLabel": "未连接",
+    "statusTitle": "点击返回参数工作区并连接 Cubism Editor。",
+    "settingsDescription": "外观与应用偏好会保存在本地。"
   }
 }

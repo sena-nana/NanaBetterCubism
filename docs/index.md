@@ -1,12 +1,7 @@
-# 桌面应用脚手架
+# NanaBetterCubism
 
-本仓库是最小 Tauri + Vue 应用脚手架。公共 UI、配置、工具、构建流程和 Tauri 窗口状态插件来自 LiliaUI，应用代码从 `src/features`、`src/routes.ts` 和 `src/commands.ts` 开始扩展。
+NanaBetterCubism 通过 Cubism Editor 5.4 Alpha1 External API 1.1.0 批量创建具有统一自定义 ID 的参数。
 
-## 开始
+工作区提供 Editor 连接状态、ID 命名预设、TSV/CSV 导入、逐行属性覆盖、当前模型校验、事务进度与取消。版本、模式、模型或编辑权限不满足要求时，连接会保留并展示真实不可用原因，创建操作保持禁用。
 
-```bash
-yarn install
-yarn dev
-```
-
-更多命令见[开发启动](./guide/development.md)。
+参见[开发与验证](./guide/development.md)。

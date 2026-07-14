@@ -4,7 +4,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Tauri Template",
+        "title": "NanaBetterCubism",
         "width": 1200,
         "height": 800,
         "minWidth": 960,
@@ -19,7 +19,7 @@
       }
     ]
   },
-  "productName": "Tauri Template",
+  "productName": "NanaBetterCubism",
   "version": "0.1.0",
-  "identifier": "com.tauritemplate.desktop"
+  "identifier": "com.senanana.nanabettercubism"
 }

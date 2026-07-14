@@ -34,7 +34,8 @@ pnpm-debug.log*
 
 # Node / frontend
 node_modules/
-yarn.lock
+# Keep the application lockfile so Yarn treats this directory as its own project.
+!yarn.lock
 .npm/
 .yarn/*
 !.yarn/patches
@@ -65,7 +66,12 @@ src-tauri/gen/schemas/
 
 # Generated Lilia default assets
 public/fonts/
-src-tauri/icons/
+src-tauri/icons/*
+!src-tauri/icons/32x32.png
+!src-tauri/icons/128x128.png
+!src-tauri/icons/128x128@2x.png
+!src-tauri/icons/icon.png
+!src-tauri/icons/icon.ico
 
 # Databases
 *.sqlite

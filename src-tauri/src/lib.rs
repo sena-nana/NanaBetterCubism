@@ -1,8 +1,26 @@
+mod domain;
+mod protocol;
+mod service;
+
+use service::{
+    cancel_parameter_batch, connect_editor, disconnect_editor, execute_parameter_batch,
+    get_editor_snapshot, preview_parameter_batch, EditorService,
+};
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(EditorService::default())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_lilia::init())
+        .invoke_handler(tauri::generate_handler![
+            connect_editor,
+            disconnect_editor,
+            get_editor_snapshot,
+            preview_parameter_batch,
+            execute_parameter_batch,
+            cancel_parameter_batch,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
