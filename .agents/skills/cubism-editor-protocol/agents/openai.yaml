@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cubism Editor Protocol"
+  short_description: "Guide Cubism Editor protocol and session handling"
+  default_prompt: "Use $cubism-editor-protocol to design a version-safe Cubism Editor connection."

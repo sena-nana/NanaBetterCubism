@@ -1,0 +1,4 @@
+interface:
+  display_name: "NanaBetterCubism App"
+  short_description: "Build NanaBetterCubism across Vue and Tauri"
+  default_prompt: "Use $nanabettercubism-app to implement a typed Cubism Editor workflow."
