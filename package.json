@@ -1,0 +1,36 @@
+{
+  "name": "tauri-template",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "sync:app-config": "lilia-tools sync-app-config",
+    "version:bump": "lilia-tools version-bump",
+    "agent:debug": "node scripts/agent-debug.mjs",
+    "check:package-manager": "lilia-tools check-package-manager",
+    "dev": "lilia-build dev",
+    "build": "lilia-build build",
+    "pretest": "lilia-build prepare",
+    "test": "lilia-build test",
+    "docs:dev": "lilia-build docs dev",
+    "docs:build": "lilia-build docs build",
+    "docs:preview": "lilia-build docs preview",
+    "preview": "lilia-build preview",
+    "tauri": "lilia-build tauri",
+    "tauri:dev": "lilia-build tauri-dev",
+    "tauri:build": "lilia-build tauri-build",
+    "tauri:build:no-bundle": "lilia-build tauri-build --no-bundle",
+    "tauri:install": "lilia-build tauri-install",
+    "liliaui:local": "yarn check:package-manager && node scripts/lilia-ui-deps.mjs local",
+    "liliaui:remote": "yarn check:package-manager && node scripts/lilia-ui-deps.mjs remote",
+    "liliaui:status": "yarn check:package-manager && node scripts/lilia-ui-deps.mjs status",
+    "verify": "lilia-build verify"
+  },
+  "dependencies": {
+    "@lilia/build": "github:sena-nana/LiliaUI#workspace=@lilia/build&commit=4ac48751d70268a131666667ecd2764eeb273fb6",
+    "@lilia/config": "github:sena-nana/LiliaUI#workspace=@lilia/config&commit=4ac48751d70268a131666667ecd2764eeb273fb6",
+    "@lilia/tools": "github:sena-nana/LiliaUI#workspace=@lilia/tools&commit=4ac48751d70268a131666667ecd2764eeb273fb6",
+    "@lilia/ui": "github:sena-nana/LiliaUI#workspace=@lilia/ui&commit=4ac48751d70268a131666667ecd2764eeb273fb6"
+  },
+  "packageManager": "yarn@4.14.1"
+}

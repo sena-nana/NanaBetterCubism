@@ -1,0 +1,4 @@
+{
+  "extends": "@lilia/config/tsconfig/node.json",
+  "include": ["vite.config.ts", "docs/.vitepress/config.ts"]
+}
