@@ -16,7 +16,7 @@ const fallbackSnapshot: EditorSnapshot = {
   apiVersion: null,
   modelLabel: null,
   groups: [],
-  capabilities: { batchCreateParameters: false },
+  capabilities: { batchCreateParameters: false, findPartParameters: false },
   message: "请在桌面应用中连接 Cubism Editor。",
 };
 
@@ -81,7 +81,7 @@ export function normalizeCommandError(error: unknown): DomainCommandError {
   return domainError("unexpected_error", error instanceof Error ? error.message : String(error));
 }
 
-function domainError(code: string, message: string): DomainCommandError {
+export function domainError(code: string, message: string): DomainCommandError {
   return { code, message };
 }
 

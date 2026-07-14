@@ -2,13 +2,15 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const PARAMETER_PAGE = "src/features/parameters/ParameterBatchPage.vue";
+const PART_PARAMETER_PAGE = "src/features/part-parameters/PartParametersPage.vue";
+const CONNECTION_CARD = "src/features/editor/EditorConnectionCard.vue";
 const PASTE_PANEL = "src/features/parameters/components/ParameterPastePanel.vue";
 const OPERATION_CARD = "src/features/parameters/components/ParameterOperationCard.vue";
 
 const APP_TARGETS = [
   ["parameters.page", PARAMETER_PAGE, "parameters.page"],
-  ["parameters.connection.port", PARAMETER_PAGE, "parameters.connection.port"],
-  ["parameters.connection.connect", PARAMETER_PAGE, "parameters.connection.connect"],
+  ["parameters.connection.port", CONNECTION_CARD, "`${agentIdPrefix}.port`"],
+  ["parameters.connection.connect", CONNECTION_CARD, "`${agentIdPrefix}.connect`"],
   ["parameters.rows.add", PARAMETER_PAGE, "parameters.rows.add"],
   ["parameters.rows.open-paste", PARAMETER_PAGE, "parameters.rows.open-paste"],
   ["parameters.paste.input", PASTE_PANEL, "parameters.paste.input"],
@@ -18,6 +20,10 @@ const APP_TARGETS = [
   ["parameters.preview.execute", PARAMETER_PAGE, "parameters.preview.execute"],
   ["parameters.operation.progress", OPERATION_CARD, "parameters.operation.progress"],
   ["parameters.operation.cancel", OPERATION_CARD, "parameters.operation.cancel"],
+  ["part-parameters.page", PART_PARAMETER_PAGE, "part-parameters.page"],
+  ["part-parameters.query.run", PART_PARAMETER_PAGE, "part-parameters.query.run"],
+  ["part-parameters.parameter.<parameterId>", PART_PARAMETER_PAGE, "part-parameters.parameter.${parameter.id}"],
+  ["part-parameters.parameter.<parameterId>.object.<objectId>", PART_PARAMETER_PAGE, "object.${object.id}"],
 ];
 
 export function adaptAgentDebugReport(value, projectRoot) {
@@ -30,6 +36,7 @@ export function adaptAgentDebugReport(value, projectRoot) {
     .filter((file) => file.path !== "src/features/home/HomePage.vue")
     .concat([
       fileEntry(PARAMETER_PAGE, "batch parameter workspace", existsSync(sourcePath)),
+      fileEntry(PART_PARAMETER_PAGE, "selected Part parameter lookup workspace", existsSync(resolve(projectRoot, PART_PARAMETER_PAGE))),
       fileEntry("src-tauri/src/service.rs", "Cubism Editor session and edit transaction service", existsSync(resolve(projectRoot, "src-tauri/src/service.rs"))),
     ]);
   template.agentTargets = template.agentTargets

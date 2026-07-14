@@ -13,7 +13,7 @@ import {
   UiSwitch,
 } from "@lilia/ui";
 import { computed, defineAsyncComponent, onMounted, reactive, ref, watch } from "vue";
-import { readIntegerStorage } from "../../utils/storage";
+import EditorConnectionCard from "../editor/EditorConnectionCard.vue";
 import { useParameterPresets } from "./composables/useParameterPresets";
 import { useEditorStore } from "./editorStore";
 import {
@@ -29,13 +29,11 @@ import type {
   ParameterInputRow,
 } from "./types";
 
-const PORT_STORAGE_KEY = "nanabettercubism.editor-port";
 const ParameterPastePanel = defineAsyncComponent(() => import("./components/ParameterPastePanel.vue"));
 const ParameterRowOverrides = defineAsyncComponent(() => import("./components/ParameterRowOverrides.vue"));
 const ParameterOperationCard = defineAsyncComponent(() => import("./components/ParameterOperationCard.vue"));
 
 const editor = useEditorStore();
-const port = ref(readIntegerStorage(PORT_STORAGE_KEY, 22033, 1, 65535));
 const {
   idTemplate,
   selectedPresetId,
@@ -112,13 +110,6 @@ watch(
 onMounted(() => {
   void editor.initialize();
 });
-
-async function connect() {
-  const value = Number(port.value);
-  if (!Number.isInteger(value) || value < 1 || value > 65535) return;
-  localStorage.setItem(PORT_STORAGE_KEY, String(value));
-  await editor.connect(value);
-}
 
 function addRow() {
   if (rows.value.length >= 200) return;
@@ -202,45 +193,13 @@ function isBlankRow(row: ParameterInputRow) {
       </div>
     </div>
 
-    <UiCard title="Editor 连接" agent-id="parameters.connection">
-      <div class="connection-row">
-        <div class="field field--port">
-          <label for="editor-port">本机端口</label>
-          <UiInput id="editor-port" v-model="port" type="number" agent-id="parameters.connection.port" />
-        </div>
-        <UiButton
-          v-if="editor.state.snapshot.state === 'disconnected' || editor.state.snapshot.state === 'failed'"
-          variant="primary"
-          :busy="editor.state.busy"
-          agent-id="parameters.connection.connect"
-          @click="connect"
-        >
-          连接 Editor
-        </UiButton>
-        <UiButton
-          v-else
-          :disabled="editor.operationActive.value"
-          agent-id="parameters.connection.disconnect"
-          @click="editor.disconnect"
-        >
-          断开
-        </UiButton>
-        <div class="connection-meta">
-          <span>地址 127.0.0.1</span>
-          <span>API {{ editor.state.snapshot.apiVersion ?? "-" }}</span>
-          <span>{{ editor.state.snapshot.modelLabel ?? "未选择模型" }}</span>
-        </div>
-      </div>
-      <p v-if="editor.state.error" class="message message--error" role="alert">
-        {{ editor.state.error.message }}
-      </p>
-      <p
-        v-else-if="editor.state.snapshot.state === 'awaiting_access' || editor.state.snapshot.state === 'awaiting_edit_permission'"
-        class="message message--warning"
-      >
-        保持此页面打开，在 Cubism Editor 的“外部应用联动设置”中完成授权。
-      </p>
-    </UiCard>
+    <EditorConnectionCard
+      agent-id-prefix="parameters.connection"
+      :disconnect-disabled="editor.operationActive.value"
+    />
+    <p v-if="editor.state.error" class="message message--error" role="alert">
+      {{ editor.state.error.message }}
+    </p>
 
     <div class="config-grid">
       <UiCard title="ID 格式" agent-id="parameters.id-format">
@@ -470,8 +429,6 @@ function isBlankRow(row: ParameterInputRow) {
 .connection-state.is-editing .connection-state__dot,
 .connection-state.is-cancelling .connection-state__dot,
 .connection-state.is-incompatible .connection-state__dot { background: var(--warn); }
-.connection-row { display: flex; align-items: flex-end; gap: 8px; }
-.connection-meta { display: flex; gap: 12px; margin-left: auto; padding-bottom: 7px; color: var(--text-faint); font-size: 11px; }
 .config-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.65fr); gap: 12px; align-items: start; }
 .preset-row, .toolbar, .switch-row, .preview-actions { display: flex; align-items: center; gap: 8px; }
 .preset-row { margin-bottom: 12px; }
@@ -480,7 +437,6 @@ function isBlankRow(row: ParameterInputRow) {
 .field-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; }
 .field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .field--wide { grid-column: span 2; }
-.field--port { width: 130px; }
 .field label, .override-row label > span { color: var(--text-muted); font-size: 11px; font-weight: 600; }
 .hint { margin: 8px 0 0; color: var(--text-faint); font-size: 11px; }
 .switch-row { margin-top: 12px; }
@@ -508,7 +464,6 @@ function isBlankRow(row: ParameterInputRow) {
 .message--success { color: var(--ok); }
 @media (max-width: 1050px) {
   .config-grid { grid-template-columns: 1fr; }
-  .connection-meta { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }

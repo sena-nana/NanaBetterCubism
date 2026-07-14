@@ -4,7 +4,7 @@ mod service;
 
 use service::{
     cancel_parameter_batch, connect_editor, disconnect_editor, execute_parameter_batch,
-    get_editor_snapshot, preview_parameter_batch, EditorService,
+    find_selected_part_parameters, get_editor_snapshot, preview_parameter_batch, EditorService,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -17,6 +17,7 @@ pub fn run() {
             connect_editor,
             disconnect_editor,
             get_editor_snapshot,
+            find_selected_part_parameters,
             preview_parameter_batch,
             execute_parameter_batch,
             cancel_parameter_batch,
