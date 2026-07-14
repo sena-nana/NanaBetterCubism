@@ -13,25 +13,48 @@ export const appConfig = {
   sidebar: {
     nav: [
       {
-        key: "parameters",
-        to: "/",
-        label: "批量参数",
-        icon: "workflow",
+        key: "memory",
+        to: "/memory",
+        label: "记忆",
+        icon: "brain",
       },
+    ],
+    groups: [
       {
-        key: "part-parameters",
-        to: "/part-parameters",
-        label: "部件参数",
-        icon: "search",
+        key: "conversations",
+        title: "对话",
+        emptyText: "暂无对话",
+        items: [],
+      },
+    ],
+    globalActions: [
+      {
+        key: "new-chat",
+        label: "新对话",
+        icon: "file-plus",
       },
     ],
     footerLinks: [{ key: "settings", to: "/settings", label: "设置", icon: "settings" }],
     footerStatus: {
-      to: "/",
+      to: "/settings?tab=editor",
       label: appConfigJson.shell.statusLabel,
       title: appConfigJson.shell.statusTitle,
       tone: "warn",
       icon: "server",
+    },
+  },
+  settings: {
+    defaultTab: "llm",
+    hideHeader: true,
+    tabs: [
+      { key: "llm", label: "模型", icon: "sparkles" },
+      { key: "editor", label: "Editor", icon: "server" },
+      { key: "appearance", label: "外观", icon: "palette" },
+      { key: "about", label: "关于", icon: "info" },
+    ],
+    sections: {
+      llm: () => import("./features/agent/settings/LlmSettingsSection.vue"),
+      editor: () => import("./features/agent/settings/EditorSettingsSection.vue"),
     },
   },
 } satisfies LiliaAppConfig;

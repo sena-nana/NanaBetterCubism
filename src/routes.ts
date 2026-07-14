@@ -1,15 +1,21 @@
 import { LiliaSettingsPage } from "@lilia/ui";
 import type { RouteRecordRaw } from "vue-router";
 
-const ParameterBatchPage = () => import("./features/parameters/ParameterBatchPage.vue");
-const PartParametersPage = () => import("./features/part-parameters/PartParametersPage.vue");
+const ChatHomePage = () => import("./features/agent/ChatHomePage.vue");
+const ChatPage = () => import("./features/agent/ChatPage.vue");
+const MemoryPage = () => import("./features/agent/MemoryPage.vue");
 
 export const routes: RouteRecordRaw[] = [
-  { path: "", component: ParameterBatchPage, meta: { sidebar: "main", returnable: true } },
+  { path: "", component: ChatHomePage, meta: { sidebar: "main", returnable: true } },
   {
-    path: "part-parameters",
-    component: PartParametersPage,
-    meta: { sidebar: "part-parameters", returnable: true },
+    path: "chats/:id",
+    component: ChatPage,
+    meta: { sidebar: "main", returnable: true },
+  },
+  {
+    path: "memory",
+    component: MemoryPage,
+    meta: { sidebar: "main", returnable: true },
   },
   {
     path: "settings",

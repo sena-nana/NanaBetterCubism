@@ -1,46 +1,43 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const PARAMETER_PAGE = "src/features/parameters/ParameterBatchPage.vue";
-const PART_PARAMETER_PAGE = "src/features/part-parameters/PartParametersPage.vue";
+const CHAT_HOME = "src/features/agent/ChatHomePage.vue";
+const CHAT_PAGE = "src/features/agent/ChatPage.vue";
+const MEMORY_PAGE = "src/features/agent/MemoryPage.vue";
+const LLM_SETTINGS = "src/features/agent/settings/LlmSettingsSection.vue";
+const EDITOR_SETTINGS = "src/features/agent/settings/EditorSettingsSection.vue";
 const CONNECTION_CARD = "src/features/editor/EditorConnectionCard.vue";
-const PASTE_PANEL = "src/features/parameters/components/ParameterPastePanel.vue";
-const OPERATION_CARD = "src/features/parameters/components/ParameterOperationCard.vue";
 
 const APP_TARGETS = [
-  ["parameters.page", PARAMETER_PAGE, "parameters.page"],
-  ["parameters.connection.port", CONNECTION_CARD, "`${agentIdPrefix}.port`"],
-  ["parameters.connection.connect", CONNECTION_CARD, "`${agentIdPrefix}.connect`"],
-  ["parameters.rows.add", PARAMETER_PAGE, "parameters.rows.add"],
-  ["parameters.rows.open-paste", PARAMETER_PAGE, "parameters.rows.open-paste"],
-  ["parameters.paste.input", PASTE_PANEL, "parameters.paste.input"],
-  ["parameters.paste.import", PASTE_PANEL, "parameters.paste.import"],
-  ["parameters.row.<clientId>", PARAMETER_PAGE, "parameters.row.${row.clientId}"],
-  ["parameters.preview.validate", PARAMETER_PAGE, "parameters.preview.validate"],
-  ["parameters.preview.execute", PARAMETER_PAGE, "parameters.preview.execute"],
-  ["parameters.operation.progress", OPERATION_CARD, "parameters.operation.progress"],
-  ["parameters.operation.cancel", OPERATION_CARD, "parameters.operation.cancel"],
-  ["part-parameters.page", PART_PARAMETER_PAGE, "part-parameters.page"],
-  ["part-parameters.query.run", PART_PARAMETER_PAGE, "part-parameters.query.run"],
-  ["part-parameters.parameter.<parameterId>", PART_PARAMETER_PAGE, "part-parameters.parameter.${parameter.id}"],
-  ["part-parameters.parameter.<parameterId>.object.<objectId>", PART_PARAMETER_PAGE, "object.${object.id}"],
+  ["agent.home", CHAT_HOME, "agent.home"],
+  ["agent.home.new", CHAT_HOME, "agent.home.new"],
+  ["agent.chat", CHAT_PAGE, "agent.chat"],
+  ["agent.chat.send", CHAT_PAGE, "agent.chat.send"],
+  ["agent.chat.input", CHAT_PAGE, "agent.chat.input"],
+  ["agent.chat.ask", CHAT_PAGE, "agent.chat.ask"],
+  ["agent.chat.plan", CHAT_PAGE, "agent.chat.plan"],
+  ["agent.chat.consolidate", CHAT_PAGE, "agent.chat.consolidate"],
+  ["agent.memory", MEMORY_PAGE, "agent.memory"],
+  ["settings.llm", LLM_SETTINGS, "settings.llm"],
+  ["settings.llm.save", LLM_SETTINGS, "settings.llm.save"],
+  ["settings.editor", EDITOR_SETTINGS, "settings.editor"],
+  ["settings.editor.connection.connect", CONNECTION_CARD, "`${agentIdPrefix}.connect`"],
 ];
 
 export function adaptAgentDebugReport(value, projectRoot) {
   const report = structuredClone(value);
-  const sourcePath = resolve(projectRoot, PARAMETER_PAGE);
-  const source = existsSync(sourcePath) ? readFileSync(sourcePath, "utf-8") : "";
   const template = report.template;
 
   template.importantFiles = template.importantFiles
     .filter((file) => file.path !== "src/features/home/HomePage.vue")
     .concat([
-      fileEntry(PARAMETER_PAGE, "batch parameter workspace", existsSync(sourcePath)),
-      fileEntry(PART_PARAMETER_PAGE, "selected Part parameter lookup workspace", existsSync(resolve(projectRoot, PART_PARAMETER_PAGE))),
+      fileEntry(CHAT_PAGE, "agent chat workspace", existsSync(resolve(projectRoot, CHAT_PAGE))),
+      fileEntry(MEMORY_PAGE, "memory workspace", existsSync(resolve(projectRoot, MEMORY_PAGE))),
+      fileEntry("src-tauri/src/agent/mod.rs", "agent runtime module", existsSync(resolve(projectRoot, "src-tauri/src/agent/mod.rs"))),
       fileEntry("src-tauri/src/service.rs", "Cubism Editor session and edit transaction service", existsSync(resolve(projectRoot, "src-tauri/src/service.rs"))),
     ]);
   template.agentTargets = template.agentTargets
-    .filter((target) => !target.id.startsWith("home."))
+    .filter((target) => !target.id.startsWith("home.") && !target.id.startsWith("parameters.") && !target.id.startsWith("part-parameters."))
     .concat(APP_TARGETS.map(([id, path, marker]) => {
       const targetPath = resolve(projectRoot, path);
       const targetSource = existsSync(targetPath) ? readFileSync(targetPath, "utf-8") : "";

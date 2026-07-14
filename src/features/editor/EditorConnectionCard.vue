@@ -2,7 +2,7 @@
 import { UiButton, UiCard, UiInput } from "@lilia/ui";
 import { computed, onMounted, ref } from "vue";
 import { readIntegerStorage } from "../../utils/storage";
-import { useEditorStore } from "../parameters/editorStore";
+import { useEditorStore } from "./editorStore";
 
 const props = withDefaults(
   defineProps<{
@@ -73,19 +73,17 @@ async function connect() {
     >
       保持此页面打开，在 Cubism Editor 的“外部应用联动设置”中完成授权。
     </p>
+    <p v-else class="message">{{ editor.state.snapshot.message }}</p>
   </UiCard>
 </template>
 
 <style scoped>
-.connection-row { display: flex; align-items: flex-end; gap: 8px; }
+.connection-row { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
 .connection-meta { display: flex; gap: 12px; margin-left: auto; padding-bottom: 7px; color: var(--text-faint); font-size: 11px; }
 .field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .field--port { width: 130px; }
 .field label { color: var(--text-muted); font-size: 11px; font-weight: 600; }
-.message { margin: 8px 0 0; font-size: 12px; }
+.message { margin: 8px 0 0; font-size: 12px; color: var(--text-muted); }
 .message--error { color: var(--err); }
 .message--warning { color: var(--warn); }
-@media (max-width: 1050px) {
-  .connection-meta { display: none; }
-}
 </style>

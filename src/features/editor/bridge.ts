@@ -1,14 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import type {
-  BatchFinished,
-  BatchProgress,
-  DomainCommandError,
-  EditorSnapshot,
-  OperationAccepted,
-  ParameterBatchInput,
-  ParameterBatchPreview,
-} from "./types";
+import type { DomainCommandError, EditorSnapshot } from "./types";
 
 const fallbackSnapshot: EditorSnapshot = {
   state: "disconnected",
@@ -39,36 +31,9 @@ export async function disconnectEditor(): Promise<void> {
   await invoke("disconnect_editor");
 }
 
-export async function previewParameterBatch(
-  input: ParameterBatchInput,
-): Promise<ParameterBatchPreview> {
-  if (!isTauriRuntime()) throw domainError("desktop_required", "请先在桌面应用中连接 Editor。");
-  return invoke<ParameterBatchPreview>("preview_parameter_batch", { input });
-}
-
-export async function executeParameterBatch(previewId: string): Promise<OperationAccepted> {
-  if (!isTauriRuntime()) throw domainError("desktop_required", "请先在桌面应用中连接 Editor。");
-  return invoke<OperationAccepted>("execute_parameter_batch", { previewId });
-}
-
-export async function cancelParameterBatch(operationId: string): Promise<void> {
-  if (!isTauriRuntime()) return;
-  await invoke("cancel_parameter_batch", { operationId });
-}
-
 export async function listenEditorState(handler: (snapshot: EditorSnapshot) => void) {
   if (!isTauriRuntime()) return noopUnlisten;
   return listen<EditorSnapshot>("cubism://editor-state", (event) => handler(event.payload));
-}
-
-export async function listenBatchProgress(handler: (progress: BatchProgress) => void) {
-  if (!isTauriRuntime()) return noopUnlisten;
-  return listen<BatchProgress>("cubism://parameter-batch-progress", (event) => handler(event.payload));
-}
-
-export async function listenBatchFinished(handler: (finished: BatchFinished) => void) {
-  if (!isTauriRuntime()) return noopUnlisten;
-  return listen<BatchFinished>("cubism://parameter-batch-finished", (event) => handler(event.payload));
 }
 
 export function normalizeCommandError(error: unknown): DomainCommandError {

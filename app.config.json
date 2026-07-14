@@ -5,13 +5,13 @@
   "identifier": "com.senanana.nanabettercubism",
   "storageKeyPrefix": "nanabettercubism",
   "shell": {
-    "homeTitle": "批量生成参数",
-    "homeDescription": "为当前 Cubism 模型生成统一、可复用的参数 ID。",
-    "workspaceSectionTitle": "建模工具",
-    "workspaceName": "参数工作区",
-    "workspaceEmptyText": "连接 Cubism Editor 后开始。",
+    "homeTitle": "Cubism Agent",
+    "homeDescription": "通过对话驱动 Cubism Editor 建模辅助。",
+    "workspaceSectionTitle": "工作区",
+    "workspaceName": "Agent 工作区",
+    "workspaceEmptyText": "创建对话后开始。",
     "statusLabel": "未连接",
-    "statusTitle": "点击返回参数工作区并连接 Cubism Editor。",
-    "settingsDescription": "外观与应用偏好会保存在本地。"
+    "statusTitle": "在设置中连接 Cubism Editor。",
+    "settingsDescription": "模型、Editor 与外观偏好会保存在本地。"
   }
 }
