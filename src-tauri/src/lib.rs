@@ -4,12 +4,11 @@ mod protocol;
 mod service;
 
 use agent::{
-    agent_answer_ask, agent_cancel_turn, agent_consolidate_memory,
-    agent_create_conversation, agent_delete_conversation, agent_get_messages,
-    agent_get_pending_ask, agent_get_plan, agent_list_conversations, agent_list_projects,
+    agent_answer_question, agent_cancel_turn, agent_consolidate_memory, agent_create_conversation,
+    agent_decide_computer_operation, agent_delete_conversation, agent_get_messages,
+    agent_get_pending_user_action, agent_get_plan, agent_list_conversations, agent_list_projects,
     agent_send_message, agent_set_conversation_pinned, llm_get_config, llm_set_config,
-    llm_test_connection, memory_list, memory_set_enabled, memory_upsert, AgentRuntime,
-    AgentStore,
+    llm_test_connection, memory_list, memory_set_enabled, memory_upsert, AgentRuntime, AgentStore,
 };
 use service::{
     cancel_parameter_batch, connect_editor, disconnect_editor, execute_parameter_batch,
@@ -35,7 +34,17 @@ pub fn run() {
             store
                 .open(dir.join("agent.db"))
                 .map_err(|e| Box::<dyn std::error::Error>::from(e.message))?;
-            app.manage(Arc::new(AgentRuntime::new(store)));
+            store
+                .clear_unresumable_pending_user_actions()
+                .map_err(|e| Box::<dyn std::error::Error>::from(e.message))?;
+            if let Some(cache_dir) = store.cache_dir() {
+                let computer_cache = cache_dir.join("computer-operation");
+                if computer_cache.exists() {
+                    std::fs::remove_dir_all(computer_cache)?;
+                }
+            }
+            let coordinator = app.state::<EditorService>().operation_coordinator();
+            app.manage(Arc::new(AgentRuntime::new(store, coordinator)));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -56,9 +65,10 @@ pub fn run() {
             agent_get_messages,
             agent_send_message,
             agent_cancel_turn,
-            agent_answer_ask,
+            agent_answer_question,
+            agent_decide_computer_operation,
             agent_get_plan,
-            agent_get_pending_ask,
+            agent_get_pending_user_action,
             agent_list_projects,
             memory_list,
             memory_upsert,

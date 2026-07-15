@@ -4,19 +4,21 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useEditorStore } from "../editor/editorStore";
 import {
-  answerAsk,
+  answerQuestion,
   cancelTurn,
   consolidateMemory,
+  decideComputerOperation,
   getLlmConfig,
   getMessages,
-  getPendingAsk,
+  getPendingUserAction,
   getPlan,
   listConversations,
-  listenAsk,
+  listenComputerOperation,
   listenPlan,
   listenToolEvent,
   listenTurnDelta,
   listenTurnFinished,
+  listenUserAction,
   normalizeCommandError,
   sendMessage,
 } from "./bridge";
@@ -38,7 +40,8 @@ import type {
   ConversationPlan,
   ConversationSummary,
   LlmConfigView,
-  PendingAsk,
+  ComputerOperationStatus,
+  PendingUserAction,
 } from "./types";
 
 const route = useRoute();
@@ -50,7 +53,8 @@ const turn = useConversationTurn(() => conversationId.value);
 const messages = ref<ChatMessage[]>([]);
 const conversation = ref<ConversationSummary | null>(null);
 const plan = ref<ConversationPlan | null>(null);
-const pendingAsk = ref<PendingAsk | null>(null);
+const pendingAction = ref<PendingUserAction | null>(null);
+const computerStatus = ref<ComputerOperationStatus>("idle");
 const draft = ref("");
 const askAnswer = ref("");
 const loading = ref(true);
@@ -68,7 +72,7 @@ const canSend = computed(
     Boolean(draft.value.trim()) &&
     llm.value.hasApiKey &&
     !turn.blocked.value &&
-    !pendingAsk.value,
+    !pendingAction.value,
 );
 
 const currentProjectName = computed(() => conversation.value?.projectName?.trim() || "收集箱");
@@ -87,6 +91,7 @@ onUnmounted(() => {
 });
 
 watch(conversationId, () => {
+  computerStatus.value = "idle";
   void reloadConversation();
 });
 
@@ -105,10 +110,15 @@ async function installListeners() {
       if (!payload.ok) error.value = payload.message;
       await reloadConversation({ preserveError: !payload.ok });
     }),
-    listenAsk((payload) => {
+    listenUserAction((payload) => {
       if (payload.conversationId !== conversationId.value) return;
-      pendingAsk.value = payload.ask;
+      pendingAction.value = payload.action;
       askAnswer.value = "";
+      setConversationTurnPhase(payload.conversationId, "awaiting_input");
+    }),
+    listenComputerOperation((payload) => {
+      if (payload.conversationId !== conversationId.value) return;
+      computerStatus.value = payload.status;
     }),
     listenPlan((payload) => {
       if (payload.conversationId !== conversationId.value) return;
@@ -129,22 +139,25 @@ async function reloadConversation(options: { preserveError?: boolean } = {}) {
   loading.value = true;
   if (!options.preserveError) error.value = null;
   try {
-    const [nextMessages, nextPlan, nextAsk, conversations, nextLlm] =
+    const [nextMessages, nextPlan, nextAction, conversations, nextLlm] =
       await Promise.all([
         getMessages(id),
         getPlan(id),
-        getPendingAsk(id),
+        getPendingUserAction(id),
         listConversations(),
         getLlmConfig(),
       ]);
     if (disposed || epoch !== loadEpoch || id !== conversationId.value) return;
     messages.value = nextMessages;
     plan.value = nextPlan;
-    pendingAsk.value = nextAsk;
+    pendingAction.value = nextAction;
     llm.value = nextLlm;
     applyConversationGroup(conversations);
     conversation.value = conversations.find((item) => item.id === id) ?? null;
-    if (nextAsk) setConversationTurnPhase(id, "awaiting_input");
+    if (nextAction) {
+      setConversationTurnPhase(id, "awaiting_input");
+      if (nextAction.kind === "computer_approval") computerStatus.value = "awaiting_approval";
+    }
   } catch (err) {
     if (!disposed && epoch === loadEpoch && id === conversationId.value) {
       const normalized = normalizeCommandError(err);
@@ -208,6 +221,7 @@ async function onSend() {
   const optimisticId = `local-${Date.now()}-${localSequence++}`;
   draft.value = "";
   error.value = null;
+  computerStatus.value = "idle";
   messages.value.push({
     id: optimisticId,
     role: "user",
@@ -230,6 +244,9 @@ async function onSend() {
 async function onCancel() {
   const id = conversationId.value;
   if (!id) return;
+  const wasComputerOperation =
+    pendingAction.value?.kind === "computer_approval" ||
+    !["idle", "completed", "cancelled", "failed"].includes(computerStatus.value);
   error.value = null;
   try {
     const result = await cancelTurn(id);
@@ -237,8 +254,9 @@ async function onCancel() {
       setConversationTurnPhase(id, "cancelling");
       return;
     }
-    pendingAsk.value = null;
+    pendingAction.value = null;
     askAnswer.value = "";
+    if (wasComputerOperation) computerStatus.value = "cancelled";
     setConversationTurnPhase(id, "idle");
   } catch (err) {
     error.value = normalizeCommandError(err).message;
@@ -246,17 +264,33 @@ async function onCancel() {
 }
 
 async function onAnswerAsk(answer?: string) {
-  const currentAsk = pendingAsk.value;
+  const currentAsk = pendingAction.value?.kind === "question" ? pendingAction.value : null;
   const value = (answer ?? askAnswer.value).trim();
   if (!currentAsk || !value) return;
   error.value = null;
   try {
-    await answerAsk(currentAsk.askId, value);
-    pendingAsk.value = null;
+    await answerQuestion(currentAsk.actionId, value);
+    pendingAction.value = null;
     askAnswer.value = "";
     setConversationTurnPhase(currentAsk.conversationId, "running");
   } catch (err) {
     setConversationTurnPhase(currentAsk.conversationId, "awaiting_input");
+    error.value = normalizeCommandError(err).message;
+  }
+}
+
+async function onDecideComputerOperation(approved: boolean) {
+  const approval =
+    pendingAction.value?.kind === "computer_approval" ? pendingAction.value : null;
+  if (!approval) return;
+  error.value = null;
+  try {
+    await decideComputerOperation(approval.actionId, approved);
+    pendingAction.value = null;
+    computerStatus.value = approved ? "authorized" : "cancelled";
+    setConversationTurnPhase(approval.conversationId, "running");
+  } catch (err) {
+    setConversationTurnPhase(approval.conversationId, "awaiting_input");
     error.value = normalizeCommandError(err).message;
   }
 }
@@ -318,7 +352,8 @@ function goSettings(tab: string) {
       <ConversationComposer
         v-model="draft"
         v-model:ask-answer="askAnswer"
-        :pending-ask="pendingAsk"
+        :pending-action="pendingAction"
+        :computer-status="computerStatus"
         :disabled="!llm.hasApiKey"
         :running="turn.running.value"
         :cancelling="turn.cancelling.value"
@@ -327,6 +362,7 @@ function goSettings(tab: string) {
         @send="onSend"
         @cancel="onCancel"
         @answer="onAnswerAsk"
+        @decide="onDecideComputerOperation"
       >
         <template #toolbar>
           <span class="composer-toolbar__spacer" />

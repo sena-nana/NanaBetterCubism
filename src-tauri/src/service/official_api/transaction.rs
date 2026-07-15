@@ -10,7 +10,7 @@ use crate::domain::{
 use crate::protocol::RpcClient;
 use crate::service::{
     transaction::{mutation_request, require_execution_true, require_true, ExecutionError},
-    ActiveOperation,
+    ActiveOperation, OperationOwnerKind,
 };
 use serde_json::{json, Value};
 use std::sync::{
@@ -27,7 +27,17 @@ impl EditorService {
         preview_id: String,
         cancel: Arc<AtomicBool>,
     ) -> Result<OperationAccepted, CommandError> {
-        let (operation_id, plan, rpc) = {
+        let operation_id = Uuid::new_v4().simple().to_string();
+        let permit = self
+            .operation_coordinator
+            .try_acquire(OperationOwnerKind::EditorTransaction, &operation_id)
+            .map_err(|_| {
+                CommandError::new(
+                    "operation_active",
+                    "已有 Editor 编辑事务或电脑代理操作正在执行。",
+                )
+            })?;
+        let (plan, rpc) = {
             let mut inner = self.inner.lock().await;
             if inner.operation.is_some() {
                 return Err(CommandError::new(
@@ -52,10 +62,10 @@ impl EditorService {
                 .rpc
                 .clone()
                 .ok_or_else(|| CommandError::new("disconnected", "Editor 连接不可用。"))?;
-            let operation_id = Uuid::new_v4().simple().to_string();
             inner.operation = Some(ActiveOperation {
                 id: operation_id.clone(),
                 cancel: cancel.clone(),
+                _permit: permit,
             });
             inner.editor_edit_results.insert(
                 operation_id.clone(),
@@ -72,7 +82,7 @@ impl EditorService {
             inner.snapshot.capabilities.find_part_parameters = false;
             inner.snapshot.capabilities.official_edit_api = false;
             inner.snapshot.message = format!("正在执行 {}…", plan.method);
-            (operation_id, plan, rpc)
+            (plan, rpc)
         };
         self.emit_snapshot(&app).await;
         let service = self.clone();

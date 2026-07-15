@@ -1,3 +1,4 @@
+use crate::agent::computer_control::ComputerOperationStatus;
 use crate::agent::llm::{
     chat_completions, chat_completions_stream, content_to_text, image_file_to_data_url,
     ToolCallPayload,
@@ -19,6 +20,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 
 const MAX_ACTION_STEPS: usize = 12;
+const MAX_COMPUTER_ACTION_STEPS: usize = 36;
 
 pub async fn run_turn(
     app: AppHandle,
@@ -39,25 +41,25 @@ pub async fn run_turn(
     )
     .await;
 
-    let result = finalize_turn(&runtime, &conversation_id, &cancel, result).await;
+    let result = finalize_turn(&app, &runtime, &conversation_id, &cancel, result).await;
     emit_finished(&app, &conversation_id, &result);
     result.map(|_| ())
 }
 
-pub async fn continue_after_ask(
+pub async fn continue_after_question(
     app: AppHandle,
     runtime: Arc<AgentRuntime>,
-    ask_id: String,
+    action_id: String,
     conversation_id: String,
     answer: String,
     cancel: Arc<AtomicBool>,
 ) -> Result<(), AgentError> {
     let result = async {
-        let (ask, _tool_call_id) = runtime
+        let (question, _tool_call_id) = runtime
             .store
-            .take_pending_ask(&ask_id)?
+            .take_pending_question(&action_id)?
             .ok_or_else(|| AgentError::new("ask_not_found", "没有等待中的提问。"))?;
-        if ask.conversation_id != conversation_id {
+        if question.conversation_id != conversation_id {
             return Err(AgentError::new("ask_not_found", "提问上下文已失效。"));
         }
 
@@ -65,12 +67,12 @@ pub async fn continue_after_ask(
             .pending_continuations
             .lock()
             .await
-            .remove(&ask.ask_id)
+            .remove(&question.action_id)
             .ok_or_else(|| AgentError::new("ask_not_found", "提问上下文已失效。"))?;
 
-        let state = continuation.resume(&answer);
+        let state = continuation.resume(Value::String(answer.clone()));
         runtime.store.append_message(
-            &ask.conversation_id,
+            &question.conversation_id,
             "user",
             &format!("回答：{answer}"),
             None,
@@ -92,29 +94,153 @@ pub async fn continue_after_ask(
     }
     .await;
 
-    let result = finalize_turn(&runtime, &conversation_id, &cancel, result).await;
+    let result = finalize_turn(&app, &runtime, &conversation_id, &cancel, result).await;
+    emit_finished(&app, &conversation_id, &result);
+    result.map(|_| ())
+}
+
+pub async fn continue_after_computer_approval(
+    app: AppHandle,
+    runtime: Arc<AgentRuntime>,
+    action_id: String,
+    conversation_id: String,
+    approved: bool,
+    cancel: Arc<AtomicBool>,
+) -> Result<(), AgentError> {
+    let result = async {
+        let approval = runtime
+            .computer_control
+            .pending_approval(&action_id)
+            .filter(|approval| approval.conversation_id == conversation_id)
+            .ok_or_else(|| AgentError::new("approval_not_found", "电脑代理授权请求已失效。"))?;
+        let decision = runtime.computer_control.decide(&action_id, approved)?;
+        let continuation = runtime
+            .pending_continuations
+            .lock()
+            .await
+            .remove(&action_id)
+            .ok_or_else(|| AgentError::new("approval_not_found", "授权上下文已失效。"))?;
+        let tool_call_id = continuation.tool_call_id.clone();
+        let state = continuation.resume(decision);
+        runtime.store.append_tool_trace(
+            &approval.conversation_id,
+            &tool_call_id,
+            "request_computer_operation",
+            if approved {
+                r#"{"decision":"approved"}"#
+            } else {
+                r#"{"decision":"rejected"}"#
+            },
+            if approved {
+                r#"{"grantCreated":true}"#
+            } else {
+                r#"{"grantCreated":false}"#
+            },
+            if approved { "approved" } else { "rejected" },
+        )?;
+        runtime.store.append_message(
+            &approval.conversation_id,
+            "user",
+            if approved {
+                "已授权本次电脑代理操作。"
+            } else {
+                "已拒绝本次电脑代理操作。"
+            },
+            None,
+            None,
+        )?;
+        let _ = app.emit(
+            "agent://computer-operation",
+            json!({
+                "conversationId": conversation_id,
+                "status": if approved {
+                    ComputerOperationStatus::Authorized
+                } else {
+                    ComputerOperationStatus::Cancelled
+                }
+            }),
+        );
+        emit_conversations_changed(&app);
+
+        let editor = app.state::<EditorService>();
+        run_turn_inner(
+            &app,
+            &runtime,
+            editor.inner(),
+            &conversation_id,
+            None,
+            Some(state),
+            cancel.clone(),
+        )
+        .await
+    }
+    .await;
+
+    if approved && result.is_err() && !cancel.load(Ordering::SeqCst) {
+        let _ = app.emit(
+            "agent://computer-operation",
+            json!({
+                "conversationId": conversation_id,
+                "status": ComputerOperationStatus::Failed,
+            }),
+        );
+    }
+    let result = finalize_turn(&app, &runtime, &conversation_id, &cancel, result).await;
     emit_finished(&app, &conversation_id, &result);
     result.map(|_| ())
 }
 
 enum TurnEnd {
     Finished,
-    WaitingAsk,
+    WaitingUser,
 }
 
 async fn finalize_turn(
+    app: &AppHandle,
     runtime: &AgentRuntime,
     conversation_id: &str,
     cancel: &Arc<AtomicBool>,
     result: Result<TurnEnd, AgentError>,
 ) -> Result<TurnEnd, AgentError> {
-    if !runtime.finish_turn(conversation_id, cancel).await || result.is_err() {
+    let cancelled = runtime.finish_turn(conversation_id, cancel).await;
+    if cancelled {
+        let had_computer_operation = runtime.computer_control.has_active_grant(conversation_id)
+            || runtime
+                .computer_control
+                .pending_approval_for_conversation(conversation_id)
+                .is_some();
+        runtime.clear_pending_user_action(conversation_id).await?;
+        if had_computer_operation {
+            let _ = app.emit(
+                "agent://computer-operation",
+                json!({
+                    "conversationId": conversation_id,
+                    "status": ComputerOperationStatus::Cancelled,
+                }),
+            );
+        }
+        return Err(AgentError::new("cancelled", "已取消。"));
+    }
+    if result.is_err() {
+        let had_grant = runtime.computer_control.has_active_grant(conversation_id);
+        let _ = runtime.clear_pending_user_action(conversation_id).await;
+        if had_grant {
+            let _ = app.emit(
+                "agent://computer-operation",
+                json!({
+                    "conversationId": conversation_id,
+                    "status": ComputerOperationStatus::Failed,
+                }),
+            );
+        }
         return result;
     }
-    if matches!(&result, Ok(TurnEnd::WaitingAsk)) {
-        runtime.clear_pending_ask(conversation_id).await?;
+    if matches!(&result, Ok(TurnEnd::Finished)) {
+        runtime
+            .computer_control
+            .revoke_grant_for_conversation(conversation_id);
     }
-    Err(AgentError::new("cancelled", "已取消。"))
+    result
 }
 
 fn emit_finished(app: &AppHandle, conversation_id: &str, result: &Result<TurnEnd, AgentError>) {
@@ -130,7 +256,7 @@ fn emit_finished(app: &AppHandle, conversation_id: &str, result: &Result<TurnEnd
             );
             emit_conversations_changed(app);
         }
-        Ok(TurnEnd::WaitingAsk) => {
+        Ok(TurnEnd::WaitingUser) => {
             emit_conversations_changed(app);
         }
         Err(error) => {
@@ -242,6 +368,15 @@ async fn run_turn_inner(
 
         let tool_calls = assistant.tool_calls.clone().unwrap_or_default();
         if tool_calls.is_empty() {
+            if runtime.computer_control.has_active_grant(conversation_id) {
+                runtime
+                    .computer_control
+                    .revoke_grant_for_conversation(conversation_id);
+                return Err(AgentError::new(
+                    "computer_operation_unfinished",
+                    "电脑代理操作未提交真实结果，授权已失效。",
+                ));
+            }
             return Ok(TurnEnd::Finished);
         }
 
@@ -264,6 +399,15 @@ async fn run_turn_inner(
                     ));
                 }
                 state.action_steps += 1;
+            }
+            ToolCallBatch::ComputerAction => {
+                if state.computer_action_steps >= MAX_COMPUTER_ACTION_STEPS {
+                    return Err(AgentError::new(
+                        "step_limit",
+                        "达到电脑代理操作步数上限，已停止。",
+                    ));
+                }
+                state.computer_action_steps += 1;
             }
         }
 
@@ -322,9 +466,12 @@ async fn run_turn_inner(
             };
 
             match outcome {
-                ToolOutcome::AskUser { ask, tool_call_id } => {
+                ToolOutcome::AwaitUser {
+                    action,
+                    tool_call_id,
+                } => {
                     runtime.pending_continuations.lock().await.insert(
-                        ask.ask_id.clone(),
+                        action.action_id().to_string(),
                         PendingContinuation {
                             conversation_id: conversation_id.into(),
                             tool_call_id,
@@ -332,10 +479,10 @@ async fn run_turn_inner(
                         },
                     );
                     let _ = app.emit(
-                        "agent://ask",
-                        json!({ "conversationId": conversation_id, "ask": ask }),
+                        "agent://user-action",
+                        json!({ "conversationId": conversation_id, "action": action }),
                     );
-                    return Ok(TurnEnd::WaitingAsk);
+                    return Ok(TurnEnd::WaitingUser);
                 }
                 ToolOutcome::Result {
                     content,
@@ -392,6 +539,7 @@ fn tool_error_content(error: &AgentError) -> String {
 enum ToolCallBatch {
     SkillLoad,
     Action,
+    ComputerAction,
 }
 
 fn validate_tool_call_batch(
@@ -412,8 +560,19 @@ fn validate_tool_call_batch(
         .iter()
         .filter(|call| call.function.name == READ_SKILL_TOOL_NAME)
         .count();
-    if skill_calls == 0 {
+    let computer_calls = calls
+        .iter()
+        .filter(|call| crate::agent::tools::is_computer_tool(&call.function.name))
+        .count();
+    if skill_calls == 0 && computer_calls == 0 {
         Ok(ToolCallBatch::Action)
+    } else if skill_calls == 0 && computer_calls == 1 && calls.len() == 1 {
+        Ok(ToolCallBatch::ComputerAction)
+    } else if skill_calls == 0 {
+        Err(AgentError::new(
+            "mixed_computer_action",
+            "电脑代理工具每次只能调用一个，且不能与其他工具混用。",
+        ))
     } else if skill_calls == calls.len() {
         Ok(ToolCallBatch::SkillLoad)
     } else {
@@ -583,6 +742,23 @@ mod tests {
             .unwrap(),
             ToolCallBatch::SkillLoad
         );
+
+        let computer = BTreeSet::from(["perform_computer_action"]);
+        assert_eq!(
+            validate_tool_call_batch(&[call("1", "perform_computer_action", "{}")], &computer,)
+                .unwrap(),
+            ToolCallBatch::ComputerAction
+        );
+        assert!(matches!(
+            validate_tool_call_batch(
+                &[
+                    call("1", "perform_computer_action", "{}"),
+                    call("2", "perform_computer_action", "{}"),
+                ],
+                &computer,
+            ),
+            Err(error) if error.code == "mixed_computer_action"
+        ));
     }
 
     #[test]
@@ -605,10 +781,7 @@ mod tests {
 
     #[test]
     fn tool_failures_are_returned_as_structured_model_context() {
-        let content = tool_error_content(&AgentError::new(
-            "stale_preview",
-            "preview expired",
-        ));
+        let content = tool_error_content(&AgentError::new("stale_preview", "preview expired"));
         let value: Value = serde_json::from_str(&content).unwrap();
 
         assert_eq!(value["ok"], false);

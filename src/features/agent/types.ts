@@ -30,13 +30,6 @@ export interface ConversationPlan {
   updatedAt: string;
 }
 
-export interface PendingAsk {
-  askId: string;
-  conversationId: string;
-  question: string;
-  options: string[];
-}
-
 export interface ProjectRecord {
   id: string;
   name: string;
@@ -96,13 +89,62 @@ export interface AgentTurnFinished {
   message: string;
 }
 
+export type ComputerActionKind =
+  | "click"
+  | "double_click"
+  | "drag"
+  | "scroll"
+  | "key"
+  | "type_text";
+
+export interface PendingQuestionAction {
+  kind: "question";
+  actionId: string;
+  conversationId: string;
+  question: string;
+  options: string[];
+}
+
+export interface ComputerApprovalAction {
+  kind: "computer_approval";
+  actionId: string;
+  conversationId: string;
+  goal: string;
+  reason: string;
+  targetWindowTitle: string;
+  steps: Array<{ id: string; title: string }>;
+  allowedActions: ComputerActionKind[];
+  includesFileDialogs: boolean;
+  impact: string;
+  cannotUndo: boolean;
+  expiresAt: string;
+}
+
+export type PendingUserAction = PendingQuestionAction | ComputerApprovalAction;
+
+export type ComputerOperationStatus =
+  | "idle"
+  | "awaiting_approval"
+  | "authorized"
+  | "running"
+  | "completed"
+  | "needs_user_verification"
+  | "cancelled"
+  | "failed"
+  | "unknown";
+
 export interface CancelTurnResult {
   state: "cancel_requested" | "pending_cleared" | "idle";
 }
 
-export interface AgentAskEvent {
+export interface AgentUserActionEvent {
   conversationId: string;
-  ask: PendingAsk;
+  action: PendingUserAction;
+}
+
+export interface AgentComputerOperationEvent {
+  conversationId: string;
+  status: ComputerOperationStatus;
 }
 
 export interface AgentPlanEvent {

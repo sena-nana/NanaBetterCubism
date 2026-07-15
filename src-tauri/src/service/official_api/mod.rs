@@ -16,6 +16,7 @@ pub(crate) use read::current_modeling_document;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CurrentModelingDocument {
+    pub document_instance_key: String,
     pub document_key: String,
     pub document_path: String,
 }

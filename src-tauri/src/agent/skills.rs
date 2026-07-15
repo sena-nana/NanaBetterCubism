@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::sync::LazyLock;
 
 pub const READ_SKILL_TOOL_NAME: &str = "read_skill";
-pub const MAX_SKILL_LOAD_STEPS: usize = 5;
+pub const MAX_SKILL_LOAD_STEPS: usize = 6;
 
 const CORE_DOMAIN_TOOLS: &[&str] = &[
     "get_editor_snapshot",
@@ -87,6 +87,14 @@ const OBJECT_EDITING_TOOLS: &[&str] = &[
 
 const PROJECT_MEMORY_TOOLS: &[&str] = &["list_memories", "upsert_memory", "archive_memory"];
 
+const COMPUTER_OPERATION_TOOLS: &[&str] = &[
+    "list_cubism_windows",
+    "request_computer_operation",
+    "capture_computer_operation_frame",
+    "perform_computer_action",
+    "finish_computer_operation",
+];
+
 struct SkillSource {
     content: &'static str,
     tools: &'static [&'static str],
@@ -121,6 +129,10 @@ static SKILLS: LazyLock<Result<Vec<RuntimeSkill>, AgentError>> = LazyLock::new(|
         SkillSource {
             content: include_str!("skills/project-memory/SKILL.md"),
             tools: PROJECT_MEMORY_TOOLS,
+        },
+        SkillSource {
+            content: include_str!("skills/computer-operation/SKILL.md"),
+            tools: COMPUTER_OPERATION_TOOLS,
         },
     ]
     .into_iter()

@@ -1,7 +1,11 @@
 use crate::agent::capture::capture_cubism_editor_window;
+use crate::agent::computer_control::{
+    ComputerAction, ComputerActionKind, ComputerOperationOutcome, ComputerOperationStatus,
+    ComputerOperationStep, UnsupportedCapability,
+};
 use crate::agent::skills;
-use crate::agent::store::{truncate_summary, MemoryUpsertInput, PendingAsk, PlanStep};
-use crate::agent::{new_id, AgentError, AgentRuntime};
+use crate::agent::store::{truncate_summary, MemoryUpsertInput, PendingQuestion, PlanStep};
+use crate::agent::{new_id, AgentError, AgentRuntime, PendingUserAction};
 use crate::domain::ParameterBatchInput;
 use crate::service::{CommandError, EditorService};
 use serde_json::{json, Value};
@@ -136,6 +140,101 @@ fn all_domain_tool_definitions() -> Vec<Value> {
                 "required": ["steps"]
             }),
         ),
+        tool(
+            "list_cubism_windows",
+            "列出可供电脑代理操作选择的 Cubism 窗口；授权后可列出同进程随后打开的窗口。",
+            json!({
+                "type": "object",
+                "properties": { "grantId": { "type": "string" } },
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            "request_computer_operation",
+            "仅当能力矩阵确认官方 API 缺失时，提交完整计划并请求用户授权。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "windowId": { "type": "string" },
+                    "capability": {
+                        "type": "string",
+                        "enum": [
+                            "art_mesh_geometry", "art_mesh_uv_topology", "warp_control_points",
+                            "animation_editing", "physics_editing", "save_export", "texture_atlas",
+                            "psd_operations", "glue_creation", "art_path"
+                        ]
+                    },
+                    "goal": { "type": "string" },
+                    "steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "title": { "type": "string" }
+                            },
+                            "required": ["id", "title"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "allowedActions": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["click", "double_click", "drag", "scroll", "key", "type_text"]
+                        }
+                    },
+                    "includesFileDialogs": { "type": "boolean" }
+                },
+                "required": ["windowId", "capability", "goal", "steps", "allowedActions", "includesFileDialogs"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            "capture_computer_operation_frame",
+            "获取当前授权窗口的最新画面；每个手势前都必须调用。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "grantId": { "type": "string" },
+                    "windowId": { "type": "string" }
+                },
+                "required": ["grantId"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            "perform_computer_action",
+            "基于最新 frameId 执行一个已授权手势，并立即返回新画面。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "grantId": { "type": "string" },
+                    "frameId": { "type": "string" },
+                    "stepId": { "type": "string" },
+                    "action": { "type": "object" },
+                    "settleMs": { "type": "integer", "minimum": 0, "maximum": 2000 }
+                },
+                "required": ["grantId", "frameId", "stepId", "action"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            "finish_computer_operation",
+            "以真实结果结束电脑代理操作并立即销毁授权。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "grantId": { "type": "string" },
+                    "outcome": {
+                        "type": "string",
+                        "enum": ["completed", "needs_user_verification", "partial", "failed", "unknown"]
+                    }
+                },
+                "required": ["grantId", "outcome"],
+                "additionalProperties": false
+            }),
+        ),
     ];
     tools.extend(crate::service::official_api::tool_definitions());
     tools
@@ -217,8 +316,8 @@ pub enum ToolOutcome {
         content: String,
         image_path: Option<String>,
     },
-    AskUser {
-        ask: PendingAsk,
+    AwaitUser {
+        action: PendingUserAction,
         tool_call_id: String,
     },
 }
@@ -420,6 +519,140 @@ pub async fn execute_tool(
             runtime.store.set_memory_enabled(id, false)?;
             Ok(tool_result("已停用记忆。"))
         }
+        "list_cubism_windows" => {
+            let grant_id = args.get("grantId").and_then(Value::as_str);
+            let windows = runtime.computer_control.list_windows(grant_id)?;
+            Ok(tool_result(serde_json::to_string_pretty(&windows)?))
+        }
+        "request_computer_operation" => {
+            let window_id = required_string(&args, "windowId")?;
+            let capability: UnsupportedCapability = serde_json::from_value(
+                args.get("capability")
+                    .cloned()
+                    .ok_or_else(|| AgentError::new("invalid_arguments", "缺少 capability"))?,
+            )
+            .map_err(|error| AgentError::new("invalid_arguments", error.to_string()))?;
+            let goal = required_string(&args, "goal")?.to_string();
+            let steps: Vec<ComputerOperationStep> =
+                serde_json::from_value(args.get("steps").cloned().unwrap_or_else(|| json!([])))
+                    .map_err(|error| AgentError::new("invalid_arguments", error.to_string()))?;
+            let allowed_actions: Vec<ComputerActionKind> = serde_json::from_value(
+                args.get("allowedActions")
+                    .cloned()
+                    .unwrap_or_else(|| json!([])),
+            )
+            .map_err(|error| AgentError::new("invalid_arguments", error.to_string()))?;
+            let includes_file_dialogs = args
+                .get("includesFileDialogs")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| AgentError::new("invalid_arguments", "缺少 includesFileDialogs"))?;
+            let document_instance_key =
+                crate::service::official_api::current_modeling_document(editor)
+                .await
+                .map(|document| document.document_instance_key);
+            let approval = runtime.computer_control.request_approval(
+                conversation_id,
+                window_id,
+                capability,
+                goal,
+                steps,
+                allowed_actions,
+                includes_file_dialogs,
+                document_instance_key,
+            )?;
+            emit_computer_status(
+                app,
+                conversation_id,
+                ComputerOperationStatus::AwaitingApproval,
+            );
+            Ok(ToolOutcome::AwaitUser {
+                action: approval.into(),
+                tool_call_id: tool_call_id.into(),
+            })
+        }
+        "capture_computer_operation_frame" => {
+            let grant_id = required_string(&args, "grantId")?;
+            let window_id = args.get("windowId").and_then(Value::as_str);
+            let cache = runtime
+                .store
+                .cache_dir()
+                .ok_or_else(|| AgentError::new("store_not_ready", "缓存目录不可用。"))?;
+            let document_instance_key =
+                crate::service::official_api::current_modeling_document(editor)
+                .await
+                .map(|document| document.document_instance_key);
+            let captured = runtime.computer_control.capture_frame(
+                conversation_id,
+                grant_id,
+                window_id,
+                &cache,
+                document_instance_key.as_deref(),
+            )?;
+            emit_computer_status(app, conversation_id, ComputerOperationStatus::Running);
+            Ok(ToolOutcome::Result {
+                content: serde_json::to_string_pretty(&captured.frame)?,
+                image_path: Some(captured.path),
+            })
+        }
+        "perform_computer_action" => {
+            let grant_id = required_string(&args, "grantId")?;
+            let frame_id = required_string(&args, "frameId")?;
+            let step_id = required_string(&args, "stepId")?;
+            let action: ComputerAction = serde_json::from_value(
+                args.get("action")
+                    .cloned()
+                    .ok_or_else(|| AgentError::new("invalid_arguments", "缺少 action"))?,
+            )
+            .map_err(|error| AgentError::new("invalid_arguments", error.to_string()))?;
+            let settle_ms = args.get("settleMs").and_then(Value::as_u64).unwrap_or(300);
+            let cache = runtime
+                .store
+                .cache_dir()
+                .ok_or_else(|| AgentError::new("store_not_ready", "缓存目录不可用。"))?;
+            let document_instance_key =
+                crate::service::official_api::current_modeling_document(editor)
+                .await
+                .map(|document| document.document_instance_key);
+            let captured = runtime.computer_control.perform_action(
+                conversation_id,
+                grant_id,
+                frame_id,
+                step_id,
+                &action,
+                settle_ms,
+                &cache,
+                document_instance_key.as_deref(),
+                &cancel,
+            )?;
+            emit_computer_status(app, conversation_id, ComputerOperationStatus::Running);
+            Ok(ToolOutcome::Result {
+                content: serde_json::to_string_pretty(&captured.frame)?,
+                image_path: Some(captured.path),
+            })
+        }
+        "finish_computer_operation" => {
+            let grant_id = required_string(&args, "grantId")?;
+            let outcome: ComputerOperationOutcome = serde_json::from_value(
+                args.get("outcome")
+                    .cloned()
+                    .ok_or_else(|| AgentError::new("invalid_arguments", "缺少 outcome"))?,
+            )
+            .map_err(|error| AgentError::new("invalid_arguments", error.to_string()))?;
+            let result = runtime
+                .computer_control
+                .finish(conversation_id, grant_id, outcome)?;
+            let status = match outcome {
+                ComputerOperationOutcome::Completed => ComputerOperationStatus::Completed,
+                ComputerOperationOutcome::NeedsUserVerification
+                | ComputerOperationOutcome::Partial => {
+                    ComputerOperationStatus::NeedsUserVerification
+                }
+                ComputerOperationOutcome::Failed => ComputerOperationStatus::Failed,
+                ComputerOperationOutcome::Unknown => ComputerOperationStatus::Unknown,
+            };
+            emit_computer_status(app, conversation_id, status);
+            Ok(tool_result(serde_json::to_string_pretty(&result)?))
+        }
         "ask_user" => {
             let question = args
                 .get("question")
@@ -439,15 +672,17 @@ pub async fn execute_tool(
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            let ask = PendingAsk {
-                ask_id: new_id(),
+            let question = PendingQuestion {
+                action_id: new_id(),
                 conversation_id: conversation_id.into(),
                 question,
                 options,
             };
-            runtime.store.set_pending_ask(&ask, tool_call_id)?;
-            Ok(ToolOutcome::AskUser {
-                ask,
+            runtime
+                .store
+                .set_pending_question(&question, tool_call_id)?;
+            Ok(ToolOutcome::AwaitUser {
+                action: question.into(),
                 tool_call_id: tool_call_id.into(),
             })
         }
@@ -474,7 +709,11 @@ pub async fn execute_tool(
 
     match &outcome {
         Ok(ToolOutcome::Result { content, .. }) => {
-            let summary = truncate_summary(content, 180);
+            let summary = if is_computer_tool(name) {
+                computer_tool_summary(name, content)
+            } else {
+                truncate_summary(content, 180)
+            };
             emit_tool(app, conversation_id, name, "finished", &summary);
             let _ = runtime.store.append_message(
                 conversation_id,
@@ -483,34 +722,46 @@ pub async fn execute_tool(
                 Some(name),
                 Some("finished"),
             );
+            let (trace_arguments, trace_result) = safe_tool_trace(name, arguments, content);
             let _ = runtime.store.append_tool_trace(
                 conversation_id,
                 tool_call_id,
                 name,
-                arguments,
-                content,
+                &trace_arguments,
+                &trace_result,
                 "finished",
             );
         }
-        Ok(ToolOutcome::AskUser { ask, .. }) => {
+        Ok(ToolOutcome::AwaitUser { .. }) => {
             emit_tool(app, conversation_id, name, "finished", "等待用户回答");
             let _ = runtime.store.append_message(
                 conversation_id,
                 "tool",
-                &ask.question,
+                "等待用户处理",
                 Some(name),
                 Some("finished"),
             );
+            let (trace_arguments, trace_result) = safe_tool_trace(name, arguments, "waiting_user");
             let _ = runtime.store.append_tool_trace(
                 conversation_id,
                 tool_call_id,
                 name,
-                arguments,
-                &ask.question,
+                &trace_arguments,
+                &trace_result,
                 "waiting_user",
             );
         }
         Err(error) => {
+            if is_computer_tool(name) {
+                if error.code == "input_outcome_unknown" {
+                    runtime
+                        .computer_control
+                        .revoke_grant_for_conversation(conversation_id);
+                    emit_computer_status(app, conversation_id, ComputerOperationStatus::Unknown);
+                } else if is_terminal_computer_error(&error.code) {
+                    emit_computer_status(app, conversation_id, ComputerOperationStatus::Failed);
+                }
+            }
             emit_tool(app, conversation_id, name, "failed", &error.message);
             let _ = runtime.store.append_message(
                 conversation_id,
@@ -519,18 +770,112 @@ pub async fn execute_tool(
                 Some(name),
                 Some("failed"),
             );
+            let (trace_arguments, trace_result) = safe_tool_trace(name, arguments, &error.code);
             let _ = runtime.store.append_tool_trace(
                 conversation_id,
                 tool_call_id,
                 name,
-                arguments,
-                &error.message,
+                &trace_arguments,
+                &trace_result,
                 "failed",
             );
         }
     }
 
     outcome
+}
+
+fn required_string<'a>(args: &'a Value, key: &str) -> Result<&'a str, AgentError> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| AgentError::new("invalid_arguments", format!("缺少 {key}")))
+}
+
+pub(crate) fn is_computer_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "list_cubism_windows"
+            | "request_computer_operation"
+            | "capture_computer_operation_frame"
+            | "perform_computer_action"
+            | "finish_computer_operation"
+    )
+}
+
+fn is_terminal_computer_error(code: &str) -> bool {
+    matches!(
+        code,
+        "grant_not_found"
+            | "approval_expired"
+            | "document_changed"
+            | "computer_action_limit"
+            | "plan_changed"
+            | "action_not_approved"
+            | "window_not_approved"
+            | "process_changed"
+            | "stale_window"
+    )
+}
+
+fn safe_tool_trace(name: &str, arguments: &str, result: &str) -> (String, String) {
+    if !is_computer_tool(name) {
+        return (arguments.to_string(), result.to_string());
+    }
+    let parsed: Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
+    let safe_arguments = match name {
+        "request_computer_operation" => json!({
+            "capability": parsed.get("capability"),
+            "stepCount": parsed.get("steps").and_then(Value::as_array).map(Vec::len),
+            "allowedActions": parsed.get("allowedActions"),
+            "includesFileDialogs": parsed.get("includesFileDialogs"),
+        }),
+        "perform_computer_action" => json!({
+            "stepId": parsed.get("stepId"),
+            "actionType": parsed.pointer("/action/kind"),
+        }),
+        "finish_computer_operation" => json!({ "outcome": parsed.get("outcome") }),
+        "list_cubism_windows" => {
+            json!({ "phase": if parsed.get("grantId").is_some() { "authorized" } else { "selection" } })
+        }
+        _ => json!({ "action": "capture" }),
+    };
+    let parsed_result = serde_json::from_str::<Value>(result).unwrap_or_else(|_| json!({}));
+    let safe_result = match name {
+        "list_cubism_windows" => {
+            json!({ "windowCount": parsed_result.as_array().map(Vec::len) })
+        }
+        "perform_computer_action" => json!({ "actionCount": 1, "result": "captured" }),
+        "finish_computer_operation" => json!({
+            "actionCount": parsed_result.get("actionCount"),
+            "outcome": parsed_result.get("outcome"),
+        }),
+        "capture_computer_operation_frame" => json!({ "result": "captured" }),
+        _ => json!({ "recorded": true }),
+    };
+    (safe_arguments.to_string(), safe_result.to_string())
+}
+
+fn computer_tool_summary(name: &str, result: &str) -> String {
+    match name {
+        "list_cubism_windows" => serde_json::from_str::<Value>(result)
+            .ok()
+            .and_then(|value| value.as_array().map(Vec::len))
+            .map(|count| format!("发现 {count} 个 Cubism 窗口"))
+            .unwrap_or_else(|| "已检查 Cubism 窗口".into()),
+        "request_computer_operation" => "等待用户授权电脑代理操作".into(),
+        "capture_computer_operation_frame" => "已获取最新 Cubism 画面".into(),
+        "perform_computer_action" => "已执行一个授权手势并获取新画面".into(),
+        "finish_computer_operation" => "电脑代理操作已结束".into(),
+        _ => "电脑代理操作状态已更新".into(),
+    }
+}
+
+fn emit_computer_status(app: &AppHandle, conversation_id: &str, status: ComputerOperationStatus) {
+    let _ = app.emit(
+        "agent://computer-operation",
+        json!({ "conversationId": conversation_id, "status": status }),
+    );
 }
 
 fn emit_tool(app: &AppHandle, conversation_id: &str, tool_name: &str, status: &str, summary: &str) {
@@ -606,6 +951,28 @@ mod tests {
         assert!(names(&definitions).contains("read_skill"));
         for forbidden in ["read_file", "write_file", "apply_patch", "run_terminal"] {
             assert!(!names(&definitions).contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn computer_tool_traces_drop_sensitive_values() {
+        let (arguments, result) = safe_tool_trace(
+            "perform_computer_action",
+            r#"{"grantId":"secret","frameId":"frame","stepId":"move","action":{"kind":"type_text","text":"C:\\private\\model.cmo3","x":42}}"#,
+            r#"{"frameId":"next","path":"C:\\cache\\capture.png"}"#,
+        );
+        assert!(arguments.contains("type_text"));
+        assert!(arguments.contains("move"));
+        for sensitive in [
+            "secret",
+            "frame",
+            "private",
+            "model.cmo3",
+            "42",
+            "capture.png",
+        ] {
+            assert!(!arguments.contains(sensitive));
+            assert!(!result.contains(sensitive));
         }
     }
 }
