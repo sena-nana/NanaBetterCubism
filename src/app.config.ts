@@ -1,5 +1,6 @@
 import appConfigJson from "../app.config.json";
 import type { LiliaAppConfig } from "@lilia/ui";
+import ConversationSidebarTop from "./features/agent/components/ConversationSidebarTop.vue";
 
 export const appConfig = {
   appName: appConfigJson.appName,
@@ -11,6 +12,7 @@ export const appConfig = {
   },
   shell: appConfigJson.shell,
   sidebar: {
+    topContent: ConversationSidebarTop,
     nav: [
       {
         key: "memory",
@@ -25,13 +27,6 @@ export const appConfig = {
         title: "对话",
         emptyText: "暂无对话",
         items: [],
-      },
-    ],
-    globalActions: [
-      {
-        key: "new-chat",
-        label: "新对话",
-        icon: "file-plus",
       },
     ],
     footerLinks: [{ key: "settings", to: "/settings", label: "设置", icon: "settings" }],

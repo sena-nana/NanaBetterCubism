@@ -5,8 +5,9 @@ mod service;
 
 use agent::{
     agent_answer_ask, agent_bind_project, agent_cancel_turn, agent_consolidate_memory,
-    agent_create_conversation, agent_get_messages, agent_get_pending_ask, agent_get_plan,
-    agent_list_conversations, agent_list_projects, agent_send_message, agent_upsert_project,
+    agent_archive_conversation, agent_create_conversation, agent_get_messages,
+    agent_get_pending_ask, agent_get_plan, agent_list_conversations, agent_list_projects,
+    agent_send_message, agent_set_conversation_pinned, agent_upsert_project,
     llm_get_config, llm_set_config, llm_test_connection, memory_list, memory_set_enabled,
     memory_upsert, AgentRuntime, AgentStore,
 };
@@ -49,6 +50,8 @@ pub fn run() {
             llm_test_connection,
             agent_list_conversations,
             agent_create_conversation,
+            agent_set_conversation_pinned,
+            agent_archive_conversation,
             agent_get_messages,
             agent_send_message,
             agent_cancel_turn,

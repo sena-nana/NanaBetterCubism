@@ -14,7 +14,7 @@ export function createNanaBetterCubismApp(history?: RouterHistory) {
     shell: LiliaDesktopShell,
     history,
   });
-  installAgentShell(created.router);
+  installAgentShell();
   void installConversationRuntimeStore();
   return created;
 }
@@ -22,7 +22,7 @@ export function createNanaBetterCubismApp(history?: RouterHistory) {
 export function createNanaBetterCubismRouter(history?: RouterHistory) {
   setLiliaAppConfig(appConfig);
   const router = createLiliaRouter(routes, LiliaDesktopShell, history);
-  installAgentShell(router);
+  installAgentShell();
   void installConversationRuntimeStore();
   return router;
 }

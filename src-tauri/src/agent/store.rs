@@ -144,6 +144,7 @@ impl AgentStore {
               title TEXT NOT NULL,
               project_id TEXT REFERENCES projects(id),
               pinned INTEGER NOT NULL DEFAULT 0,
+              archived INTEGER NOT NULL DEFAULT 0,
               updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS messages (
@@ -196,6 +197,12 @@ impl AgentStore {
             );
             "#,
         )?;
+        ensure_column(
+            &conn,
+            "conversations",
+            "archived",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
         *self.conn.lock().unwrap() = Some(conn);
         *self.path.lock().unwrap() = Some(path);
         Ok(())
@@ -216,7 +223,8 @@ impl AgentStore {
                 SELECT c.id, c.title, c.project_id, p.name, c.updated_at, c.pinned
                 FROM conversations c
                 LEFT JOIN projects p ON p.id = c.project_id
-                ORDER BY c.updated_at DESC
+                WHERE c.archived = 0
+                ORDER BY c.pinned DESC, c.updated_at DESC
                 "#,
             )?;
             let rows = stmt.query_map([], |row| {
@@ -241,7 +249,7 @@ impl AgentStore {
             .unwrap_or_else(|| "新对话".into());
         self.with_conn(|conn| {
             conn.execute(
-                "INSERT INTO conversations (id, title, project_id, pinned, updated_at) VALUES (?1, ?2, NULL, 0, ?3)",
+                "INSERT INTO conversations (id, title, project_id, pinned, archived, updated_at) VALUES (?1, ?2, NULL, 0, 0, ?3)",
                 params![id, title, now],
             )?;
             Ok(())
@@ -265,6 +273,49 @@ impl AgentStore {
             )?;
             Ok(())
         })
+    }
+
+    pub fn ensure_active_conversation(&self, conversation_id: &str) -> Result<(), AgentError> {
+        self.with_conn(|conn| {
+            let active = conn
+                .query_row(
+                    "SELECT 1 FROM conversations WHERE id = ?1 AND archived = 0",
+                    params![conversation_id],
+                    |_| Ok(()),
+                )
+                .optional()?;
+            active.ok_or_else(|| AgentError::new("not_found", "对话不存在或已归档。"))
+        })
+    }
+
+    pub fn set_conversation_pinned(
+        &self,
+        conversation_id: &str,
+        pinned: bool,
+    ) -> Result<bool, AgentError> {
+        let changed = self.with_conn(|conn| {
+            Ok(conn.execute(
+                "UPDATE conversations SET pinned = ?1 WHERE id = ?2 AND archived = 0",
+                params![pinned as i64, conversation_id],
+            )?)
+        })?;
+        if changed == 0 {
+            return Err(AgentError::new("not_found", "对话不存在或已归档。"));
+        }
+        Ok(pinned)
+    }
+
+    pub fn archive_conversation(&self, conversation_id: &str) -> Result<bool, AgentError> {
+        let changed = self.with_conn(|conn| {
+            Ok(conn.execute(
+                "UPDATE conversations SET archived = 1, updated_at = ?1 WHERE id = ?2 AND archived = 0",
+                params![Utc::now().to_rfc3339(), conversation_id],
+            )?)
+        })?;
+        if changed == 0 {
+            return Err(AgentError::new("not_found", "对话不存在或已归档。"));
+        }
+        Ok(true)
     }
 
     pub fn set_conversation_title_if_default(
@@ -780,6 +831,23 @@ fn map_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> {
     })
 }
 
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), AgentError> {
+    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for existing in columns {
+        if existing? == column {
+            return Ok(());
+        }
+    }
+    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"))?;
+    Ok(())
+}
+
 fn load_api_key() -> Option<String> {
     keyring::Entry::new(KEYRING_SERVICE, LLM_KEYRING_ACCOUNT)
         .ok()
@@ -862,6 +930,64 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn migrates_and_manages_active_conversations_without_deleting_history() {
+        let dir = std::env::temp_dir().join(format!("nbc-agent-migration-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("agent.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE conversations (
+                  id TEXT PRIMARY KEY,
+                  title TEXT NOT NULL,
+                  project_id TEXT,
+                  pinned INTEGER NOT NULL DEFAULT 0,
+                  updated_at TEXT NOT NULL
+                );
+                INSERT INTO conversations (id, title, project_id, pinned, updated_at)
+                VALUES ('older', '较早对话', NULL, 0, '2026-01-01T00:00:00Z');
+                "#,
+            )
+            .unwrap();
+        }
+
+        let store = AgentStore::default();
+        store.open(path).unwrap();
+        let newer = store.create_conversation(Some("较新对话".into())).unwrap();
+        store
+            .append_message(&newer.id, "user", "保留的消息", None, None)
+            .unwrap();
+        store.set_conversation_pinned("older", true).unwrap();
+
+        let listed = store.list_conversations().unwrap();
+        assert_eq!(listed[0].id, "older");
+        assert!(listed[0].pinned);
+
+        store.archive_conversation(&newer.id).unwrap();
+        assert!(store
+            .list_conversations()
+            .unwrap()
+            .iter()
+            .all(|conversation| conversation.id != newer.id));
+        let messages: i64 = store
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1",
+                    params![newer.id],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(messages, 1);
+        assert!(matches!(
+            store.ensure_active_conversation(&newer.id),
+            Err(error) if error.code == "not_found"
+        ));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

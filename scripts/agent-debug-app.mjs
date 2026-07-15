@@ -4,6 +4,8 @@ import { resolve } from "node:path";
 const CHAT_HOME = "src/features/agent/ChatHomePage.vue";
 const CHAT_PAGE = "src/features/agent/ChatPage.vue";
 const CHAT_COMPOSER = "src/features/agent/components/ConversationComposer.vue";
+const CONVERSATION_SIDEBAR_TOP = "src/features/agent/components/ConversationSidebarTop.vue";
+const SIDEBAR_CONVERSATIONS = "src/features/agent/sidebarConversations.ts";
 const MEMORY_PAGE = "src/features/agent/MemoryPage.vue";
 const LLM_SETTINGS = "src/features/agent/settings/LlmSettingsSection.vue";
 const EDITOR_SETTINGS = "src/features/agent/settings/EditorSettingsSection.vue";
@@ -13,7 +15,13 @@ const APP_TARGETS = [
   ["agent.home", CHAT_HOME, "agent.home"],
   ["agent.home.input", CHAT_COMPOSER, "`${agentIdPrefix}.input`"],
   ["agent.home.send", CHAT_COMPOSER, "`${agentIdPrefix}.send`"],
-  ["sidebar.global.new-chat", "node_modules/@lilia/ui/src/layouts/SecondaryPanel.vue", "`sidebar.global.${action.key}`"],
+  ["sidebar.new-chat", CONVERSATION_SIDEBAR_TOP, "sidebar.new-chat"],
+  ["sidebar.search.open", CONVERSATION_SIDEBAR_TOP, "sidebar.search.open"],
+  ["sidebar.search.input", CONVERSATION_SIDEBAR_TOP, "sidebar.search.input"],
+  ["sidebar.search.close", CONVERSATION_SIDEBAR_TOP, "sidebar.search.close"],
+  ["sidebar.search.result.<conversationId>", CONVERSATION_SIDEBAR_TOP, "sidebar.search.result.${result.id}"],
+  ["sidebar.conversation.<conversationId>.pin", SIDEBAR_CONVERSATIONS, "key: \"pin\""],
+  ["sidebar.conversation.<conversationId>.archive", SIDEBAR_CONVERSATIONS, "key: \"archive\""],
   ["agent.chat", CHAT_PAGE, "agent.chat"],
   ["agent.chat.send", CHAT_COMPOSER, "`${agentIdPrefix}.send`"],
   ["agent.chat.input", CHAT_COMPOSER, "`${agentIdPrefix}.input`"],

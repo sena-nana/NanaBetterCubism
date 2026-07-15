@@ -50,6 +50,23 @@ export async function cancelTurn(conversationId: string): Promise<CancelTurnResu
   return invoke<CancelTurnResult>("agent_cancel_turn", { conversationId });
 }
 
+export async function setConversationPinned(
+  conversationId: string,
+  pinned: boolean,
+): Promise<boolean> {
+  if (!isTauriRuntime()) {
+    throw domainError("desktop_required", "请在桌面应用中管理对话。");
+  }
+  return invoke<boolean>("agent_set_conversation_pinned", { conversationId, pinned });
+}
+
+export async function archiveConversation(conversationId: string): Promise<boolean> {
+  if (!isTauriRuntime()) {
+    throw domainError("desktop_required", "请在桌面应用中管理对话。");
+  }
+  return invoke<boolean>("agent_archive_conversation", { conversationId });
+}
+
 export async function answerAsk(askId: string, answer: string): Promise<void> {
   if (!isTauriRuntime()) {
     throw domainError("desktop_required", "请在桌面应用中回答提问。");

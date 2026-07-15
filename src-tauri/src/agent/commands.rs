@@ -4,11 +4,12 @@ use crate::agent::store::{
     ChatMessage, ConversationPlan, ConversationSummary, LlmConfigInput, LlmConfigView,
     MemoryRecord, MemoryUpsertInput, PendingAsk, ProjectRecord,
 };
-use crate::agent::{AgentError, AgentRuntime, CancelTurnResult};
+use crate::agent::{
+    emit_conversations_changed, AgentError, AgentRuntime, CancelTurnResult,
+};
 use serde::Serialize;
-use serde_json::json;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,8 +60,31 @@ pub async fn agent_create_conversation(
     title: Option<String>,
 ) -> Result<ConversationSummary, AgentError> {
     let created = runtime(&app)?.store.create_conversation(title)?;
-    let _ = app.emit("agent://conversations-changed", json!({}));
+    emit_conversations_changed(&app);
     Ok(created)
+}
+
+#[tauri::command]
+pub async fn agent_set_conversation_pinned(
+    app: AppHandle,
+    conversation_id: String,
+    pinned: bool,
+) -> Result<bool, AgentError> {
+    let pinned = runtime(&app)?
+        .store
+        .set_conversation_pinned(&conversation_id, pinned)?;
+    emit_conversations_changed(&app);
+    Ok(pinned)
+}
+
+#[tauri::command]
+pub async fn agent_archive_conversation(
+    app: AppHandle,
+    conversation_id: String,
+) -> Result<bool, AgentError> {
+    let archived = runtime(&app)?.archive_conversation(&conversation_id).await?;
+    emit_conversations_changed(&app);
+    Ok(archived)
 }
 
 #[tauri::command]
@@ -68,7 +92,9 @@ pub async fn agent_get_messages(
     app: AppHandle,
     conversation_id: String,
 ) -> Result<Vec<ChatMessage>, AgentError> {
-    runtime(&app)?.store.get_messages(&conversation_id)
+    let runtime = runtime(&app)?;
+    runtime.store.ensure_active_conversation(&conversation_id)?;
+    runtime.store.get_messages(&conversation_id)
 }
 
 #[tauri::command]
@@ -132,7 +158,9 @@ pub async fn agent_get_plan(
     app: AppHandle,
     conversation_id: String,
 ) -> Result<Option<ConversationPlan>, AgentError> {
-    runtime(&app)?.store.get_plan(&conversation_id)
+    let runtime = runtime(&app)?;
+    runtime.store.ensure_active_conversation(&conversation_id)?;
+    runtime.store.get_plan(&conversation_id)
 }
 
 #[tauri::command]
@@ -140,7 +168,9 @@ pub async fn agent_get_pending_ask(
     app: AppHandle,
     conversation_id: String,
 ) -> Result<Option<PendingAsk>, AgentError> {
-    runtime(&app)?.store.get_pending_ask(&conversation_id)
+    let runtime = runtime(&app)?;
+    runtime.store.ensure_active_conversation(&conversation_id)?;
+    runtime.store.get_pending_ask(&conversation_id)
 }
 
 #[tauri::command]
@@ -155,7 +185,7 @@ pub async fn agent_upsert_project(
     name: String,
 ) -> Result<ProjectRecord, AgentError> {
     let project = runtime(&app)?.store.upsert_project(id, name)?;
-    let _ = app.emit("agent://conversations-changed", json!({}));
+    emit_conversations_changed(&app);
     Ok(project)
 }
 
@@ -168,7 +198,7 @@ pub async fn agent_bind_project(
     runtime(&app)?
         .store
         .bind_project(&conversation_id, project_id)?;
-    let _ = app.emit("agent://conversations-changed", json!({}));
+    emit_conversations_changed(&app);
     Ok(())
 }
 

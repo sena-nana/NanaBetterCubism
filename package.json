@@ -27,10 +27,10 @@
     "verify": "lilia-build verify"
   },
   "dependencies": {
-    "@lilia/build": "github:sena-nana/LiliaUI#workspace=@lilia/build&commit=916c0c6a0df076cf1b55230df20cb5ea6486f3dd",
-    "@lilia/config": "github:sena-nana/LiliaUI#workspace=@lilia/config&commit=916c0c6a0df076cf1b55230df20cb5ea6486f3dd",
-    "@lilia/tools": "github:sena-nana/LiliaUI#workspace=@lilia/tools&commit=916c0c6a0df076cf1b55230df20cb5ea6486f3dd",
-    "@lilia/ui": "github:sena-nana/LiliaUI#workspace=@lilia/ui&commit=916c0c6a0df076cf1b55230df20cb5ea6486f3dd",
+    "@lilia/build": "github:sena-nana/LiliaUI#workspace=@lilia/build&commit=921eaf21cf7aee1c7eeb2903993c84e043023c53",
+    "@lilia/config": "github:sena-nana/LiliaUI#workspace=@lilia/config&commit=921eaf21cf7aee1c7eeb2903993c84e043023c53",
+    "@lilia/tools": "github:sena-nana/LiliaUI#workspace=@lilia/tools&commit=921eaf21cf7aee1c7eeb2903993c84e043023c53",
+    "@lilia/ui": "github:sena-nana/LiliaUI#workspace=@lilia/ui&commit=921eaf21cf7aee1c7eeb2903993c84e043023c53",
     "@lucide/vue": "^1.22.0",
     "@tauri-apps/api": "^2.11.1",
     "vue": "^3.5.39",
