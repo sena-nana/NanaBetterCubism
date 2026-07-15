@@ -9,9 +9,11 @@ pub use commands::*;
 pub use store::AgentStore;
 
 use serde::Serialize;
+use serde_json::json;
 use std::collections::{hash_map::Entry, HashMap};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -54,12 +56,17 @@ pub struct AgentRuntime {
     pub store: AgentStore,
     pub cancel_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub pending_continuations: Mutex<HashMap<String, PendingContinuation>>,
+    conversation_lifecycle: Mutex<()>,
 }
 
 pub struct PendingContinuation {
     pub conversation_id: String,
     pub tool_call_id: String,
     pub messages: Vec<serde_json::Value>,
+}
+
+pub(crate) fn emit_conversations_changed(app: &AppHandle) {
+    let _ = app.emit("agent://conversations-changed", json!({}));
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -82,10 +89,13 @@ impl AgentRuntime {
             store,
             cancel_flags: Mutex::new(HashMap::new()),
             pending_continuations: Mutex::new(HashMap::new()),
+            conversation_lifecycle: Mutex::new(()),
         }
     }
 
     pub async fn begin_turn(&self, conversation_id: &str) -> Result<Arc<AtomicBool>, AgentError> {
+        let _lifecycle = self.conversation_lifecycle.lock().await;
+        self.store.ensure_active_conversation(conversation_id)?;
         let mut flags = self.cancel_flags.lock().await;
         match flags.entry(conversation_id.to_string()) {
             Entry::Vacant(entry) => {
@@ -98,6 +108,26 @@ impl AgentRuntime {
                 "该对话已有回合正在运行。",
             )),
         }
+    }
+
+    pub async fn archive_conversation(&self, conversation_id: &str) -> Result<bool, AgentError> {
+        let _lifecycle = self.conversation_lifecycle.lock().await;
+        self.store.ensure_active_conversation(conversation_id)?;
+        let running = self.cancel_flags.lock().await.contains_key(conversation_id);
+        let awaiting_input = self
+            .pending_continuations
+            .lock()
+            .await
+            .values()
+            .any(|continuation| continuation.conversation_id == conversation_id)
+            || self.store.get_pending_ask(conversation_id)?.is_some();
+        if running || awaiting_input {
+            return Err(AgentError::new(
+                "conversation_busy",
+                "对话正在运行或等待回答，暂时无法归档。",
+            ));
+        }
+        self.store.archive_conversation(conversation_id)
     }
 
     pub async fn begin_answer(
@@ -192,16 +222,19 @@ mod tests {
     #[tokio::test]
     async fn only_one_turn_can_own_a_conversation() {
         let runtime = AgentRuntime::default();
-        let first = runtime.begin_turn("conversation-a").await.unwrap();
+        runtime.store.open(":memory:".into()).unwrap();
+        let conversation_a = runtime.store.create_conversation(None).unwrap();
+        let conversation_b = runtime.store.create_conversation(None).unwrap();
+        let first = runtime.begin_turn(&conversation_a.id).await.unwrap();
 
         assert!(matches!(
-            runtime.begin_turn("conversation-a").await,
+            runtime.begin_turn(&conversation_a.id).await,
             Err(error) if error.code == "turn_in_progress"
         ));
-        assert!(runtime.begin_turn("conversation-b").await.is_ok());
+        assert!(runtime.begin_turn(&conversation_b.id).await.is_ok());
 
-        runtime.finish_turn("conversation-a", &first).await;
-        assert!(runtime.begin_turn("conversation-a").await.is_ok());
+        runtime.finish_turn(&conversation_a.id, &first).await;
+        assert!(runtime.begin_turn(&conversation_a.id).await.is_ok());
     }
 
     #[tokio::test]
@@ -254,5 +287,38 @@ mod tests {
                 state: CancelTurnState::Idle,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn archive_rejects_active_and_pending_conversations() {
+        let runtime = AgentRuntime::default();
+        runtime.store.open(":memory:".into()).unwrap();
+        let conversation = runtime.store.create_conversation(None).unwrap();
+        let active = runtime.begin_turn(&conversation.id).await.unwrap();
+
+        assert!(matches!(
+            runtime.archive_conversation(&conversation.id).await,
+            Err(error) if error.code == "conversation_busy"
+        ));
+        runtime.finish_turn(&conversation.id, &active).await;
+
+        let ask = PendingAsk {
+            ask_id: new_id(),
+            conversation_id: conversation.id.clone(),
+            question: "?".into(),
+            options: Vec::new(),
+        };
+        runtime.store.set_pending_ask(&ask, "tool-call").unwrap();
+        assert!(matches!(
+            runtime.archive_conversation(&conversation.id).await,
+            Err(error) if error.code == "conversation_busy"
+        ));
+        runtime.clear_pending_ask(&conversation.id).await.unwrap();
+
+        assert!(runtime.archive_conversation(&conversation.id).await.unwrap());
+        assert!(matches!(
+            runtime.begin_turn(&conversation.id).await,
+            Err(error) if error.code == "not_found"
+        ));
     }
 }

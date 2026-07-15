@@ -166,7 +166,12 @@ async function reloadConversation(options: { preserveError?: boolean } = {}) {
     if (nextAsk) setConversationTurnPhase(id, "awaiting_input");
   } catch (err) {
     if (!disposed && epoch === loadEpoch && id === conversationId.value) {
-      error.value = normalizeCommandError(err).message;
+      const normalized = normalizeCommandError(err);
+      if (normalized.code === "not_found") {
+        await router.replace("/");
+        return;
+      }
+      error.value = normalized.message;
     }
   } finally {
     if (!disposed && epoch === loadEpoch && id === conversationId.value) {

@@ -1,6 +1,6 @@
 use crate::agent::capture::capture_cubism_editor_window;
 use crate::agent::store::{MemoryUpsertInput, PendingAsk, PlanStep, truncate_summary};
-use crate::agent::{new_id, AgentError, AgentRuntime};
+use crate::agent::{emit_conversations_changed, new_id, AgentError, AgentRuntime};
 use crate::domain::ParameterBatchInput;
 use crate::service::{CommandError, EditorService};
 use serde_json::{json, Value};
@@ -291,7 +291,7 @@ pub async fn execute_tool(
             runtime
                 .store
                 .bind_project(conversation_id, project_id.clone())?;
-            let _ = app.emit("agent://conversations-changed", json!({}));
+            emit_conversations_changed(app);
             Ok(tool_result(serde_json::to_string_pretty(&json!({
                 "projectId": project_id
             }))?))

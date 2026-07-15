@@ -1,9 +1,10 @@
 import { computed, reactive } from "vue";
 import { listenAsk, listenTurnFinished } from "./bridge";
 
-type ConversationTurnPhase = "idle" | "running" | "awaiting_input" | "cancelling";
+export type ConversationTurnPhase = "idle" | "running" | "awaiting_input" | "cancelling";
 
 const phases = reactive<Record<string, ConversationTurnPhase>>({});
+const phaseListeners = new Set<() => void>();
 let installPromise: Promise<void> | null = null;
 
 export function installConversationRuntimeStore() {
@@ -29,5 +30,16 @@ export function setConversationTurnPhase(
   phase: ConversationTurnPhase,
 ) {
   if (!conversationId) return;
+  if ((phases[conversationId] ?? "idle") === phase) return;
   phases[conversationId] = phase;
+  for (const listener of phaseListeners) listener();
+}
+
+export function getConversationTurnPhase(conversationId: string): ConversationTurnPhase {
+  return phases[conversationId] ?? "idle";
+}
+
+export function subscribeConversationTurnPhases(listener: () => void) {
+  phaseListeners.add(listener);
+  return () => phaseListeners.delete(listener);
 }

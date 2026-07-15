@@ -3,7 +3,9 @@ use crate::agent::llm::{
 };
 use crate::agent::store::MemoryUpsertInput;
 use crate::agent::tools::{execute_tool, tool_definitions, ToolOutcome};
-use crate::agent::{AgentError, AgentRuntime, PendingContinuation, SYSTEM_PROMPT};
+use crate::agent::{
+    emit_conversations_changed, AgentError, AgentRuntime, PendingContinuation, SYSTEM_PROMPT,
+};
 use crate::service::EditorService;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -66,13 +68,14 @@ pub async fn continue_after_ask(
             "tool_call_id": continuation.tool_call_id,
             "content": answer.clone(),
         }));
-        let _ = runtime.store.append_message(
+        runtime.store.append_message(
             &ask.conversation_id,
             "user",
             &format!("回答：{answer}"),
             None,
             None,
-        );
+        )?;
+        emit_conversations_changed(&app);
 
         let editor = app.state::<EditorService>();
         run_turn_inner(
@@ -124,9 +127,11 @@ fn emit_finished(app: &AppHandle, conversation_id: &str, result: &Result<TurnEnd
                     "message": "完成"
                 }),
             );
-            let _ = app.emit("agent://conversations-changed", json!({}));
+            emit_conversations_changed(app);
         }
-        Ok(TurnEnd::WaitingAsk) => {}
+        Ok(TurnEnd::WaitingAsk) => {
+            emit_conversations_changed(app);
+        }
         Err(error) => {
             let _ = app.emit(
                 "agent://turn-finished",
@@ -195,6 +200,7 @@ async fn run_turn_inner(
             let _ = runtime
                 .store
                 .set_conversation_title_if_default(conversation_id, &title);
+            emit_conversations_changed(app);
             seeded.push(json!({
                 "role": "user",
                 "content": text,
@@ -411,6 +417,6 @@ pub async fn consolidate_memory(
         })?;
     }
 
-    let _ = app.emit("agent://conversations-changed", json!({}));
+    emit_conversations_changed(&app);
     Ok(())
 }

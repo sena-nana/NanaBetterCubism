@@ -8,6 +8,7 @@ import type { ChatMessage } from "../src/features/agent/types";
 
 const bridge = vi.hoisted(() => ({
   answerAsk: vi.fn(async () => undefined),
+  archiveConversation: vi.fn(async () => true),
   bindProject: vi.fn(async () => undefined),
   cancelTurn: vi.fn(async () => ({ state: "idle" as const })),
   consolidateMemory: vi.fn(async () => undefined),
@@ -27,6 +28,7 @@ const bridge = vi.hoisted(() => ({
   listenTurnFinished: vi.fn(async () => () => undefined),
   normalizeCommandError: vi.fn((error: unknown) => ({ code: "test", message: String(error) })),
   sendMessage: vi.fn(async () => undefined),
+  setConversationPinned: vi.fn(async () => true),
   upsertProject: vi.fn(),
 }));
 
