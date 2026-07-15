@@ -22,6 +22,7 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .manage(EditorService::default())
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_lilia::init())
         .setup(|app| {

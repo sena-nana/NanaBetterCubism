@@ -4,7 +4,11 @@ import { describe, expect, it, vi } from "vitest";
 import { defineComponent, ref } from "vue";
 import ChatPage from "../src/features/agent/ChatPage.vue";
 import ConversationComposer from "../src/features/agent/components/ConversationComposer.vue";
-import type { ChatMessage } from "../src/features/agent/types";
+import type { AgentPlanEvent, ChatMessage } from "../src/features/agent/types";
+
+const listeners = vi.hoisted(() => ({
+  plan: null as null | ((payload: AgentPlanEvent) => void),
+}));
 
 const bridge = vi.hoisted(() => ({
   answerAsk: vi.fn(async () => undefined),
@@ -22,7 +26,10 @@ const bridge = vi.hoisted(() => ({
   ]),
   listProjects: vi.fn(async () => []),
   listenAsk: vi.fn(async () => () => undefined),
-  listenPlan: vi.fn(async () => () => undefined),
+  listenPlan: vi.fn(async (handler) => {
+    listeners.plan = handler;
+    return () => undefined;
+  }),
   listenToolEvent: vi.fn(async () => () => undefined),
   listenTurnDelta: vi.fn(async () => () => undefined),
   listenTurnFinished: vi.fn(async () => () => undefined),
@@ -117,5 +124,34 @@ describe("对话工作区", () => {
     await Promise.resolve();
     expect(screen.queryByText("A 的迟到内容")).toBeNull();
     expect(screen.getByText("B 的内容")).toBeTruthy();
+  });
+
+  it("使用同一计划面板呈现重载状态与实时更新", async () => {
+    bridge.getMessages.mockResolvedValue([]);
+    bridge.getPlan.mockResolvedValue({
+      conversationId: "a",
+      steps: [{ id: "loaded", title: "已加载步骤", status: "pending" }],
+      updatedAt: "2026-07-15T00:00:00Z",
+    });
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: "/chats/:id", component: ChatPage }],
+    });
+    await router.push("/chats/a");
+    await router.isReady();
+    render({ template: "<RouterView />" }, { global: { plugins: [router] } });
+
+    expect(await screen.findByText("已加载步骤")).toBeTruthy();
+    listeners.plan?.({
+      conversationId: "a",
+      plan: {
+        conversationId: "a",
+        steps: [{ id: "live", title: "实时更新步骤", status: "in_progress" }],
+        updatedAt: "2026-07-15T00:01:00Z",
+      },
+    });
+    expect(await screen.findByText("实时更新步骤")).toBeTruthy();
+    expect(screen.queryByText("已加载步骤")).toBeNull();
   });
 });

@@ -33,6 +33,7 @@
     "@lilia/ui": "github:sena-nana/LiliaUI#workspace=@lilia/ui&commit=921eaf21cf7aee1c7eeb2903993c84e043023c53",
     "@lucide/vue": "^1.22.0",
     "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-opener": "2.5.4",
     "vue": "^3.5.39",
     "vue-router": "^5.1.0"
   },
