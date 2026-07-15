@@ -2,6 +2,7 @@ mod capture;
 pub(crate) mod commands;
 mod llm;
 mod runtime;
+mod skills;
 pub(crate) mod store;
 pub(crate) mod tools;
 
@@ -10,7 +11,7 @@ pub use store::AgentStore;
 
 use serde::Serialize;
 use serde_json::json;
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{hash_map::Entry, BTreeSet, HashMap};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
@@ -62,7 +63,36 @@ pub struct AgentRuntime {
 pub struct PendingContinuation {
     pub conversation_id: String,
     pub tool_call_id: String,
+    pub state: AgentTurnState,
+}
+
+pub struct AgentTurnState {
     pub messages: Vec<serde_json::Value>,
+    pub active_skills: BTreeSet<String>,
+    pub action_steps: usize,
+    pub skill_load_steps: usize,
+}
+
+impl AgentTurnState {
+    pub fn new(messages: Vec<serde_json::Value>) -> Self {
+        Self {
+            messages,
+            active_skills: BTreeSet::new(),
+            action_steps: 0,
+            skill_load_steps: 0,
+        }
+    }
+}
+
+impl PendingContinuation {
+    pub fn resume(mut self, answer: &str) -> AgentTurnState {
+        self.state.messages.push(json!({
+            "role": "tool",
+            "tool_call_id": self.tool_call_id,
+            "content": answer,
+        }));
+        self.state
+    }
 }
 
 pub(crate) fn emit_conversations_changed(app: &AppHandle) {
@@ -219,6 +249,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn pending_answer_resumes_the_same_turn_skill_state() {
+        let mut state = AgentTurnState::new(vec![json!({"role": "system", "content": "base"})]);
+        state.active_skills.insert("parameter-editing".into());
+        state.action_steps = 3;
+        state.skill_load_steps = 1;
+
+        let resumed = PendingContinuation {
+            conversation_id: "conversation".into(),
+            tool_call_id: "ask-call".into(),
+            state,
+        }
+        .resume("确认");
+
+        assert_eq!(
+            resumed.active_skills,
+            BTreeSet::from(["parameter-editing".into()])
+        );
+        assert_eq!(resumed.action_steps, 3);
+        assert_eq!(resumed.skill_load_steps, 1);
+        assert_eq!(
+            resumed.messages.last().unwrap(),
+            &json!({
+                "role": "tool",
+                "tool_call_id": "ask-call",
+                "content": "确认",
+            })
+        );
+        assert!(AgentTurnState::new(Vec::new()).active_skills.is_empty());
+    }
+
     #[tokio::test]
     async fn only_one_turn_can_own_a_conversation() {
         let runtime = AgentRuntime::default();
@@ -265,7 +326,12 @@ mod tests {
             PendingContinuation {
                 conversation_id: conversation.id.clone(),
                 tool_call_id: "tool-call".into(),
-                messages: Vec::new(),
+                state: AgentTurnState {
+                    messages: Vec::new(),
+                    active_skills: BTreeSet::new(),
+                    action_steps: 0,
+                    skill_load_steps: 0,
+                },
             },
         );
 

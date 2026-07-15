@@ -1,18 +1,24 @@
 use crate::agent::llm::{
     chat_completions, chat_completions_stream, content_to_text, image_file_to_data_url,
+    ToolCallPayload,
 };
+use crate::agent::skills::{self, MAX_SKILL_LOAD_STEPS, READ_SKILL_TOOL_NAME};
 use crate::agent::store::MemoryUpsertInput;
-use crate::agent::tools::{execute_tool, tool_definitions, ToolExecutionContext, ToolOutcome};
+use crate::agent::tools::{
+    advertised_tool_names, execute_tool, tool_definitions, ToolExecutionContext, ToolOutcome,
+};
 use crate::agent::{
-    emit_conversations_changed, AgentError, AgentRuntime, PendingContinuation, SYSTEM_PROMPT,
+    emit_conversations_changed, AgentError, AgentRuntime, AgentTurnState, PendingContinuation,
+    SYSTEM_PROMPT,
 };
 use crate::service::EditorService;
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 
-const MAX_STEPS: usize = 12;
+const MAX_ACTION_STEPS: usize = 12;
 
 pub async fn run_turn(
     app: AppHandle,
@@ -62,12 +68,7 @@ pub async fn continue_after_ask(
             .remove(&ask.ask_id)
             .ok_or_else(|| AgentError::new("ask_not_found", "提问上下文已失效。"))?;
 
-        let mut messages = continuation.messages;
-        messages.push(json!({
-            "role": "tool",
-            "tool_call_id": continuation.tool_call_id,
-            "content": answer.clone(),
-        }));
+        let state = continuation.resume(&answer);
         runtime.store.append_message(
             &ask.conversation_id,
             "user",
@@ -84,7 +85,7 @@ pub async fn continue_after_ask(
             editor.inner(),
             &conversation_id,
             None,
-            Some(messages),
+            Some(state),
             cancel.clone(),
         )
         .await
@@ -151,22 +152,27 @@ async fn run_turn_inner(
     editor: &EditorService,
     conversation_id: &str,
     user_text: Option<String>,
-    existing_messages: Option<Vec<Value>>,
+    existing_state: Option<AgentTurnState>,
     cancel: Arc<AtomicBool>,
 ) -> Result<TurnEnd, AgentError> {
     let config = runtime.store.get_llm_config()?;
-    let project_id = runtime.store.conversation_project_id(conversation_id)?;
-    let memories = runtime
-        .store
-        .memories_for_injection(project_id.as_deref())?;
-
-    let mut messages = if let Some(existing) = existing_messages {
+    let mut state = if let Some(existing) = existing_state {
         existing
     } else {
-        let mut seeded = vec![json!({
-            "role": "system",
-            "content": SYSTEM_PROMPT
-        })];
+        let project_id = runtime.store.conversation_project_id(conversation_id)?;
+        let memories = runtime
+            .store
+            .memories_for_injection(project_id.as_deref())?;
+        let mut seeded = vec![
+            json!({
+                "role": "system",
+                "content": SYSTEM_PROMPT
+            }),
+            json!({
+                "role": "system",
+                "content": skills::catalog_prompt()?
+            }),
+        ];
         if !memories.is_empty() {
             let memory_text = memories
                 .iter()
@@ -206,20 +212,20 @@ async fn run_turn_inner(
                 "content": text,
             }));
         }
-        seeded
+        AgentTurnState::new(seeded)
     };
 
-    let tools = tool_definitions();
-
-    for _ in 0..MAX_STEPS {
+    loop {
         if cancel.load(Ordering::SeqCst) {
             return Err(AgentError::new("cancelled", "已取消。"));
         }
 
+        let tools = tool_definitions(&state.active_skills)?;
+        let advertised = advertised_tool_names(&tools);
         let assistant = {
             let conversation_id = conversation_id.to_string();
             let app = app.clone();
-            chat_completions_stream(&config, &messages, &tools, move |piece| {
+            chat_completions_stream(&config, &state.messages, &tools, move |piece| {
                 let _ = app.emit(
                     "agent://turn-delta",
                     json!({ "conversationId": conversation_id, "text": piece }),
@@ -239,7 +245,29 @@ async fn run_turn_inner(
             return Ok(TurnEnd::Finished);
         }
 
-        messages.push(json!({
+        let batch = validate_tool_call_batch(&tool_calls, &advertised)?;
+        match batch {
+            ToolCallBatch::SkillLoad => {
+                if state.skill_load_steps >= MAX_SKILL_LOAD_STEPS {
+                    return Err(AgentError::new(
+                        "step_limit",
+                        "达到 SKILL 读取步数上限，已停止。",
+                    ));
+                }
+                state.skill_load_steps += 1;
+            }
+            ToolCallBatch::Action => {
+                if state.action_steps >= MAX_ACTION_STEPS {
+                    return Err(AgentError::new(
+                        "step_limit",
+                        "达到工具调用步数上限，已停止。",
+                    ));
+                }
+                state.action_steps += 1;
+            }
+        }
+
+        state.messages.push(json!({
             "role": "assistant",
             "content": assistant.content.clone().unwrap_or(Value::Null),
             "tool_calls": tool_calls.iter().map(|call| json!({
@@ -251,6 +279,17 @@ async fn run_turn_inner(
                 }
             })).collect::<Vec<_>>(),
         }));
+
+        if batch == ToolCallBatch::SkillLoad {
+            for (tool_call_id, content) in load_skills(&mut state.active_skills, &tool_calls)? {
+                state.messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": content,
+                }));
+            }
+            continue;
+        }
 
         for call in tool_calls {
             if cancel.load(Ordering::SeqCst) {
@@ -273,7 +312,7 @@ async fn run_turn_inner(
                 Ok(outcome) => outcome,
                 Err(error) if error.code == "cancelled" => return Err(error),
                 Err(error) => {
-                    messages.push(json!({
+                    state.messages.push(json!({
                         "role": "tool",
                         "tool_call_id": call.id,
                         "content": tool_error_content(&error),
@@ -289,7 +328,7 @@ async fn run_turn_inner(
                         PendingContinuation {
                             conversation_id: conversation_id.into(),
                             tool_call_id,
-                            messages: messages.clone(),
+                            state,
                         },
                     );
                     let _ = app.emit(
@@ -302,7 +341,7 @@ async fn run_turn_inner(
                     content,
                     image_path,
                 } => {
-                    messages.push(json!({
+                    state.messages.push(json!({
                         "role": "tool",
                         "tool_call_id": call.id,
                         "content": content,
@@ -310,7 +349,7 @@ async fn run_turn_inner(
                     if let Some(path) = image_path {
                         match image_file_to_data_url(&path) {
                             Ok(data_url) => {
-                                messages.push(json!({
+                                state.messages.push(json!({
                                     "role": "user",
                                     "content": [
                                         {
@@ -325,7 +364,7 @@ async fn run_turn_inner(
                                 }));
                             }
                             Err(error) => {
-                                messages.push(json!({
+                                state.messages.push(json!({
                                     "role": "user",
                                     "content": format!("截屏文件无法作为图像注入：{}", error.message),
                                 }));
@@ -336,11 +375,6 @@ async fn run_turn_inner(
             }
         }
     }
-
-    Err(AgentError::new(
-        "step_limit",
-        "达到工具调用步数上限，已停止。",
-    ))
 }
 
 fn tool_error_content(error: &AgentError) -> String {
@@ -352,6 +386,64 @@ fn tool_error_content(error: &AgentError) -> String {
         }
     })
     .to_string()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToolCallBatch {
+    SkillLoad,
+    Action,
+}
+
+fn validate_tool_call_batch(
+    calls: &[ToolCallPayload],
+    advertised: &BTreeSet<&str>,
+) -> Result<ToolCallBatch, AgentError> {
+    if let Some(call) = calls
+        .iter()
+        .find(|call| !advertised.contains(call.function.name.as_str()))
+    {
+        return Err(AgentError::new(
+            "tool_not_available",
+            format!("当前回合未开放工具：{}", call.function.name),
+        ));
+    }
+
+    let skill_calls = calls
+        .iter()
+        .filter(|call| call.function.name == READ_SKILL_TOOL_NAME)
+        .count();
+    if skill_calls == 0 {
+        Ok(ToolCallBatch::Action)
+    } else if skill_calls == calls.len() {
+        Ok(ToolCallBatch::SkillLoad)
+    } else {
+        Err(AgentError::new(
+            "mixed_skill_load",
+            "read_skill 不能与业务工具在同一响应中调用。",
+        ))
+    }
+}
+
+fn load_skills(
+    active_skills: &mut BTreeSet<String>,
+    calls: &[ToolCallPayload],
+) -> Result<Vec<(String, String)>, AgentError> {
+    let requested = calls
+        .iter()
+        .map(|call| skills::parse_read_arguments(&call.function.arguments))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(calls
+        .iter()
+        .zip(requested)
+        .map(|(call, skill)| {
+            let content = if active_skills.insert(skill.name.clone()) {
+                skill.instructions.clone()
+            } else {
+                format!("SKILL {} 已在当前回合激活，无需重复读取。", skill.name)
+            };
+            (call.id.clone(), content)
+        })
+        .collect())
 }
 
 pub async fn consolidate_memory(
@@ -450,6 +542,66 @@ pub async fn consolidate_memory(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::llm::ToolFunctionPayload;
+
+    fn call(id: &str, name: &str, arguments: &str) -> ToolCallPayload {
+        ToolCallPayload {
+            id: id.into(),
+            r#type: Some("function".into()),
+            function: ToolFunctionPayload {
+                name: name.into(),
+                arguments: arguments.into(),
+            },
+        }
+    }
+
+    #[test]
+    fn tool_batches_reject_hidden_and_mixed_calls_before_execution() {
+        let advertised = BTreeSet::from(["read_skill", "get_editor_snapshot"]);
+        assert!(matches!(
+            validate_tool_call_batch(
+                &[call("1", "preview_add_parameter", "{}")],
+                &advertised
+            ),
+            Err(error) if error.code == "tool_not_available"
+        ));
+        assert!(matches!(
+            validate_tool_call_batch(
+                &[
+                    call("1", "read_skill", r#"{"name":"parameter-editing"}"#),
+                    call("2", "get_editor_snapshot", "{}"),
+                ],
+                &advertised,
+            ),
+            Err(error) if error.code == "mixed_skill_load"
+        ));
+        assert_eq!(
+            validate_tool_call_batch(
+                &[call("1", "read_skill", r#"{"name":"parameter-editing"}"#)],
+                &advertised,
+            )
+            .unwrap(),
+            ToolCallBatch::SkillLoad
+        );
+    }
+
+    #[test]
+    fn skill_loads_are_atomic_and_idempotent() {
+        let valid = call("1", "read_skill", r#"{"name":"parameter-editing"}"#);
+        let mut active = BTreeSet::new();
+        let first = load_skills(&mut active, std::slice::from_ref(&valid)).unwrap();
+        assert!(first[0].1.contains("# Parameter Editing"));
+        assert_eq!(active, BTreeSet::from(["parameter-editing".into()]));
+
+        let repeated = load_skills(&mut active, std::slice::from_ref(&valid)).unwrap();
+        assert!(repeated[0].1.contains("无需重复读取"));
+        assert_eq!(active.len(), 1);
+
+        let invalid = call("2", "read_skill", r#"{"name":"missing"}"#);
+        let mut empty = BTreeSet::new();
+        assert!(load_skills(&mut empty, &[valid, invalid]).is_err());
+        assert!(empty.is_empty());
+    }
 
     #[test]
     fn tool_failures_are_returned_as_structured_model_context() {

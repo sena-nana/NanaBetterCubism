@@ -1,13 +1,15 @@
 use crate::agent::capture::capture_cubism_editor_window;
+use crate::agent::skills;
 use crate::agent::store::{truncate_summary, MemoryUpsertInput, PendingAsk, PlanStep};
 use crate::agent::{emit_conversations_changed, new_id, AgentError, AgentRuntime};
 use crate::domain::ParameterBatchInput;
 use crate::service::{CommandError, EditorService};
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use std::sync::{atomic::AtomicBool, Arc};
 use tauri::{AppHandle, Emitter};
 
-pub fn tool_definitions() -> Vec<Value> {
+fn all_domain_tool_definitions() -> Vec<Value> {
     let mut tools = vec![
         tool(
             "get_editor_snapshot",
@@ -157,6 +159,66 @@ pub fn tool_definitions() -> Vec<Value> {
     ];
     tools.extend(crate::service::official_api::tool_definitions());
     tools
+}
+
+pub fn tool_definitions(active_skills: &BTreeSet<String>) -> Result<Vec<Value>, AgentError> {
+    let allowed = skills::allowed_domain_tools(active_skills)?;
+    let domain_tools = all_domain_tool_definitions();
+    let available = domain_tools
+        .iter()
+        .filter_map(tool_name)
+        .collect::<BTreeSet<_>>();
+    let missing = allowed.difference(&available).copied().collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(AgentError::new(
+            "invalid_skill_registry",
+            format!("SKILL 引用了未知工具：{}", missing.join(", ")),
+        ));
+    }
+
+    let mut tools = vec![skills::read_skill_tool_definition()?];
+    tools.extend(
+        domain_tools
+            .into_iter()
+            .filter(|definition| tool_name(definition).is_some_and(|name| allowed.contains(name))),
+    );
+    Ok(tools)
+}
+
+#[cfg(test)]
+pub fn all_tool_definitions() -> Result<Vec<Value>, AgentError> {
+    let domain_tools = all_domain_tool_definitions();
+    let available = domain_tools
+        .iter()
+        .filter_map(tool_name)
+        .collect::<BTreeSet<_>>();
+    let declared = skills::all_declared_domain_tools()?;
+    if available != declared {
+        let missing = declared.difference(&available).copied().collect::<Vec<_>>();
+        let unassigned = available.difference(&declared).copied().collect::<Vec<_>>();
+        return Err(AgentError::new(
+            "invalid_skill_registry",
+            format!(
+                "SKILL 工具注册不完整；未知：{}；未分配：{}",
+                missing.join(", "),
+                unassigned.join(", ")
+            ),
+        ));
+    }
+    let mut tools = vec![skills::read_skill_tool_definition()?];
+    tools.extend(domain_tools);
+    Ok(tools)
+}
+
+pub fn advertised_tool_names(tools: &[Value]) -> BTreeSet<&str> {
+    tools.iter().filter_map(tool_name).collect()
+}
+
+fn tool_name(definition: &Value) -> Option<&str> {
+    definition
+        .get("function")
+        .and_then(|function| function.get("name"))
+        .and_then(Value::as_str)
 }
 
 fn tool(name: &str, description: &str, parameters: Value) -> Value {
@@ -530,4 +592,65 @@ fn emit_tool(app: &AppHandle, conversation_id: &str, tool_name: &str, status: &s
 
 fn map_command_error(error: CommandError) -> AgentError {
     AgentError::new(error.code, error.message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(definitions: &[Value]) -> BTreeSet<&str> {
+        advertised_tool_names(definitions)
+    }
+
+    #[test]
+    fn initial_tool_set_only_contains_core_tools() {
+        let definitions = tool_definitions(&BTreeSet::new()).unwrap();
+        assert_eq!(
+            names(&definitions),
+            BTreeSet::from([
+                "read_skill",
+                "get_editor_snapshot",
+                "connect_editor",
+                "disconnect_editor",
+                "ask_user",
+                "update_plan",
+            ])
+        );
+    }
+
+    #[test]
+    fn active_skills_only_add_their_declared_tools() {
+        let parameter = tool_definitions(&BTreeSet::from(["parameter-editing".into()])).unwrap();
+        let parameter_names = names(&parameter);
+        assert!(parameter_names.contains("preview_add_parameter"));
+        assert!(parameter_names.contains("execute_editor_edit"));
+        assert!(!parameter_names.contains("preview_add_part"));
+        assert!(!parameter_names.contains("list_memories"));
+
+        let combined = tool_definitions(&BTreeSet::from([
+            "parameter-editing".into(),
+            "object-editing".into(),
+        ]))
+        .unwrap();
+        let combined_names = names(&combined);
+        assert!(combined_names.contains("preview_add_parameter"));
+        assert!(combined_names.contains("preview_add_part"));
+        assert_eq!(
+            combined_names
+                .iter()
+                .filter(|name| **name == "execute_editor_edit")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn every_domain_tool_is_core_or_assigned_to_a_skill() {
+        let definitions = all_tool_definitions().unwrap();
+        assert_eq!(names(&definitions).len(), definitions.len());
+        assert!(names(&definitions).contains("read_skill"));
+        for forbidden in ["read_file", "write_file", "apply_patch", "run_terminal"] {
+            assert!(!names(&definitions).contains(forbidden));
+        }
+    }
 }
