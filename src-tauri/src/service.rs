@@ -3,6 +3,7 @@ mod credentials;
 mod model_structure;
 pub(crate) mod official_api;
 mod part_parameters;
+mod preview_store;
 mod transaction;
 
 pub use commands::{
@@ -21,6 +22,7 @@ use credentials::{load_token, save_token};
 #[cfg(test)]
 use model_structure::parse_structure;
 use model_structure::{fetch_structure, verify_plan};
+use preview_store::PendingPreviews;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -90,12 +92,19 @@ struct ServiceState {
     rpc: Option<RpcClient>,
     model_uid: Option<String>,
     structure: ModelStructure,
-    previews: HashMap<String, StoredPlan>,
-    editor_edit_previews: HashMap<String, StoredEditorEditPlan>,
+    previews: PendingPreviews<StoredPlan>,
+    editor_edit_previews: PendingPreviews<StoredEditorEditPlan>,
     editor_edit_results: HashMap<String, EditorEditResult>,
     document_refs: HashMap<String, String>,
     operation: Option<ActiveOperation>,
     part_query_in_progress: bool,
+}
+
+impl ServiceState {
+    fn clear_previews(&mut self) {
+        self.previews.clear();
+        self.editor_edit_previews.clear();
+    }
 }
 
 impl Default for EditorService {
@@ -245,7 +254,7 @@ impl EditorService {
                 }
                 inner.generation = inner.generation.wrapping_add(1);
                 inner.rpc = Some(rpc.clone());
-                inner.previews.clear();
+                inner.clear_previews();
                 inner.part_query_in_progress = false;
             }
 
@@ -471,7 +480,7 @@ impl EditorService {
                 let changed = inner.model_uid.as_deref() != Some(&model_uid)
                     || inner.structure.semantic_hash() != structure.semantic_hash();
                 if changed {
-                    inner.previews.clear();
+                    inner.clear_previews();
                 }
                 inner.model_uid = Some(model_uid);
                 inner.structure = structure.clone();
@@ -589,7 +598,6 @@ impl EditorService {
                 ));
             }
             inner.structure = structure;
-            inner.previews.clear();
             inner.previews.insert(preview_id, plan);
         }
         Ok(preview)
@@ -1137,7 +1145,7 @@ impl EditorService {
                 return;
             }
             inner.operation = None;
-            inner.previews.clear();
+            inner.clear_previews();
             if let Some(structure) = structure {
                 inner.snapshot.groups = structure.groups.clone();
                 inner.structure = structure;
@@ -1168,8 +1176,7 @@ impl EditorService {
 fn clear_session_data(inner: &mut ServiceState) {
     inner.model_uid = None;
     inner.structure = ModelStructure::default();
-    inner.previews.clear();
-    inner.editor_edit_previews.clear();
+    inner.clear_previews();
     inner.document_refs.clear();
     inner.part_query_in_progress = false;
     inner.snapshot.api_version = None;
@@ -1191,7 +1198,10 @@ fn response_bool(value: Value) -> Result<bool, RpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{ExistingParameter, ParameterPreviewRow};
+    use crate::domain::{
+        BatchGroupSelection, ExistingParameter, IdTemplateConfig, ParameterDefaults,
+        ParameterInputRow, ParameterPreviewRow, ParameterRowOverrides,
+    };
     use futures_util::{SinkExt, StreamExt};
     use tokio::net::TcpListener;
     use tokio_tungstenite::{accept_async, tungstenite::Message};
@@ -1213,6 +1223,124 @@ mod tests {
             }
         });
         port
+    }
+
+    async fn response_server(responses: Vec<(&'static str, Value)>) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            for (method, data) in responses {
+                let request = socket.next().await.unwrap().unwrap().into_text().unwrap();
+                let request: Value = serde_json::from_str(&request).unwrap();
+                assert_eq!(request["Method"], method);
+                socket
+                    .send(Message::Text(
+                        json!({
+                            "Version": EDIT_API_VERSION,
+                            "RequestId": request["RequestId"],
+                            "Type": "Response",
+                            "Method": method,
+                            "Data": data,
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+        });
+        port
+    }
+
+    fn batch_input(key: &str) -> ParameterBatchInput {
+        ParameterBatchInput {
+            id_template: IdTemplateConfig {
+                template: "{prefix}{key}{index}".into(),
+                prefix: "Param".into(),
+                suffix: String::new(),
+                start_index: 1,
+                index_width: 2,
+            },
+            defaults: ParameterDefaults {
+                min: -1.0,
+                default: 0.0,
+                max: 1.0,
+                is_blend_shape: false,
+                is_repeat: false,
+                group: BatchGroupSelection::Root,
+            },
+            rows: vec![ParameterInputRow {
+                client_id: format!("row-{key}"),
+                name: key.into(),
+                key: key.into(),
+                side: String::new(),
+                overrides: ParameterRowOverrides::default(),
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_previews_from_the_same_model_snapshot_coexist() {
+        let structure = json!({"ParameterStructure": {"Entries": []}});
+        let port = response_server(vec![
+            ("GetParameterStructure", structure.clone()),
+            ("GetParameterStructure", structure),
+        ])
+        .await;
+        let rpc = RpcClient::connect(port).await.unwrap();
+        let service = EditorService::default();
+        {
+            let mut inner = service.inner.lock().await;
+            inner.rpc = Some(rpc);
+            inner.model_uid = Some("model".into());
+            inner.generation = 1;
+            inner.snapshot.state = EditorConnectionState::Ready;
+            inner.snapshot.capabilities.batch_create_parameters = true;
+        }
+
+        let first = service.preview_batch(batch_input("Angle")).await.unwrap();
+        let second = service.preview_batch(batch_input("Hair")).await.unwrap();
+        let first_id = first.preview_id.unwrap();
+        let second_id = second.preview_id.unwrap();
+        let inner = service.inner.lock().await;
+
+        assert_ne!(first_id, second_id);
+        assert!(inner.previews.contains(&first_id));
+        assert!(inner.previews.contains(&second_id));
+    }
+
+    #[test]
+    fn session_cleanup_invalidates_every_preview_type() {
+        let mut state = ServiceState::default();
+        state.previews.insert(
+            "batch".into(),
+            StoredPlan {
+                preview_id: "batch".into(),
+                generation: 1,
+                model_uid: "model".into(),
+                structure_hash: String::new(),
+                new_group: None,
+                rows: Vec::new(),
+            },
+        );
+        state.editor_edit_previews.insert(
+            "official".into(),
+            StoredEditorEditPlan {
+                preview_id: "official".into(),
+                generation: 1,
+                model_uid: "model".into(),
+                method: "EditParameter".into(),
+                data: Value::Null,
+                precondition: Value::Null,
+            },
+        );
+
+        clear_session_data(&mut state);
+
+        assert!(!state.previews.contains("batch"));
+        assert!(!state.editor_edit_previews.contains("official"));
     }
 
     #[test]
