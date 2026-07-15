@@ -78,13 +78,13 @@ pub async fn agent_set_conversation_pinned(
 }
 
 #[tauri::command]
-pub async fn agent_archive_conversation(
+pub async fn agent_delete_conversation(
     app: AppHandle,
     conversation_id: String,
-) -> Result<bool, AgentError> {
-    let archived = runtime(&app)?.archive_conversation(&conversation_id).await?;
+) -> Result<(), AgentError> {
+    runtime(&app)?.delete_conversation(&conversation_id).await?;
     emit_conversations_changed(&app);
-    Ok(archived)
+    Ok(())
 }
 
 #[tauri::command]

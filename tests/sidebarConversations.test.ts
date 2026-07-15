@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConversationSummary } from "../src/features/agent/types";
 
 const bridge = vi.hoisted(() => ({
-  archiveConversation: vi.fn<(conversationId: string) => Promise<boolean>>(),
+  deleteConversation: vi.fn<(conversationId: string) => Promise<void>>(),
   listConversations: vi.fn<() => Promise<ConversationSummary[]>>(),
   listenConversationsChanged: vi.fn(async () => () => undefined),
   normalizeCommandError: vi.fn((error: unknown) => ({
@@ -18,7 +18,7 @@ beforeEach(() => {
   vi.resetModules();
   bridge.listConversations.mockReset();
   bridge.listenConversationsChanged.mockClear();
-  bridge.archiveConversation.mockReset();
+  bridge.deleteConversation.mockReset();
   bridge.setConversationPinned.mockReset();
 });
 
@@ -123,23 +123,64 @@ describe("Agent 侧边栏会话", () => {
     });
   });
 
-  it("归档会话经确认后从缓存列表移除", async () => {
-    const row = summary("a", "待归档", null);
-    bridge.archiveConversation.mockResolvedValue(true);
+  it("删除会话经确认后清理运行状态并从缓存列表移除", async () => {
+    const row = summary("a", "待删除", null);
+    bridge.deleteConversation.mockResolvedValue(undefined);
     const {
       applyConversationGroup,
-      confirmConversationArchive,
-      requestConversationArchive,
+      confirmConversationDelete,
+      requestConversationDelete,
+      sidebarConversationsState,
+    } = await import("../src/features/agent/sidebarConversations");
+    const { getConversationTurnPhase, setConversationTurnPhase } = await import(
+      "../src/features/agent/conversationRuntimeStore"
+    );
+
+    applyConversationGroup([row]);
+    setConversationTurnPhase("a", "running");
+    requestConversationDelete(row);
+    expect(sidebarConversationsState.deleteTarget?.id).toBe("a");
+    await expect(confirmConversationDelete()).resolves.toBe("a");
+
+    expect(bridge.deleteConversation).toHaveBeenCalledWith("a");
+    expect(sidebarConversationsState.rows).toEqual([]);
+    expect(getConversationTurnPhase("a")).toBe("idle");
+  });
+
+  it("删除失败时保留会话和确认目标", async () => {
+    const row = summary("a", "待删除", null);
+    bridge.deleteConversation.mockRejectedValue(new Error("unavailable"));
+    const {
+      applyConversationGroup,
+      confirmConversationDelete,
+      requestConversationDelete,
       sidebarConversationsState,
     } = await import("../src/features/agent/sidebarConversations");
 
     applyConversationGroup([row]);
-    requestConversationArchive(row);
-    expect(sidebarConversationsState.archiveTarget?.id).toBe("a");
-    await expect(confirmConversationArchive()).resolves.toBe("a");
+    requestConversationDelete(row);
+    await expect(confirmConversationDelete()).resolves.toBeNull();
 
-    expect(bridge.archiveConversation).toHaveBeenCalledWith("a");
-    expect(sidebarConversationsState.rows).toEqual([]);
+    expect(sidebarConversationsState.rows).toEqual([row]);
+    expect(sidebarConversationsState.deleteTarget).toEqual(row);
+    expect(sidebarConversationsState.actionError).toBe("unavailable");
+  });
+
+  it("运行中的会话禁用删除操作", async () => {
+    const row = summary("a", "运行中", null);
+    const { applyConversationGroup } = await import("../src/features/agent/sidebarConversations");
+    const { setConversationTurnPhase } = await import(
+      "../src/features/agent/conversationRuntimeStore"
+    );
+    const { SIDEBAR_GROUPS } = await import("@lilia/ui");
+
+    setConversationTurnPhase("a", "running");
+    applyConversationGroup([row]);
+
+    expect(SIDEBAR_GROUPS[0]?.items?.[0]?.tools?.[1]).toMatchObject({
+      key: "delete",
+      disabled: true,
+    });
   });
 });
 

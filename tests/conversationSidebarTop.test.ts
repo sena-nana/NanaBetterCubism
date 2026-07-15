@@ -5,7 +5,7 @@ import { defineComponent } from "vue";
 import type { ConversationSummary } from "../src/features/agent/types";
 
 const bridge = vi.hoisted(() => ({
-  archiveConversation: vi.fn(async () => true),
+  deleteConversation: vi.fn(async () => undefined),
   listConversations: vi.fn<() => Promise<ConversationSummary[]>>(async () => []),
   listenConversationsChanged: vi.fn(async () => () => undefined),
   normalizeCommandError: vi.fn((error: unknown) => ({
@@ -19,7 +19,7 @@ vi.mock("../src/features/agent/bridge", () => bridge);
 
 beforeEach(() => {
   vi.resetModules();
-  bridge.archiveConversation.mockClear();
+  bridge.deleteConversation.mockClear();
   bridge.listConversations.mockReset();
   bridge.listConversations.mockResolvedValue([]);
 });
@@ -56,24 +56,24 @@ describe("侧边栏顶部会话工具", () => {
     expect(screen.queryByPlaceholderText("搜索会话…")).toBeNull();
   });
 
-  it("归档当前会话后回到空白新对话页", async () => {
+  it("彻底删除当前会话后回到空白新对话页", async () => {
     const { default: ConversationSidebarTop } = await import(
       "../src/features/agent/components/ConversationSidebarTop.vue"
     );
-    const { applyConversationGroup, requestConversationArchive } = await import(
+    const { applyConversationGroup, requestConversationDelete } = await import(
       "../src/features/agent/sidebarConversations"
     );
-    const row = summary("a", "待归档", null);
+    const row = summary("a", "待删除", null);
     applyConversationGroup([row]);
-    requestConversationArchive(row);
+    requestConversationDelete(row);
     const router = createTestRouter();
     await router.push("/chats/a");
     await router.isReady();
     render(ConversationSidebarTop, { global: { plugins: [router] } });
 
-    await fireEvent.click(screen.getByRole("button", { name: "归档" }));
+    await fireEvent.click(screen.getByRole("button", { name: "彻底删除" }));
 
-    expect(bridge.archiveConversation).toHaveBeenCalledWith("a");
+    expect(bridge.deleteConversation).toHaveBeenCalledWith("a");
     await waitFor(() => expect(router.currentRoute.value.path).toBe("/"));
   });
 });

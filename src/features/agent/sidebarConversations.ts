@@ -1,7 +1,7 @@
-import Archive from "@lucide/vue/dist/esm/icons/archive.mjs";
 import MessageSquare from "@lucide/vue/dist/esm/icons/message-square.mjs";
 import Pin from "@lucide/vue/dist/esm/icons/pin.mjs";
 import RotateCcw from "@lucide/vue/dist/esm/icons/rotate-ccw.mjs";
+import Trash2 from "@lucide/vue/dist/esm/icons/trash-2.mjs";
 import {
   SIDEBAR_GROUPS,
   type SidebarGroup,
@@ -9,13 +9,14 @@ import {
 } from "@lilia/ui";
 import { markRaw, reactive } from "vue";
 import {
-  archiveConversation,
+  deleteConversation,
   listConversations,
   listenConversationsChanged,
   normalizeCommandError,
   setConversationPinned,
 } from "./bridge";
 import {
+  clearConversationTurnPhase,
   getConversationTurnPhase,
   subscribeConversationTurnPhases,
 } from "./conversationRuntimeStore";
@@ -23,7 +24,7 @@ import type { ConversationSummary } from "./types";
 
 const conversationIcon = markRaw(MessageSquare);
 const pinIcon = markRaw(Pin);
-const archiveIcon = markRaw(Archive);
+const deleteIcon = markRaw(Trash2);
 const retryIcon = markRaw(RotateCcw);
 
 export const sidebarConversationsState = reactive({
@@ -32,8 +33,8 @@ export const sidebarConversationsState = reactive({
   loading: false,
   loadError: null as string | null,
   actionError: null as string | null,
-  archiveTarget: null as ConversationSummary | null,
-  archiving: false,
+  deleteTarget: null as ConversationSummary | null,
+  deleting: false,
 });
 
 let loadPromise: Promise<ConversationSummary[]> | null = null;
@@ -106,11 +107,11 @@ export function applyConversationGroup(rows: ConversationSummary[]) {
           onSelect: () => toggleConversationPinned(row),
         },
         {
-          key: "archive",
-          label: phase === "idle" ? "归档" : "对话进行中，无法归档",
-          icon: archiveIcon,
+          key: "delete",
+          label: phase === "idle" ? "删除" : "对话进行中，无法删除",
+          icon: deleteIcon,
           disabled: phase !== "idle",
-          onSelect: () => requestConversationArchive(row),
+          onSelect: () => requestConversationDelete(row),
         },
       ],
     });
@@ -159,24 +160,25 @@ export async function toggleConversationPinned(row: ConversationSummary) {
   }
 }
 
-export function requestConversationArchive(row: ConversationSummary) {
+export function requestConversationDelete(row: ConversationSummary) {
   sidebarConversationsState.actionError = null;
-  sidebarConversationsState.archiveTarget = row;
+  sidebarConversationsState.deleteTarget = row;
 }
 
-export function cancelConversationArchive() {
-  if (sidebarConversationsState.archiving) return;
-  sidebarConversationsState.archiveTarget = null;
+export function cancelConversationDelete() {
+  if (sidebarConversationsState.deleting) return;
+  sidebarConversationsState.deleteTarget = null;
 }
 
-export async function confirmConversationArchive(): Promise<string | null> {
-  const target = sidebarConversationsState.archiveTarget;
-  if (!target || sidebarConversationsState.archiving) return null;
-  sidebarConversationsState.archiving = true;
+export async function confirmConversationDelete(): Promise<string | null> {
+  const target = sidebarConversationsState.deleteTarget;
+  if (!target || sidebarConversationsState.deleting) return null;
+  sidebarConversationsState.deleting = true;
   sidebarConversationsState.actionError = null;
   try {
-    await archiveConversation(target.id);
-    sidebarConversationsState.archiveTarget = null;
+    await deleteConversation(target.id);
+    sidebarConversationsState.deleteTarget = null;
+    clearConversationTurnPhase(target.id);
     applyConversationGroup(
       sidebarConversationsState.rows.filter((row) => row.id !== target.id),
     );
@@ -185,7 +187,7 @@ export async function confirmConversationArchive(): Promise<string | null> {
     sidebarConversationsState.actionError = normalizeCommandError(error).message;
     return null;
   } finally {
-    sidebarConversationsState.archiving = false;
+    sidebarConversationsState.deleting = false;
   }
 }
 

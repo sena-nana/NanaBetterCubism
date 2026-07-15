@@ -7,8 +7,8 @@ import { computed, nextTick, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { searchConversations } from "../conversationSearch";
 import {
-  cancelConversationArchive,
-  confirmConversationArchive,
+  cancelConversationDelete,
+  confirmConversationDelete,
   dismissConversationError,
   ensureSidebarConversationsLoaded,
   sidebarConversationsState,
@@ -79,9 +79,9 @@ function onSearchKeydown(event: KeyboardEvent) {
   }
 }
 
-async function archiveSelectedConversation() {
-  const archivedId = await confirmConversationArchive();
-  if (archivedId && String(route.params.id ?? "") === archivedId) {
+async function deleteSelectedConversation() {
+  const deletedId = await confirmConversationDelete();
+  if (deletedId && String(route.params.id ?? "") === deletedId) {
     await router.push("/");
   }
 }
@@ -187,15 +187,15 @@ async function archiveSelectedConversation() {
   </div>
 
   <ConfirmDialog
-    :open="Boolean(sidebarConversationsState.archiveTarget)"
-    title="归档对话"
-    :message="`归档“${sidebarConversationsState.archiveTarget?.title ?? ''}”？历史消息会保留，但不会继续显示在侧边栏。`"
-    confirm-text="归档"
-    busy-text="正在归档"
-    :busy="sidebarConversationsState.archiving"
+    :open="Boolean(sidebarConversationsState.deleteTarget)"
+    title="删除对话"
+    :message="`永久删除“${sidebarConversationsState.deleteTarget?.title ?? ''}”？消息、计划和工具记录将无法恢复；已生成的记忆会保留。`"
+    confirm-text="彻底删除"
+    busy-text="正在删除"
+    :busy="sidebarConversationsState.deleting"
     danger
-    @cancel="cancelConversationArchive"
-    @confirm="archiveSelectedConversation"
+    @cancel="cancelConversationDelete"
+    @confirm="deleteSelectedConversation"
   />
 </template>
 

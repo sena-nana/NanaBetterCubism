@@ -21,7 +21,7 @@ const APP_TARGETS = [
   ["sidebar.search.close", CONVERSATION_SIDEBAR_TOP, "sidebar.search.close"],
   ["sidebar.search.result.<conversationId>", CONVERSATION_SIDEBAR_TOP, "sidebar.search.result.${result.id}"],
   ["sidebar.conversation.<conversationId>.pin", SIDEBAR_CONVERSATIONS, "key: \"pin\""],
-  ["sidebar.conversation.<conversationId>.archive", SIDEBAR_CONVERSATIONS, "key: \"archive\""],
+  ["sidebar.conversation.<conversationId>.delete", SIDEBAR_CONVERSATIONS, "key: \"delete\""],
   ["agent.chat", CHAT_PAGE, "agent.chat"],
   ["agent.chat.send", CHAT_COMPOSER, "`${agentIdPrefix}.send`"],
   ["agent.chat.input", CHAT_COMPOSER, "`${agentIdPrefix}.input`"],
