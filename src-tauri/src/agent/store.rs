@@ -513,13 +513,13 @@ impl AgentStore {
         })
     }
 
-    pub fn clear_pending_ask(&self, conversation_id: &str) -> Result<(), AgentError> {
+    pub fn clear_pending_ask(&self, conversation_id: &str) -> Result<bool, AgentError> {
         self.with_conn(|conn| {
-            conn.execute(
+            let deleted = conn.execute(
                 "DELETE FROM pending_asks WHERE conversation_id = ?1",
                 params![conversation_id],
             )?;
-            Ok(())
+            Ok(deleted > 0)
         })
     }
 

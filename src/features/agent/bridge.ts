@@ -7,6 +7,7 @@ import type {
   AgentToolEvent,
   AgentTurnDelta,
   AgentTurnFinished,
+  CancelTurnResult,
   ChatMessage,
   ConversationPlan,
   ConversationSummary,
@@ -44,9 +45,9 @@ export async function sendMessage(conversationId: string, content: string): Prom
   await invoke("agent_send_message", { conversationId, content });
 }
 
-export async function cancelTurn(conversationId: string): Promise<void> {
-  if (!isTauriRuntime()) return;
-  await invoke("agent_cancel_turn", { conversationId });
+export async function cancelTurn(conversationId: string): Promise<CancelTurnResult> {
+  if (!isTauriRuntime()) return { state: "idle" };
+  return invoke<CancelTurnResult>("agent_cancel_turn", { conversationId });
 }
 
 export async function answerAsk(askId: string, answer: string): Promise<void> {

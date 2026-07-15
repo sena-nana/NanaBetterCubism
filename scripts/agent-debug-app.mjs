@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 
 const CHAT_HOME = "src/features/agent/ChatHomePage.vue";
 const CHAT_PAGE = "src/features/agent/ChatPage.vue";
+const CHAT_COMPOSER = "src/features/agent/components/ConversationComposer.vue";
 const MEMORY_PAGE = "src/features/agent/MemoryPage.vue";
 const LLM_SETTINGS = "src/features/agent/settings/LlmSettingsSection.vue";
 const EDITOR_SETTINGS = "src/features/agent/settings/EditorSettingsSection.vue";
@@ -10,11 +11,13 @@ const CONNECTION_CARD = "src/features/editor/EditorConnectionCard.vue";
 
 const APP_TARGETS = [
   ["agent.home", CHAT_HOME, "agent.home"],
-  ["agent.home.new", CHAT_HOME, "agent.home.new"],
+  ["agent.home.input", CHAT_COMPOSER, "`${agentIdPrefix}.input`"],
+  ["agent.home.send", CHAT_COMPOSER, "`${agentIdPrefix}.send`"],
+  ["sidebar.global.new-chat", "node_modules/@lilia/ui/src/layouts/SecondaryPanel.vue", "`sidebar.global.${action.key}`"],
   ["agent.chat", CHAT_PAGE, "agent.chat"],
-  ["agent.chat.send", CHAT_PAGE, "agent.chat.send"],
-  ["agent.chat.input", CHAT_PAGE, "agent.chat.input"],
-  ["agent.chat.ask", CHAT_PAGE, "agent.chat.ask"],
+  ["agent.chat.send", CHAT_COMPOSER, "`${agentIdPrefix}.send`"],
+  ["agent.chat.input", CHAT_COMPOSER, "`${agentIdPrefix}.input`"],
+  ["agent.chat.ask", CHAT_COMPOSER, "`${agentIdPrefix}.ask`"],
   ["agent.chat.plan", CHAT_PAGE, "agent.chat.plan"],
   ["agent.chat.consolidate", CHAT_PAGE, "agent.chat.consolidate"],
   ["agent.memory", MEMORY_PAGE, "agent.memory"],

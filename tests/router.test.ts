@@ -1,7 +1,14 @@
-import { render, screen } from "@testing-library/vue";
-import { APP_SHELL_COPY, LiliaAppRoot, SETTINGS_TABS, vContextMenu } from "@lilia/ui";
+import { fireEvent, render, screen, within } from "@testing-library/vue";
+import {
+  LiliaAppRoot,
+  SETTINGS_CONFIG,
+  SETTINGS_TABS,
+  normalizeSettingsTab,
+  vContextMenu,
+} from "@lilia/ui";
 import { createMemoryHistory } from "vue-router";
 import { describe, expect, it } from "vitest";
+import appConfigJson from "../app.config.json";
 import { createNanaBetterCubismRouter } from "../src/app";
 
 async function renderAt(path: string) {
@@ -24,7 +31,7 @@ describe("Agent 壳层路由", () => {
     await renderAt("/");
 
     expect(
-      await screen.findByRole("heading", { level: 1, name: APP_SHELL_COPY.homeTitle }),
+      await screen.findByRole("heading", { level: 1, name: "想在 Cubism Editor 中完成什么？" }),
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: "新对话" })).toBeTruthy();
   });
@@ -48,12 +55,28 @@ describe("Agent 壳层路由", () => {
     expect(await screen.findByText("暂无全局经验")).toBeTruthy();
   });
 
-  it("设置页包含模型与 Editor tab", async () => {
+  it("设置页恢复外观、模型配置、Editor 与关于，并默认显示外观", async () => {
     await renderAt("/settings");
 
-    expect(SETTINGS_TABS.some((tab) => tab.key === "llm")).toBe(true);
-    expect(SETTINGS_TABS.some((tab) => tab.key === "editor")).toBe(true);
-    expect(await screen.findByRole("heading", { level: 1, name: "模型" })).toBeTruthy();
+    expect(SETTINGS_CONFIG.defaultTab).toBe("appearance");
+    expect(SETTINGS_TABS.map((tab) => tab.key)).toEqual([
+      "appearance",
+      "model-config",
+      "editor",
+      "about",
+    ]);
+    expect(await screen.findByRole("heading", { level: 2, name: "外观" })).toBeTruthy();
+
+    await fireEvent.click(screen.getByRole("radio", { name: "浅色" }));
+    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(localStorage.getItem(`${appConfigJson.storageKeyPrefix}.theme`)).toBe("light");
+  });
+
+  it("旧 llm tab 映射到模型配置", async () => {
+    await renderAt("/settings?tab=llm");
+
+    expect(normalizeSettingsTab("llm")).toBe("model-config");
+    expect(await screen.findByRole("heading", { level: 2, name: "模型配置" })).toBeTruthy();
   });
 
   it("设置页可通过 tab 显示 Editor", async () => {
@@ -63,11 +86,21 @@ describe("Agent 壳层路由", () => {
     expect(screen.getByRole("button", { name: "连接 Editor" })).toBeTruthy();
   });
 
+  it("关于页显示 NanaBetterCubism 应用元数据", async () => {
+    await renderAt("/settings?tab=about");
+
+    expect(await screen.findByRole("heading", { level: 2, name: "关于" })).toBeTruthy();
+    const aboutPage = document.querySelector('[data-agent-id="settings.page.about"]');
+    expect(aboutPage).toBeTruthy();
+    expect(within(aboutPage as HTMLElement).getByText(appConfigJson.productTitle)).toBeTruthy();
+    expect(within(aboutPage as HTMLElement).getByText(appConfigJson.version)).toBeTruthy();
+  });
+
   it("未知路由回到首页", async () => {
     await renderAt("/missing");
 
     expect(
-      await screen.findByRole("heading", { level: 1, name: APP_SHELL_COPY.homeTitle }),
+      await screen.findByRole("heading", { level: 1, name: "想在 Cubism Editor 中完成什么？" }),
     ).toBeTruthy();
   });
 });

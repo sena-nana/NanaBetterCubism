@@ -1,22 +1,38 @@
 <script setup lang="ts">
-import { UiButton, UiEmptyState } from "@lilia/ui";
-import { onMounted, ref } from "vue";
+import { UiButton } from "@lilia/ui";
+import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
-import { createConversation, listConversations, normalizeCommandError } from "./bridge";
+import { useEditorStore } from "../editor/editorStore";
+import {
+  createConversation,
+  getLlmConfig,
+  normalizeCommandError,
+  sendMessage,
+} from "./bridge";
+import ConversationComposer from "./components/ConversationComposer.vue";
+import ConversationSurface from "./components/ConversationSurface.vue";
+import ConversationTranscript from "./components/ConversationTranscript.vue";
+import { editorStatusLabel, modelStatusLabel } from "./conversationPresentation";
+import { setConversationTurnPhase } from "./conversationRuntimeStore";
 import { ensureSidebarConversationsLoaded } from "./sidebarConversations";
+import type { LlmConfigView } from "./types";
 
 const router = useRouter();
-const error = ref<string | null>(null);
+const editor = useEditorStore();
+const draft = ref("");
+const sending = ref(false);
 const loading = ref(true);
+const error = ref<string | null>(null);
+const llm = ref<LlmConfigView>({ baseUrl: null, model: null, hasApiKey: false });
+
+const canSend = computed(
+  () => Boolean(draft.value.trim()) && llm.value.hasApiKey && !sending.value,
+);
 
 onMounted(async () => {
+  void editor.initialize();
   try {
-    const rows = await listConversations();
-    await ensureSidebarConversationsLoaded(true);
-    if (rows[0]) {
-      await router.replace(`/chats/${rows[0].id}`);
-      return;
-    }
+    llm.value = await getLlmConfig();
   } catch (err) {
     error.value = normalizeCommandError(err).message;
   } finally {
@@ -24,53 +40,71 @@ onMounted(async () => {
   }
 });
 
-async function startChat() {
+async function startConversation() {
+  const content = draft.value.trim();
+  if (!content || !canSend.value) return;
+  sending.value = true;
   error.value = null;
   try {
     const created = await createConversation();
+    setConversationTurnPhase(created.id, "running");
+    try {
+      await sendMessage(created.id, content);
+    } catch (err) {
+      setConversationTurnPhase(created.id, "idle");
+      throw err;
+    }
+    draft.value = "";
     await ensureSidebarConversationsLoaded(true);
     await router.push(`/chats/${created.id}`);
   } catch (err) {
     error.value = normalizeCommandError(err).message;
+  } finally {
+    sending.value = false;
   }
+}
+
+function goSettings(tab: string) {
+  void router.push(`/settings?tab=${tab}`);
 }
 </script>
 
 <template>
-  <section class="page agent-home" data-agent-id="agent.home">
-    <header class="page-header">
-      <h1>Cubism Agent</h1>
-      <p>通过对话调用 Cubism Editor 工具，并保留项目记忆。</p>
-    </header>
-    <UiEmptyState
-      v-if="loading"
-      title="正在加载对话"
-      description="读取本地会话列表。"
-      agent-id="agent.home.loading"
+  <ConversationSurface data-agent-id="agent.home">
+    <ConversationTranscript
+      :messages="[]"
+      :loading="loading"
+      empty-title="想在 Cubism Editor 中完成什么？"
+      empty-description="输入目标开始新对话；会话会在首次发送时创建。"
     />
-    <div v-else class="agent-home__body">
-      <UiEmptyState
-        title="还没有对话"
-        description="创建新对话后，Agent 可以查询部件、批量创建参数、截取 Cubism Editor 窗口，并整理项目记忆。"
-        agent-id="agent.home.empty"
-      />
-      <UiButton variant="primary" agent-id="agent.home.new" @click="startChat">新对话</UiButton>
-      <p v-if="error" class="agent-home__error" role="alert">{{ error }}</p>
-    </div>
-  </section>
-</template>
 
-<style scoped>
-.agent-home__body {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 8px 0;
-}
-.agent-home__error {
-  margin: 0;
-  color: var(--err);
-  font-size: 12px;
-}
-</style>
+    <template #composer>
+      <ConversationComposer
+        v-model="draft"
+        agent-id-prefix="agent.home"
+        :disabled="!llm.hasApiKey"
+        :running="sending"
+        :can-send="canSend"
+        :error="error"
+        @send="startConversation"
+      >
+        <template #toolbar>
+          <UiButton
+            size="sm"
+            agent-id="agent.home.model-settings"
+            @click="goSettings('model-config')"
+          >
+            {{ modelStatusLabel(llm) }}
+          </UiButton>
+          <UiButton
+            size="sm"
+            agent-id="agent.home.editor-settings"
+            @click="goSettings('editor')"
+          >
+            {{ editorStatusLabel(editor.state.snapshot.state) }}
+          </UiButton>
+        </template>
+      </ConversationComposer>
+    </template>
+  </ConversationSurface>
+</template>

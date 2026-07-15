@@ -96,6 +96,10 @@ export interface AgentTurnFinished {
   message: string;
 }
 
+export interface CancelTurnResult {
+  state: "cancel_requested" | "pending_cleared" | "idle";
+}
+
 export interface AgentAskEvent {
   conversationId: string;
   ask: PendingAsk;

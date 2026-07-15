@@ -44,17 +44,22 @@ export const appConfig = {
     },
   },
   settings: {
-    defaultTab: "llm",
+    aliases: {
+      llm: "model-config",
+    },
+    defaultTab: "appearance",
     hideHeader: true,
     tabs: [
-      { key: "llm", label: "模型", icon: "sparkles" },
-      { key: "editor", label: "Editor", icon: "server" },
       { key: "appearance", label: "外观", icon: "palette" },
+      { key: "model-config", label: "模型配置", icon: "brain" },
+      { key: "editor", label: "Editor", icon: "server" },
       { key: "about", label: "关于", icon: "info" },
     ],
     sections: {
-      llm: () => import("./features/agent/settings/LlmSettingsSection.vue"),
+      appearance: () => import("@lilia/ui/pages/settings/AppearanceSection"),
+      "model-config": () => import("./features/agent/settings/LlmSettingsSection.vue"),
       editor: () => import("./features/agent/settings/EditorSettingsSection.vue"),
+      about: () => import("@lilia/ui/pages/settings/AboutSection"),
     },
   },
 } satisfies LiliaAppConfig;

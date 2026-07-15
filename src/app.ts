@@ -2,6 +2,7 @@ import { createLiliaApp, createLiliaRouter, LiliaDesktopShell, setLiliaAppConfig
 import type { RouterHistory } from "vue-router";
 import { appConfig } from "./app.config";
 import { commands } from "./commands";
+import { installConversationRuntimeStore } from "./features/agent/conversationRuntimeStore";
 import { installAgentShell } from "./features/agent/sidebarConversations";
 import { routes } from "./routes";
 
@@ -14,6 +15,7 @@ export function createNanaBetterCubismApp(history?: RouterHistory) {
     history,
   });
   installAgentShell(created.router);
+  void installConversationRuntimeStore();
   return created;
 }
 
@@ -21,5 +23,6 @@ export function createNanaBetterCubismRouter(history?: RouterHistory) {
   setLiliaAppConfig(appConfig);
   const router = createLiliaRouter(routes, LiliaDesktopShell, history);
   installAgentShell(router);
+  void installConversationRuntimeStore();
   return router;
 }
