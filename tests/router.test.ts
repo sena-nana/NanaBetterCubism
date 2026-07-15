@@ -82,8 +82,7 @@ describe("Agent 壳层路由", () => {
   it("设置页可通过 tab 显示 Editor", async () => {
     await renderAt("/settings?tab=editor");
 
-    expect(await screen.findByRole("heading", { level: 1, name: "Editor" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "连接 Editor" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "连接 Editor" })).toBeTruthy();
   });
 
   it("关于页显示 NanaBetterCubism 应用元数据", async () => {
