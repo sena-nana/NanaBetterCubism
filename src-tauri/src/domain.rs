@@ -24,6 +24,8 @@ pub enum EditorConnectionState {
 pub struct EditorCapabilities {
     pub batch_create_parameters: bool,
     pub find_part_parameters: bool,
+    pub official_api: bool,
+    pub official_edit_api: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -56,6 +58,8 @@ impl Default for EditorSnapshot {
             capabilities: EditorCapabilities {
                 batch_create_parameters: false,
                 find_part_parameters: false,
+                official_api: false,
+                official_edit_api: false,
             },
             message: "尚未连接 Cubism Editor。".into(),
         }
@@ -168,6 +172,47 @@ pub struct ParameterBatchPreview {
 #[serde(rename_all = "camelCase")]
 pub struct OperationAccepted {
     pub operation_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorEditPreview {
+    pub preview_id: String,
+    pub operation: String,
+    pub summary: String,
+    pub arguments: serde_json::Value,
+    pub destructive: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EditorEditOutcome {
+    Running,
+    Committed,
+    CancelledRolledBack,
+    FailedRolledBack,
+    Failed,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorEditResult {
+    pub operation_id: String,
+    pub operation: String,
+    pub outcome: EditorEditOutcome,
+    pub message: String,
+    pub verification: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredEditorEditPlan {
+    pub preview_id: String,
+    pub generation: u64,
+    pub model_uid: String,
+    pub method: String,
+    pub data: serde_json::Value,
+    pub precondition: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

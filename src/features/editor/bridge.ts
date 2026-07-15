@@ -8,7 +8,12 @@ const fallbackSnapshot: EditorSnapshot = {
   apiVersion: null,
   modelLabel: null,
   groups: [],
-  capabilities: { batchCreateParameters: false, findPartParameters: false },
+  capabilities: {
+    batchCreateParameters: false,
+    findPartParameters: false,
+    officialApi: false,
+    officialEditApi: false,
+  },
   message: "请在桌面应用中连接 Cubism Editor。",
 };
 
