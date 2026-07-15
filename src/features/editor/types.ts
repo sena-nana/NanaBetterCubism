@@ -23,6 +23,8 @@ export interface EditorSnapshot {
   capabilities: {
     batchCreateParameters: boolean;
     findPartParameters: boolean;
+    officialApi: boolean;
+    officialEditApi: boolean;
   };
   message: string;
 }

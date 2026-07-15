@@ -8,7 +8,8 @@ NanaBetterCubism 是面向 Live2D Cubism Editor 的 Agent 桌面应用（LiliaCo
 - 提问（`ask_user`）与计划（`update_plan`）基础交互
 - 侧栏会话列表、手绑项目名、跨会话记忆
 - Cubism Editor 连接（本机 `127.0.0.1`，默认端口 `22033`）
-- 工具层保留：部件关联参数查询、批量参数创建事务（preview → execute / cancel）
+- Cubism Editor 官方 External API 全量工具：查询、临时参数控制、文档、通知、参数/关键点、Part/Object 与 Deformer
+- 所有结构编辑统一走 preview → 确认 → 后端事务 → 回读验证；支持 Agent/Editor 取消
 
 ## 开发
 

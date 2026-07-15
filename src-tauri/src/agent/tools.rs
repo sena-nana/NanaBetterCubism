@@ -1,13 +1,14 @@
 use crate::agent::capture::capture_cubism_editor_window;
-use crate::agent::store::{MemoryUpsertInput, PendingAsk, PlanStep, truncate_summary};
+use crate::agent::store::{truncate_summary, MemoryUpsertInput, PendingAsk, PlanStep};
 use crate::agent::{emit_conversations_changed, new_id, AgentError, AgentRuntime};
 use crate::domain::ParameterBatchInput;
 use crate::service::{CommandError, EditorService};
 use serde_json::{json, Value};
+use std::sync::{atomic::AtomicBool, Arc};
 use tauri::{AppHandle, Emitter};
 
 pub fn tool_definitions() -> Vec<Value> {
-    vec![
+    let mut tools = vec![
         tool(
             "get_editor_snapshot",
             "获取 Cubism Editor 连接状态、能力门控与参数组摘要。",
@@ -153,7 +154,9 @@ pub fn tool_definitions() -> Vec<Value> {
                 "required": ["steps"]
             }),
         ),
-    ]
+    ];
+    tools.extend(crate::service::official_api::tool_definitions());
+    tools
 }
 
 fn tool(name: &str, description: &str, parameters: Value) -> Value {
@@ -178,6 +181,15 @@ pub enum ToolOutcome {
     },
 }
 
+pub struct ToolExecutionContext<'a> {
+    pub app: &'a AppHandle,
+    pub runtime: &'a AgentRuntime,
+    pub editor: &'a EditorService,
+    pub conversation_id: &'a str,
+    pub tool_call_id: &'a str,
+    pub cancel: Arc<AtomicBool>,
+}
+
 fn tool_result(content: impl Into<String>) -> ToolOutcome {
     ToolOutcome::Result {
         content: content.into(),
@@ -185,17 +197,21 @@ fn tool_result(content: impl Into<String>) -> ToolOutcome {
     }
 }
 
-
 pub async fn execute_tool(
-    app: &AppHandle,
-    runtime: &AgentRuntime,
-    editor: &EditorService,
-    conversation_id: &str,
-    tool_call_id: &str,
+    context: ToolExecutionContext<'_>,
     name: &str,
     arguments: &str,
 ) -> Result<ToolOutcome, AgentError> {
-    let args: Value = serde_json::from_str(arguments).unwrap_or(json!({}));
+    let ToolExecutionContext {
+        app,
+        runtime,
+        editor,
+        conversation_id,
+        tool_call_id,
+        cancel,
+    } = context;
+    let args: Value = serde_json::from_str(arguments)
+        .map_err(|error| AgentError::new("invalid_arguments", error.to_string()))?;
 
     let outcome = match name {
         "get_editor_snapshot" => {
@@ -203,7 +219,13 @@ pub async fn execute_tool(
             Ok(tool_result(serde_json::to_string_pretty(&snapshot)?))
         }
         "connect_editor" => {
-            let port = args.get("port").and_then(|v| v.as_u64()).unwrap_or(22033) as u16;
+            let port = args
+                .get("port")
+                .and_then(Value::as_u64)
+                .filter(|port| (1..=65535).contains(port))
+                .ok_or_else(|| {
+                    AgentError::new("invalid_arguments", "port 必须是 1 到 65535 的整数")
+                })? as u16;
             let snapshot = editor
                 .start_connection(app.clone(), port)
                 .await
@@ -211,10 +233,7 @@ pub async fn execute_tool(
             Ok(tool_result(serde_json::to_string_pretty(&snapshot)?))
         }
         "disconnect_editor" => {
-            editor
-                .disconnect(app)
-                .await
-                .map_err(map_command_error)?;
+            editor.disconnect(app).await.map_err(map_command_error)?;
             Ok(tool_result("已断开连接。"))
         }
         "find_selected_part_parameters" => {
@@ -225,10 +244,9 @@ pub async fn execute_tool(
             Ok(tool_result(serde_json::to_string_pretty(&result)?))
         }
         "preview_parameter_batch" => {
-            let input: ParameterBatchInput = serde_json::from_value(
-                args.get("input").cloned().unwrap_or(json!({})),
-            )
-            .map_err(|e| AgentError::new("invalid_arguments", e.to_string()))?;
+            let input: ParameterBatchInput =
+                serde_json::from_value(args.get("input").cloned().unwrap_or(json!({})))
+                    .map_err(|e| AgentError::new("invalid_arguments", e.to_string()))?;
             let preview = editor
                 .preview_batch(input)
                 .await
@@ -257,6 +275,46 @@ pub async fn execute_tool(
                 .await
                 .map_err(map_command_error)?;
             Ok(tool_result("已请求取消。"))
+        }
+        "execute_editor_edit" => {
+            let preview_id = args
+                .get("previewId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| AgentError::new("invalid_arguments", "缺少 previewId"))?
+                .to_string();
+            let accepted = editor
+                .execute_editor_edit(app.clone(), preview_id, cancel)
+                .await
+                .map_err(map_command_error)?;
+            Ok(tool_result(serde_json::to_string_pretty(&accepted)?))
+        }
+        "get_editor_edit_result" => {
+            let operation_id = args
+                .get("operationId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| AgentError::new("invalid_arguments", "缺少 operationId"))?;
+            let result = editor
+                .editor_edit_result(operation_id)
+                .await
+                .map_err(map_command_error)?;
+            Ok(tool_result(serde_json::to_string_pretty(&result)?))
+        }
+        "cancel_editor_edit" => {
+            let operation_id = args
+                .get("operationId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| AgentError::new("invalid_arguments", "缺少 operationId"))?;
+            editor
+                .cancel_batch(app, operation_id)
+                .await
+                .map_err(map_command_error)?;
+            Ok(tool_result("已请求取消 Editor 编辑事务。"))
+        }
+        official if crate::service::official_api::is_tool(official) => {
+            let result = crate::service::official_api::call_tool(editor, official, args)
+                .await
+                .map_err(map_command_error)?;
+            Ok(tool_result(serde_json::to_string_pretty(&result)?))
         }
         "capture_cubism_editor_window" => {
             let needle = args

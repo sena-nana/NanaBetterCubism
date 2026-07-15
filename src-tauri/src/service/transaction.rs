@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::broadcast;
+use tokio::time::{interval, Duration, MissedTickBehavior};
 
 use super::BATCH_PROGRESS_EVENT;
 
@@ -42,6 +43,8 @@ pub(super) async fn mutation_request(
     }
     let request = rpc.request(method, data);
     tokio::pin!(request);
+    let mut cancellation_poll = interval(Duration::from_millis(100));
+    cancellation_poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             biased;
@@ -62,6 +65,11 @@ pub(super) async fn mutation_request(
                 }
             }
             response = &mut request => return response.map_err(ExecutionError::Rpc),
+            _ = cancellation_poll.tick() => {
+                if cancel.load(Ordering::SeqCst) {
+                    return Err(ExecutionError::AppCancelled);
+                }
+            }
         }
     }
 }

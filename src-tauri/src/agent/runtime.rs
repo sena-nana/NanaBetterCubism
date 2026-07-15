@@ -2,7 +2,7 @@ use crate::agent::llm::{
     chat_completions, chat_completions_stream, content_to_text, image_file_to_data_url,
 };
 use crate::agent::store::MemoryUpsertInput;
-use crate::agent::tools::{execute_tool, tool_definitions, ToolOutcome};
+use crate::agent::tools::{execute_tool, tool_definitions, ToolExecutionContext, ToolOutcome};
 use crate::agent::{
     emit_conversations_changed, AgentError, AgentRuntime, PendingContinuation, SYSTEM_PROMPT,
 };
@@ -257,11 +257,14 @@ async fn run_turn_inner(
                 return Err(AgentError::new("cancelled", "已取消。"));
             }
             let outcome = execute_tool(
-                app,
-                runtime,
-                editor,
-                conversation_id,
-                &call.id,
+                ToolExecutionContext {
+                    app,
+                    runtime,
+                    editor,
+                    conversation_id,
+                    tool_call_id: &call.id,
+                    cancel: cancel.clone(),
+                },
                 &call.function.name,
                 &call.function.arguments,
             )

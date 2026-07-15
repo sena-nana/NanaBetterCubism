@@ -1,8 +1,13 @@
 use crate::domain::EDIT_API_VERSION;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use std::{collections::HashMap, fmt, time::Duration};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use std::{
+    collections::{HashMap, VecDeque},
+    fmt,
+    sync::Arc,
+    time::Duration,
+};
+use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
 
@@ -64,6 +69,7 @@ enum RpcCommand {
 pub struct RpcClient {
     commands: mpsc::Sender<RpcCommand>,
     events: broadcast::Sender<RpcEvent>,
+    history: Arc<Mutex<VecDeque<RpcEvent>>>,
 }
 
 impl RpcClient {
@@ -75,6 +81,8 @@ impl RpcClient {
         let (command_tx, mut command_rx) = mpsc::channel::<RpcCommand>(64);
         let (event_tx, _) = broadcast::channel::<RpcEvent>(64);
         let actor_events = event_tx.clone();
+        let history = Arc::new(Mutex::new(VecDeque::<RpcEvent>::with_capacity(64)));
+        let actor_history = history.clone();
 
         tokio::spawn(async move {
             let mut socket = socket;
@@ -134,7 +142,15 @@ impl RpcClient {
                         let data = envelope.get("Data").cloned().unwrap_or_else(|| json!({}));
 
                         if message_type == "Event" {
-                            let _ = actor_events.send(RpcEvent { method: method.into(), data });
+                            let event = RpcEvent { method: method.into(), data };
+                            {
+                                let mut history = actor_history.lock().await;
+                                if history.len() == 64 {
+                                    history.pop_front();
+                                }
+                                history.push_back(event.clone());
+                            }
+                            let _ = actor_events.send(event);
                             continue;
                         }
 
@@ -171,6 +187,7 @@ impl RpcClient {
         Ok(Self {
             commands: command_tx,
             events: event_tx,
+            history,
         })
     }
 
@@ -192,6 +209,10 @@ impl RpcClient {
 
     pub fn subscribe(&self) -> broadcast::Receiver<RpcEvent> {
         self.events.subscribe()
+    }
+
+    pub async fn recent_events(&self) -> Vec<RpcEvent> {
+        self.history.lock().await.iter().cloned().collect()
     }
 
     pub async fn close(&self) {
@@ -245,6 +266,43 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.editor_kind(), Some("UnsupportedVersion"));
+    }
+
+    #[tokio::test]
+    async fn retains_official_events_for_domain_consumers() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            socket
+                .send(Message::Text(
+                    json!({
+                        "Version": EDIT_API_VERSION,
+                        "Type": "Event",
+                        "Method": "NotifyChangeEditMode",
+                        "Data": {"EditMode": "Modeling"}
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+        });
+        let client = RpcClient::connect(port).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let events = client.recent_events().await;
+                if !events.is_empty() {
+                    assert_eq!(events[0].method, "NotifyChangeEditMode");
+                    assert_eq!(events[0].data["EditMode"], "Modeling");
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[test]

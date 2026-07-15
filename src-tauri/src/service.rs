@@ -1,6 +1,7 @@
 mod commands;
 mod credentials;
 mod model_structure;
+pub(crate) mod official_api;
 mod part_parameters;
 mod transaction;
 
@@ -11,8 +12,9 @@ pub use commands::{
 
 use crate::domain::{
     build_preview, BatchFinished, BatchOutcome, BatchPhase, EditorCapabilities,
-    EditorConnectionState, EditorSnapshot, ModelStructure, OperationAccepted, ParameterBatchInput,
-    ParameterBatchPreview, PartParameterQueryResult, StoredPlan, EDIT_API_VERSION,
+    EditorConnectionState, EditorEditResult, EditorSnapshot, ModelStructure, OperationAccepted,
+    ParameterBatchInput, ParameterBatchPreview, PartParameterQueryResult, StoredEditorEditPlan,
+    StoredPlan, EDIT_API_VERSION,
 };
 use crate::protocol::{RpcClient, RpcError};
 use credentials::{load_token, save_token};
@@ -89,6 +91,9 @@ struct ServiceState {
     model_uid: Option<String>,
     structure: ModelStructure,
     previews: HashMap<String, StoredPlan>,
+    editor_edit_previews: HashMap<String, StoredEditorEditPlan>,
+    editor_edit_results: HashMap<String, EditorEditResult>,
+    document_refs: HashMap<String, String>,
     operation: Option<ActiveOperation>,
     part_query_in_progress: bool,
 }
@@ -121,10 +126,16 @@ impl EditorService {
     ) {
         {
             let mut inner = self.inner.lock().await;
+            let official_api = capabilities
+                || state == EditorConnectionState::AwaitingEditPermission
+                || (state == EditorConnectionState::Incompatible
+                    && inner.snapshot.capabilities.official_api);
             inner.snapshot.state = state;
             inner.snapshot.message = message.into();
             inner.snapshot.capabilities.batch_create_parameters = capabilities;
             inner.snapshot.capabilities.find_part_parameters = capabilities;
+            inner.snapshot.capabilities.official_api = official_api;
+            inner.snapshot.capabilities.official_edit_api = capabilities;
         }
         self.emit_snapshot(app).await;
     }
@@ -150,7 +161,7 @@ impl EditorService {
             if inner.operation.is_some() {
                 return Err(CommandError::new(
                     "operation_active",
-                    "参数事务进行中，不能重新连接。",
+                    "Editor 编辑事务进行中，不能重新连接。",
                 ));
             }
             inner.connection_request = inner.connection_request.wrapping_add(1);
@@ -165,6 +176,8 @@ impl EditorService {
                 capabilities: EditorCapabilities {
                     batch_create_parameters: false,
                     find_part_parameters: false,
+                    official_api: false,
+                    official_edit_api: false,
                 },
                 message: "正在连接 Cubism Editor…".into(),
             };
@@ -325,6 +338,7 @@ impl EditorService {
             .await;
         }
 
+        let mut version_selected = false;
         loop {
             if !self.request_is_current(request).await {
                 return Ok(());
@@ -348,6 +362,17 @@ impl EditorService {
                 .await;
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
+            }
+            {
+                let mut inner = self.inner.lock().await;
+                if inner.connection_request == request {
+                    inner.snapshot.capabilities.official_api = true;
+                }
+            }
+            if !version_selected {
+                rpc.request("SetGlobalVersion", json!({ "Version": EDIT_API_VERSION }))
+                    .await?;
+                version_selected = true;
             }
 
             let edit_approval = rpc.request("GetIsEditApproval", json!({})).await;
@@ -456,7 +481,9 @@ impl EditorService {
                 inner.snapshot.groups = structure.groups.clone();
                 inner.snapshot.capabilities.batch_create_parameters = true;
                 inner.snapshot.capabilities.find_part_parameters = true;
-                inner.snapshot.message = "已连接，可以查询部件并创建参数。".into();
+                inner.snapshot.capabilities.official_api = true;
+                inner.snapshot.capabilities.official_edit_api = true;
+                inner.snapshot.message = "已连接，可以使用 Editor 工具。".into();
             }
             self.emit_snapshot(app).await;
             tokio::time::sleep(Duration::from_secs(2)).await;
@@ -485,7 +512,7 @@ impl EditorService {
             if inner.operation.is_some() {
                 return Err(CommandError::new(
                     "operation_active",
-                    "请先取消并等待参数事务结束。",
+                    "请先取消并等待 Editor 编辑事务结束。",
                 ));
             }
             inner.desired_connected = false;
@@ -511,7 +538,7 @@ impl EditorService {
             if inner.operation.is_some() {
                 return Err(CommandError::new(
                     "operation_active",
-                    "已有参数事务正在执行。",
+                    "已有 Editor 编辑事务正在执行。",
                 ));
             }
             if inner.snapshot.state != EditorConnectionState::Ready
@@ -568,13 +595,15 @@ impl EditorService {
         Ok(preview)
     }
 
-    pub(crate) async fn find_part_parameters(&self) -> Result<PartParameterQueryResult, CommandError> {
+    pub(crate) async fn find_part_parameters(
+        &self,
+    ) -> Result<PartParameterQueryResult, CommandError> {
         let (rpc, model_uid, generation, model_label) = {
             let mut inner = self.inner.lock().await;
             if inner.operation.is_some() {
                 return Err(CommandError::new(
                     "operation_active",
-                    "参数事务进行中，暂时不能查询部件关联。",
+                    "Editor 编辑事务进行中，暂时不能查询部件关联。",
                 ));
             }
             if inner.part_query_in_progress {
@@ -643,7 +672,7 @@ impl EditorService {
             if inner.operation.is_some() {
                 return Err(CommandError::new(
                     "operation_active",
-                    "已有参数事务正在执行。",
+                    "已有 Editor 编辑事务正在执行。",
                 ));
             }
             if inner.part_query_in_progress {
@@ -678,6 +707,7 @@ impl EditorService {
             inner.snapshot.state = EditorConnectionState::Editing;
             inner.snapshot.capabilities.batch_create_parameters = false;
             inner.snapshot.capabilities.find_part_parameters = false;
+            inner.snapshot.capabilities.official_edit_api = false;
             inner.snapshot.message = format!("正在创建 {} 个参数…", plan.rows.len());
             (operation_id, plan, rpc, cancel)
         };
@@ -694,13 +724,16 @@ impl EditorService {
         Ok(accepted)
     }
 
-    pub(crate) async fn cancel_batch(&self, app: &AppHandle, operation_id: &str) -> Result<(), CommandError> {
+    pub(crate) async fn cancel_batch(
+        &self,
+        app: &AppHandle,
+        operation_id: &str,
+    ) -> Result<(), CommandError> {
         {
             let mut inner = self.inner.lock().await;
-            let operation = inner
-                .operation
-                .as_ref()
-                .ok_or_else(|| CommandError::new("missing_operation", "当前没有参数事务。"))?;
+            let operation = inner.operation.as_ref().ok_or_else(|| {
+                CommandError::new("missing_operation", "当前没有 Editor 编辑事务。")
+            })?;
             if operation.id != operation_id {
                 return Err(CommandError::new("stale_operation", "操作 ID 已失效。"));
             }
@@ -1028,8 +1061,7 @@ impl EditorService {
                 .await;
             return;
         }
-        if matches!(error, ExecutionError::Rpc(ref rpc_error) if rpc_error.is_transport_failure())
-        {
+        if matches!(error, ExecutionError::Rpc(ref rpc_error) if rpc_error.is_transport_failure()) {
             self.finish_operation(
                 app,
                 operation_id,
@@ -1118,6 +1150,8 @@ impl EditorService {
             };
             inner.snapshot.capabilities.batch_create_parameters = safe_to_continue;
             inner.snapshot.capabilities.find_part_parameters = safe_to_continue;
+            inner.snapshot.capabilities.official_api = safe_to_continue;
+            inner.snapshot.capabilities.official_edit_api = safe_to_continue;
             inner.snapshot.message = message.clone();
         }
         let finished = BatchFinished {
@@ -1135,12 +1169,16 @@ fn clear_session_data(inner: &mut ServiceState) {
     inner.model_uid = None;
     inner.structure = ModelStructure::default();
     inner.previews.clear();
+    inner.editor_edit_previews.clear();
+    inner.document_refs.clear();
     inner.part_query_in_progress = false;
     inner.snapshot.api_version = None;
     inner.snapshot.model_label = None;
     inner.snapshot.groups.clear();
     inner.snapshot.capabilities.batch_create_parameters = false;
     inner.snapshot.capabilities.find_part_parameters = false;
+    inner.snapshot.capabilities.official_api = false;
+    inner.snapshot.capabilities.official_edit_api = false;
 }
 
 fn response_bool(value: Value) -> Result<bool, RpcError> {

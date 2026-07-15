@@ -15,7 +15,12 @@ const defaultSnapshot: EditorSnapshot = {
   apiVersion: null,
   modelLabel: null,
   groups: [],
-  capabilities: { batchCreateParameters: false, findPartParameters: false },
+  capabilities: {
+    batchCreateParameters: false,
+    findPartParameters: false,
+    officialApi: false,
+    officialEditApi: false,
+  },
   message: "尚未连接 Cubism Editor。",
 };
 
