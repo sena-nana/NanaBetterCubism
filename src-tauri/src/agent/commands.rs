@@ -7,6 +7,7 @@ use crate::agent::store::{
 use crate::agent::{
     emit_conversations_changed, AgentError, AgentRuntime, CancelTurnResult,
 };
+use crate::service::{official_api, EditorService};
 use serde::Serialize;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager};
@@ -59,7 +60,14 @@ pub async fn agent_create_conversation(
     app: AppHandle,
     title: Option<String>,
 ) -> Result<ConversationSummary, AgentError> {
-    let created = runtime(&app)?.store.create_conversation(title)?;
+    let editor = app.state::<EditorService>();
+    let document = official_api::current_modeling_document(editor.inner()).await;
+    let created = runtime(&app)?.store.create_conversation(
+        title,
+        document
+            .as_ref()
+            .map(|value| (value.document_key.as_str(), value.document_path.as_str())),
+    )?;
     emit_conversations_changed(&app);
     Ok(created)
 }
@@ -176,30 +184,6 @@ pub async fn agent_get_pending_ask(
 #[tauri::command]
 pub async fn agent_list_projects(app: AppHandle) -> Result<Vec<ProjectRecord>, AgentError> {
     runtime(&app)?.store.list_projects()
-}
-
-#[tauri::command]
-pub async fn agent_upsert_project(
-    app: AppHandle,
-    id: Option<String>,
-    name: String,
-) -> Result<ProjectRecord, AgentError> {
-    let project = runtime(&app)?.store.upsert_project(id, name)?;
-    emit_conversations_changed(&app);
-    Ok(project)
-}
-
-#[tauri::command]
-pub async fn agent_bind_project(
-    app: AppHandle,
-    conversation_id: String,
-    project_id: Option<String>,
-) -> Result<(), AgentError> {
-    runtime(&app)?
-        .store
-        .bind_project(&conversation_id, project_id)?;
-    emit_conversations_changed(&app);
-    Ok(())
 }
 
 #[tauri::command]

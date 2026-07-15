@@ -1,11 +1,10 @@
 <script setup lang="ts">
-import { UiButton, UiInput } from "@lilia/ui";
+import { UiButton } from "@lilia/ui";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { useEditorStore } from "../editor/editorStore";
 import {
   answerAsk,
-  bindProject,
   cancelTurn,
   consolidateMemory,
   getLlmConfig,
@@ -13,7 +12,6 @@ import {
   getPendingAsk,
   getPlan,
   listConversations,
-  listProjects,
   listenAsk,
   listenPlan,
   listenToolEvent,
@@ -21,7 +19,6 @@ import {
   listenTurnFinished,
   normalizeCommandError,
   sendMessage,
-  upsertProject,
 } from "./bridge";
 import ConversationComposer from "./components/ConversationComposer.vue";
 import PlanTodoPanel from "./components/PlanTodoPanel.vue";
@@ -34,7 +31,6 @@ import {
 } from "./conversationRuntimeStore";
 import {
   applyConversationGroup,
-  ensureSidebarConversationsLoaded,
 } from "./sidebarConversations";
 import type {
   AgentToolEvent,
@@ -43,7 +39,6 @@ import type {
   ConversationSummary,
   LlmConfigView,
   PendingAsk,
-  ProjectRecord,
 } from "./types";
 
 const route = useRoute();
@@ -62,10 +57,6 @@ const loading = ref(true);
 const consolidating = ref(false);
 const error = ref<string | null>(null);
 const llm = ref<LlmConfigView>({ baseUrl: null, model: null, hasApiKey: false });
-const projects = ref<ProjectRecord[]>([]);
-const projectName = ref("");
-const selectedProjectId = ref("");
-const projectPanelOpen = ref(false);
 
 const unlisteners: Array<() => void> = [];
 let loadEpoch = 0;
@@ -80,10 +71,7 @@ const canSend = computed(
     !pendingAsk.value,
 );
 
-const currentProjectName = computed(() => {
-  if (!selectedProjectId.value) return "收集箱";
-  return projects.value.find((project) => project.id === selectedProjectId.value)?.name ?? "项目";
-});
+const currentProjectName = computed(() => conversation.value?.projectName?.trim() || "收集箱");
 
 onMounted(async () => {
   disposed = false;
@@ -99,7 +87,6 @@ onUnmounted(() => {
 });
 
 watch(conversationId, () => {
-  projectPanelOpen.value = false;
   void reloadConversation();
 });
 
@@ -142,12 +129,11 @@ async function reloadConversation(options: { preserveError?: boolean } = {}) {
   loading.value = true;
   if (!options.preserveError) error.value = null;
   try {
-    const [nextMessages, nextPlan, nextAsk, nextProjects, conversations, nextLlm] =
+    const [nextMessages, nextPlan, nextAsk, conversations, nextLlm] =
       await Promise.all([
         getMessages(id),
         getPlan(id),
         getPendingAsk(id),
-        listProjects(),
         listConversations(),
         getLlmConfig(),
       ]);
@@ -155,12 +141,9 @@ async function reloadConversation(options: { preserveError?: boolean } = {}) {
     messages.value = nextMessages;
     plan.value = nextPlan;
     pendingAsk.value = nextAsk;
-    projects.value = nextProjects;
     llm.value = nextLlm;
     applyConversationGroup(conversations);
     conversation.value = conversations.find((item) => item.id === id) ?? null;
-    selectedProjectId.value = conversation.value?.projectId ?? "";
-    projectName.value = "";
     if (nextAsk) setConversationTurnPhase(id, "awaiting_input");
   } catch (err) {
     if (!disposed && epoch === loadEpoch && id === conversationId.value) {
@@ -278,30 +261,6 @@ async function onAnswerAsk(answer?: string) {
   }
 }
 
-async function onBindProject() {
-  const id = conversationId.value;
-  if (!id) return;
-  error.value = null;
-  try {
-    let projectId = selectedProjectId.value || null;
-    const name = projectName.value.trim();
-    if (name) {
-      const project = await upsertProject(name);
-      projects.value = await listProjects();
-      projectId = project.id;
-      selectedProjectId.value = project.id;
-      projectName.value = "";
-    }
-    await bindProject(id, projectId);
-    const summaries = await ensureSidebarConversationsLoaded(true);
-    if (id === conversationId.value) {
-      conversation.value = summaries.find((item) => item.id === id) ?? conversation.value;
-    }
-  } catch (err) {
-    error.value = normalizeCommandError(err).message;
-  }
-}
-
 async function onConsolidate() {
   const id = conversationId.value;
   if (!id) return;
@@ -352,33 +311,6 @@ function goSettings(tab: string) {
     />
 
     <template #context>
-      <section
-        v-if="projectPanelOpen"
-        class="context-panel"
-        data-agent-id="agent.chat.project"
-      >
-        <div class="context-panel__heading">
-          <strong>项目归属</strong>
-          <span>用于组织会话和项目阶段记忆。</span>
-        </div>
-        <div class="project-controls">
-          <select v-model="selectedProjectId" class="ui-input" data-agent-id="agent.chat.project-select">
-            <option value="">收集箱</option>
-            <option v-for="project in projects" :key="project.id" :value="project.id">
-              {{ project.name }}
-            </option>
-          </select>
-          <UiInput
-            v-model="projectName"
-            placeholder="或输入新项目名"
-            agent-id="agent.chat.project-name"
-          />
-          <UiButton size="sm" agent-id="agent.chat.project-bind" @click="onBindProject">
-            应用
-          </UiButton>
-        </div>
-      </section>
-
       <PlanTodoPanel v-if="plan?.steps.length" :plan="plan" data-agent-id="agent.chat.plan" />
     </template>
 
@@ -397,13 +329,6 @@ function goSettings(tab: string) {
         @answer="onAnswerAsk"
       >
         <template #toolbar>
-          <UiButton
-            size="sm"
-            agent-id="agent.chat.project-toggle"
-            @click="projectPanelOpen = !projectPanelOpen"
-          >
-            {{ currentProjectName }}
-          </UiButton>
           <span class="composer-toolbar__spacer" />
           <UiButton
             size="sm"
@@ -458,44 +383,10 @@ function goSettings(tab: string) {
   font-size: 11px;
 }
 
-.conversation-header__actions,
-.project-controls {
+.conversation-header__actions {
   display: flex;
   align-items: center;
   gap: 6px;
-}
-
-.context-panel {
-  width: 100%;
-  max-height: 220px;
-  margin: 0 auto;
-  padding: 10px 12px;
-  overflow: auto;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-md);
-  background: var(--bg-subtle);
-}
-
-.context-panel__heading {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.context-panel__heading strong {
-  font-size: 12px;
-}
-
-.context-panel__heading span {
-  color: var(--text-faint);
-  font-size: 11px;
-}
-
-.project-controls select,
-.project-controls :deep(.ui-input) {
-  flex: 1;
-  min-width: 0;
 }
 
 .composer-toolbar__spacer {
@@ -505,15 +396,6 @@ function goSettings(tab: string) {
 @media (max-width: 720px) {
   .conversation-header {
     padding-inline: 12px;
-  }
-
-  .project-controls {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .project-controls > * {
-    width: 100%;
   }
 }
 </style>

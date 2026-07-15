@@ -3,12 +3,60 @@ use super::{
         boolean, choice, direct, limited_string, normalize_arguments, number, parameter_filters,
         parameter_values, string, strings, ToolSpec, LOG_TYPES,
     },
-    CommandError, EditorService,
+    CommandError, CurrentModelingDocument, EditorService,
 };
 use crate::protocol::RpcClient;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap};
 use uuid::Uuid;
+
+pub(crate) async fn current_modeling_document(
+    service: &EditorService,
+) -> Option<CurrentModelingDocument> {
+    let (rpc, generation) = {
+        let inner = service.inner.lock().await;
+        if !inner.snapshot.capabilities.official_api {
+            return None;
+        }
+        (inner.rpc.clone()?, inner.generation)
+    };
+    let current = rpc.request("GetCurrentDocumentUID", json!({})).await.ok()?;
+    let document_uid = current.get("DocumentUID")?.as_str()?;
+    let document = rpc
+        .request("GetDocument", json!({"DocumentUID": document_uid}))
+        .await
+        .ok()?;
+    let detected = document
+        .get("ModelingDocuments")?
+        .as_array()?
+        .iter()
+        .find_map(|item| item.get("DocumentFilePath")?.as_str())
+        .and_then(normalize_modeling_document_path)?;
+
+    let inner = service.inner.lock().await;
+    (inner.generation == generation && inner.rpc.is_some()).then_some(detected)
+}
+
+fn normalize_modeling_document_path(value: &str) -> Option<CurrentModelingDocument> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let document_path = trimmed.replace('\\', "/");
+    let file_name = document_path.rsplit('/').next()?;
+    if !file_name.to_ascii_lowercase().ends_with(".cmo3") {
+        return None;
+    }
+    let document_key = if cfg!(windows) {
+        document_path.to_lowercase()
+    } else {
+        document_path.clone()
+    };
+    Some(CurrentModelingDocument {
+        document_key,
+        document_path,
+    })
+}
 
 pub(super) fn specs() -> Vec<ToolSpec> {
     vec![

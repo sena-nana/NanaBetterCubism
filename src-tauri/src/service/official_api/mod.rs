@@ -12,6 +12,14 @@ use super::{CommandError, EditorService};
 use serde_json::{json, Map, Value};
 use std::sync::LazyLock;
 
+pub(crate) use read::current_modeling_document;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CurrentModelingDocument {
+    pub document_key: String,
+    pub document_path: String,
+}
+
 static TOOL_SPECS: LazyLock<Vec<ToolSpec>> =
     LazyLock::new(|| read::specs().into_iter().chain(edit::specs()).collect());
 

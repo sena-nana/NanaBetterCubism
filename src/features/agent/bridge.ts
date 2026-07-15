@@ -89,18 +89,6 @@ export async function listProjects(): Promise<ProjectRecord[]> {
   return invoke<ProjectRecord[]>("agent_list_projects");
 }
 
-export async function upsertProject(name: string, id?: string): Promise<ProjectRecord> {
-  if (!isTauriRuntime()) {
-    throw domainError("desktop_required", "请在桌面应用中管理项目。");
-  }
-  return invoke<ProjectRecord>("agent_upsert_project", { id: id ?? null, name });
-}
-
-export async function bindProject(conversationId: string, projectId: string | null): Promise<void> {
-  if (!isTauriRuntime()) return;
-  await invoke("agent_bind_project", { conversationId, projectId });
-}
-
 export async function listMemories(projectId?: string | null): Promise<MemoryRecord[]> {
   if (!isTauriRuntime()) return [];
   return invoke<MemoryRecord[]>("memory_list", { projectId: projectId ?? null });
