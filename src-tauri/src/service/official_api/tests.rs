@@ -1,6 +1,6 @@
 use super::{read::sanitize_response, schema::normalize_arguments, *};
 use crate::{
-    domain::{EditorConnectionState, EditorEditOutcome},
+    domain::{EditorConnectionState, EditorEditOutcome, StoredEditorEditPlan},
     protocol::RpcClient,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -400,4 +400,107 @@ async fn edit_preview_executes_documented_transaction_and_verifies_postcondition
         .await;
     assert_eq!(result.outcome, EditorEditOutcome::Committed);
     assert!(result.verification.is_some());
+}
+
+#[tokio::test]
+async fn official_edit_previews_from_the_same_model_snapshot_coexist() {
+    let structure = json!({"ParameterStructure": {"Entries": []}});
+    let port = sequence_server(vec![
+        (
+            "GetParameterStructure",
+            json!({"ModelUID": "private-model"}),
+            structure.clone(),
+        ),
+        (
+            "GetParameterStructure",
+            json!({"ModelUID": "private-model"}),
+            structure,
+        ),
+    ])
+    .await;
+    let service = connected_service(port).await;
+
+    let first = call_tool(
+        &service,
+        "preview_edit_parameter",
+        json!({"id": "ParamAngleX", "name": "Angle X"}),
+    )
+    .await
+    .unwrap();
+    let second = call_tool(
+        &service,
+        "preview_edit_parameter",
+        json!({"id": "ParamAngleY", "name": "Angle Y"}),
+    )
+    .await
+    .unwrap();
+    let first_id = first["previewId"].as_str().unwrap();
+    let second_id = second["previewId"].as_str().unwrap();
+    let inner = service.inner.lock().await;
+
+    assert_ne!(first_id, second_id);
+    assert!(inner.editor_edit_previews.contains(first_id));
+    assert!(inner.editor_edit_previews.contains(second_id));
+}
+
+#[tokio::test]
+async fn changed_precondition_stops_before_editor_transaction() {
+    let before = json!({
+        "ParameterStructure": {
+            "Entries": [{
+                "EntryType": "Parameter",
+                "Id": "ParamAngleX",
+                "Name": "Angle X",
+                "Min": -30,
+                "Default": 0,
+                "Max": 30
+            }]
+        }
+    });
+    let changed = json!({
+        "ParameterStructure": {
+            "Entries": [{
+                "EntryType": "Parameter",
+                "Id": "ParamAngleX",
+                "Name": "Changed",
+                "Min": -30,
+                "Default": 0,
+                "Max": 30
+            }]
+        }
+    });
+    let port = sequence_server(vec![
+        (
+            "GetCurrentModelUID",
+            json!({}),
+            json!({"ModelUID": "private-model"}),
+        ),
+        (
+            "GetParameterStructure",
+            json!({"ModelUID": "private-model"}),
+            changed,
+        ),
+    ])
+    .await;
+    let service = connected_service(port).await;
+    let rpc = service.inner.lock().await.rpc.clone().unwrap();
+    let plan = StoredEditorEditPlan {
+        preview_id: "preview".into(),
+        generation: 7,
+        model_uid: "private-model".into(),
+        method: "EditParameter".into(),
+        data: json!({
+            "ModelUID": "private-model",
+            "Id": "ParamAngleX",
+            "Name": "Updated"
+        }),
+        precondition: before,
+    };
+
+    let result = service
+        .run_editor_edit_inner(&rpc, &plan, &AtomicBool::new(false))
+        .await;
+
+    assert_eq!(result.outcome, EditorEditOutcome::Failed);
+    assert!(result.verification.is_none());
 }

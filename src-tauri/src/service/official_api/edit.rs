@@ -390,7 +390,6 @@ pub(super) async fn preview_edit(
                 "连接或模型在预览期间发生变化，请重试。",
             ));
         }
-        inner.editor_edit_previews.clear();
         inner.editor_edit_previews.insert(preview_id.clone(), plan);
     }
     serde_json::to_value(EditorEditPreview {

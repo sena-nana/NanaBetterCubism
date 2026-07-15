@@ -268,7 +268,19 @@ async fn run_turn_inner(
                 &call.function.name,
                 &call.function.arguments,
             )
-            .await?;
+            .await;
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(error) if error.code == "cancelled" => return Err(error),
+                Err(error) => {
+                    messages.push(json!({
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": tool_error_content(&error),
+                    }));
+                    continue;
+                }
+            };
 
             match outcome {
                 ToolOutcome::AskUser { ask, tool_call_id } => {
@@ -329,6 +341,17 @@ async fn run_turn_inner(
         "step_limit",
         "达到工具调用步数上限，已停止。",
     ))
+}
+
+fn tool_error_content(error: &AgentError) -> String {
+    json!({
+        "ok": false,
+        "error": {
+            "code": error.code,
+            "message": error.message,
+        }
+    })
+    .to_string()
 }
 
 pub async fn consolidate_memory(
@@ -422,4 +445,22 @@ pub async fn consolidate_memory(
 
     emit_conversations_changed(&app);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_failures_are_returned_as_structured_model_context() {
+        let content = tool_error_content(&AgentError::new(
+            "stale_preview",
+            "preview expired",
+        ));
+        let value: Value = serde_json::from_str(&content).unwrap();
+
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["error"]["code"], "stale_preview");
+        assert!(value["error"]["message"].as_str().is_some());
+    }
 }

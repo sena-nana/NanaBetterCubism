@@ -332,6 +332,7 @@ impl EditorService {
             {
                 inner.operation = None;
             }
+            inner.clear_previews();
             inner
                 .editor_edit_results
                 .insert(operation_id.into(), result.clone());
