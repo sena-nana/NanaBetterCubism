@@ -277,49 +277,62 @@ pub async fn test_connection(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| AgentError::new("llm_not_configured", "请先配置 API Key。"))?;
 
-    let client = reqwest::Client::new();
-    let response = client
+    let (models_ok, models) = match reqwest::Client::new()
         .get(format!("{base}/models"))
         .bearer_auth(api_key)
         .send()
-        .await?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        return Ok((false, format!("连接失败 ({status}): {text}"), Vec::new()));
-    }
-
-    let value: Value = response.json().await.unwrap_or(json!({}));
-    let models = value
-        .get("data")
-        .and_then(|item| item.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.get("id").and_then(|id| id.as_str()).map(str::to_string))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    let matched = config
-        .model
-        .as_ref()
-        .map(|model| models.iter().any(|item| item == model))
-        .unwrap_or(true);
-
-    let message = if models.is_empty() {
-        "已连接（端点未返回 /models 列表）。".into()
-    } else if matched {
-        format!("已连接，发现 {} 个模型。", models.len())
-    } else {
-        format!(
-            "已连接，但当前模型不在列表中（共 {} 个可用）。",
-            models.len()
-        )
+        .await
+    {
+        Ok(response) if response.status().is_success() => {
+            let models = response
+                .json::<Value>()
+                .await
+                .ok()
+                .and_then(|value| {
+                    value.get("data")?.as_array().map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| item.get("id")?.as_str().map(str::to_string))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .unwrap_or_default();
+            (true, models)
+        }
+        _ => (false, Vec::new()),
     };
 
-    Ok((true, message, models))
+    if config
+        .model
+        .as_ref()
+        .is_some_and(|model| !model.trim().is_empty())
+    {
+        return match chat_completions(
+            config,
+            &[json!({"role": "user", "content": "ping"})],
+            &[],
+        )
+        .await
+        {
+            Ok(_) => Ok((true, "连接成功，对话测试通过。".into(), models)),
+            Err(error) => Ok((false, format!("对话失败：{}", error.message), models)),
+        };
+    }
+
+    if models_ok {
+        let detail = if models.is_empty() {
+            "端点未返回模型列表".into()
+        } else {
+            format!("发现 {} 个模型", models.len())
+        };
+        Ok((
+            true,
+            format!("已连接（{detail}）。未配置模型，已跳过对话测试。"),
+            models,
+        ))
+    } else {
+        Ok((false, "连接失败：无法访问模型列表。".into(), models))
+    }
 }
 
 pub fn content_to_text(content: &Option<Value>) -> String {
@@ -367,7 +380,14 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio::sync::Mutex;
 
-    async fn spawn_mock_llm(responses: Vec<String>) -> String {
+    #[derive(Clone)]
+    struct MockHttpResponse {
+        status: u16,
+        content_type: &'static str,
+        body: String,
+    }
+
+    async fn spawn_mock_http(responses: Vec<MockHttpResponse>) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let bodies = Arc::new(Mutex::new(responses));
@@ -379,26 +399,100 @@ mod tests {
                 };
                 let mut buf = vec![0u8; 65536];
                 let _ = socket.read(&mut buf).await;
-                let body = {
+                let reply = {
                     let list = bodies.lock().await;
-                    list.get(index).cloned().unwrap_or_else(|| {
-                        r#"data: {"choices":[{"delta":{"content":"done"}}]}
+                    list.get(index).cloned().unwrap_or_else(|| MockHttpResponse {
+                        status: 200,
+                        content_type: "text/event-stream",
+                        body: r#"data: {"choices":[{"delta":{"content":"done"}}]}
 
 data: [DONE]
 "#
-                        .into()
+                        .into(),
                     })
                 };
                 index += 1;
+                let reason = if reply.status == 200 { "OK" } else { "Error" };
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
+                    "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    reply.status,
+                    reason,
+                    reply.content_type,
+                    reply.body.len(),
+                    reply.body
                 );
                 let _ = socket.write_all(response.as_bytes()).await;
             }
         });
         format!("http://{addr}/v1")
+    }
+
+    async fn spawn_mock_llm(responses: Vec<String>) -> String {
+        spawn_mock_http(
+            responses
+                .into_iter()
+                .map(|body| MockHttpResponse {
+                    status: 200,
+                    content_type: "text/event-stream",
+                    body,
+                })
+                .collect(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_connection_runs_short_chat_when_model_configured() {
+        let base_url = spawn_mock_http(vec![
+            MockHttpResponse {
+                status: 200,
+                content_type: "application/json",
+                body: r#"{"data":[{"id":"mock-model"},{"id":"mock-mini"}]}"#.into(),
+            },
+            MockHttpResponse {
+                status: 200,
+                content_type: "application/json",
+                body: r#"{"choices":[{"message":{"role":"assistant","content":"pong"}}]}"#.into(),
+            },
+        ])
+        .await;
+        let config = LlmConfigInternal {
+            base_url: Some(base_url),
+            api_key: Some("test-key".into()),
+            model: Some("mock-model".into()),
+        };
+
+        let (ok, message, models) = test_connection(&config).await.unwrap();
+        assert!(ok);
+        assert_eq!(message, "连接成功，对话测试通过。");
+        assert_eq!(models, vec!["mock-model".to_string(), "mock-mini".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_connection_fails_when_chat_fails_even_if_models_ok() {
+        let base_url = spawn_mock_http(vec![
+            MockHttpResponse {
+                status: 200,
+                content_type: "application/json",
+                body: r#"{"data":[{"id":"mock-model"}]}"#.into(),
+            },
+            MockHttpResponse {
+                status: 500,
+                content_type: "application/json",
+                body: r#"{"error":"boom"}"#.into(),
+            },
+        ])
+        .await;
+        let config = LlmConfigInternal {
+            base_url: Some(base_url),
+            api_key: Some("test-key".into()),
+            model: Some("mock-model".into()),
+        };
+
+        let (ok, message, models) = test_connection(&config).await.unwrap();
+        assert!(!ok);
+        assert!(message.starts_with("对话失败："));
+        assert_eq!(models, vec!["mock-model".to_string()]);
     }
 
     #[tokio::test]
