@@ -46,7 +46,7 @@ describe("模型配置", () => {
     });
     bridge.testLlmConnection.mockResolvedValue({
       ok: true,
-      message: "连接成功",
+      message: "连接成功，对话测试通过。",
       models: ["example-model", "example-model-mini"],
     });
 
