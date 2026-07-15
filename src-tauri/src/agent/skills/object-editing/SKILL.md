@@ -1,0 +1,13 @@
+---
+name: object-editing
+description: Preview, confirm, execute, cancel, and verify selection, Part, object, ArtMesh property, Glue property, and Deformer edits.
+---
+
+# Object Editing
+
+1. Call `get_editor_snapshot`, then inspect selection, Part/Object hierarchy, Deformer hierarchy, and affected properties before editing.
+2. Compute the smallest change that preserves unrelated state. Require explicit intent for deletion, bulk movement, or destructive normalization.
+3. Use the matching `preview_*` tool, summarize the preview, and obtain explicit confirmation unless the current request already confirms that exact change.
+4. Execute with `execute_editor_edit`, poll `get_editor_edit_result`, and report success only for a verified committed outcome.
+5. On cancellation, disconnect, timeout, or unknown commit/rollback state, report the real outcome and never retry automatically.
+6. Do not infer or promise mesh geometry, UV/topology, Warp control-point, animation, physics-editing, save/export, atlas, PSD, Glue-creation, or ArtPath capabilities.

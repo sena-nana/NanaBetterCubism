@@ -95,7 +95,7 @@ mod tests {
 
     #[test]
     fn tool_table_excludes_file_editing() {
-        let tools = crate::agent::tools::tool_definitions();
+        let tools = crate::agent::tools::all_tool_definitions().unwrap();
         let names: Vec<String> = tools
             .iter()
             .filter_map(|tool| {

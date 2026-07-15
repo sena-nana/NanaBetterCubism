@@ -4,7 +4,7 @@ NanaBetterCubism 是面向 Live2D Cubism Editor 的 Agent 桌面应用（LiliaCo
 
 ## 能力
 
-- OpenAI 兼容 ReAct Agent：自动调用 Cubism 领域工具与窗口截屏
+- OpenAI 兼容 ReAct Agent：按需读取内置 SKILL，仅向模型开放当前任务需要的 Cubism 领域工具与窗口截屏
 - 提问（`ask_user`）与计划（`update_plan`）基础交互
 - 侧栏会话列表、手绑项目名、跨会话记忆
 - Cubism Editor 连接（本机 `127.0.0.1`，默认端口 `22033`）
