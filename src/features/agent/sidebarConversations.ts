@@ -1,84 +1,122 @@
-import { setLiliaAppConfig } from "@lilia/ui";
-import type { Router } from "vue-router";
-import { appConfig } from "../../app.config";
+import FilePlus from "@lucide/vue/dist/esm/icons/file-plus.mjs";
+import MessageSquare from "@lucide/vue/dist/esm/icons/message-square.mjs";
+import RotateCcw from "@lucide/vue/dist/esm/icons/rotate-ccw.mjs";
 import {
-  createConversation,
-  listConversations,
-  listenConversationsChanged,
-} from "./bridge";
+  SIDEBAR_GLOBAL_ACTIONS,
+  SIDEBAR_GROUPS,
+  type SidebarGroup,
+  type SidebarNavItem,
+} from "@lilia/ui";
+import { markRaw } from "vue";
+import type { Router } from "vue-router";
+import { listConversations, listenConversationsChanged } from "./bridge";
 import type { ConversationSummary } from "./types";
 
-let loadPromise: Promise<ConversationSummary[]> | null = null;
-let newChatHandler: (() => void | Promise<void>) | undefined;
+const conversationIcon = markRaw(MessageSquare);
+const newChatIcon = markRaw(FilePlus);
+const retryIcon = markRaw(RotateCcw);
 
-export async function ensureSidebarConversationsLoaded(force = false) {
-  if (loadPromise && !force) return loadPromise;
-  loadPromise = (async () => {
-    const rows = await listConversations();
-    applyConversationGroup(rows);
-    return rows;
-  })();
-  return loadPromise;
+let loadPromise: Promise<ConversationSummary[]> | null = null;
+let loadEpoch = 0;
+let loadedRows: ConversationSummary[] | null = null;
+
+export function ensureSidebarConversationsLoaded(force = false) {
+  if (loadPromise && !force) {
+    if (loadedRows !== null) applyConversationGroup(loadedRows);
+    return loadPromise;
+  }
+
+  const epoch = ++loadEpoch;
+  if (loadedRows === null) applyLoadingGroup();
+
+  const request = listConversations()
+    .then((rows) => {
+      if (epoch === loadEpoch) {
+        loadedRows = rows;
+        applyConversationGroup(rows);
+      }
+      return rows;
+    })
+    .catch((error: unknown) => {
+      if (epoch === loadEpoch) applyErrorGroup();
+      if (loadPromise === request) loadPromise = null;
+      throw error;
+    });
+
+  loadPromise = request;
+  return request;
 }
 
 export function applyConversationGroup(rows: ConversationSummary[]) {
-  setLiliaAppConfig({
-    ...appConfig,
-    sidebar: {
-      ...appConfig.sidebar,
-      globalActions: [
-        {
-          key: "new-chat",
-          label: "新对话",
-          icon: "file-plus",
-          onSelect: newChatHandler,
-        },
-      ],
-      groups: [
-        {
-          key: "conversations",
-          title: "对话",
-          emptyText: rows.length === 0 ? "暂无对话" : undefined,
-          items: rows.map((row) => ({
-            key: row.id,
-            label: row.title,
-            icon: "bot",
-            to: `/chats/${row.id}`,
-          })),
-        },
-      ],
-    },
-  });
+  const grouped = new Map<string, SidebarNavItem[]>();
+
+  for (const row of rows) {
+    const projectName = row.projectName?.trim() || "收集箱";
+    if (!grouped.has(projectName)) grouped.set(projectName, []);
+    const items = grouped.get(projectName)!;
+    items.push({
+      key: row.id,
+      label: row.title,
+      icon: conversationIcon,
+      to: `/chats/${row.id}`,
+    });
+  }
+
+  const groups: SidebarGroup[] = [...grouped].map(([title, items]) => ({
+    key: title === "收集箱" ? "inbox" : `project:${title}`,
+    title,
+    items,
+  }));
+
+  if (groups.length === 0) {
+    groups.push({ key: "inbox", title: "收集箱", emptyText: "暂无对话", items: [] });
+  }
+
+  replaceGroups(groups);
 }
 
 export function installAgentShell(router: Router) {
-  newChatHandler = async () => {
-    try {
-      const created = await createConversation();
-      await ensureSidebarConversationsLoaded(true);
-      await router.push(`/chats/${created.id}`);
-    } catch {
-      await router.push("/");
-    }
-  };
+  SIDEBAR_GLOBAL_ACTIONS.splice(0, SIDEBAR_GLOBAL_ACTIONS.length, {
+    key: "new-chat",
+    label: "新对话",
+    icon: newChatIcon,
+    onSelect: () => router.push("/").then(() => undefined),
+  });
 
-  setLiliaAppConfig({
-    ...appConfig,
-    sidebar: {
-      ...appConfig.sidebar,
-      globalActions: [
+  void ensureSidebarConversationsLoaded().catch(() => undefined);
+  void listenConversationsChanged(() => {
+    void ensureSidebarConversationsLoaded(true).catch(() => undefined);
+  }).catch(() => undefined);
+}
+
+function applyLoadingGroup() {
+  replaceGroups([
+    { key: "conversations-loading", title: "对话", emptyText: "正在加载对话…", items: [] },
+  ]);
+}
+
+function applyErrorGroup() {
+  replaceGroups([
+    {
+      key: "conversations-error",
+      title: "对话",
+      emptyText: "无法加载对话",
+      items: [],
+      tools: [
         {
-          key: "new-chat",
-          label: "新对话",
-          icon: "file-plus",
-          onSelect: newChatHandler,
+          key: "retry",
+          label: "重试",
+          icon: retryIcon,
+          onSelect: () =>
+            ensureSidebarConversationsLoaded(true)
+              .then(() => undefined)
+              .catch(() => undefined),
         },
       ],
     },
-  });
+  ]);
+}
 
-  void ensureSidebarConversationsLoaded();
-  void listenConversationsChanged(() => {
-    void ensureSidebarConversationsLoaded(true);
-  });
+function replaceGroups(groups: SidebarGroup[]) {
+  SIDEBAR_GROUPS.splice(0, SIDEBAR_GROUPS.length, ...groups);
 }

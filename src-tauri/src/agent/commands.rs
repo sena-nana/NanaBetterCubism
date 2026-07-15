@@ -4,7 +4,7 @@ use crate::agent::store::{
     ChatMessage, ConversationPlan, ConversationSummary, LlmConfigInput, LlmConfigView,
     MemoryRecord, MemoryUpsertInput, PendingAsk, ProjectRecord,
 };
-use crate::agent::{AgentError, AgentRuntime};
+use crate::agent::{AgentError, AgentRuntime, CancelTurnResult};
 use serde::Serialize;
 use serde_json::json;
 use std::sync::Arc;
@@ -82,18 +82,21 @@ pub async fn agent_send_message(
         return Err(AgentError::new("invalid_message", "消息不能为空。"));
     }
     let runtime = runtime(&app)?;
+    let cancel = runtime.begin_turn(&conversation_id).await?;
     let app_clone = app.clone();
     let runtime_clone = runtime.clone();
     tauri::async_runtime::spawn(async move {
-        let _ = run_turn(app_clone, runtime_clone, conversation_id, text).await;
+        let _ = run_turn(app_clone, runtime_clone, conversation_id, text, cancel).await;
     });
     Ok(())
 }
 
 #[tauri::command]
-pub async fn agent_cancel_turn(app: AppHandle, conversation_id: String) -> Result<(), AgentError> {
-    runtime(&app)?.request_cancel(&conversation_id).await;
-    Ok(())
+pub async fn agent_cancel_turn(
+    app: AppHandle,
+    conversation_id: String,
+) -> Result<CancelTurnResult, AgentError> {
+    runtime(&app)?.request_cancel(&conversation_id).await
 }
 
 #[tauri::command]
@@ -107,10 +110,19 @@ pub async fn agent_answer_ask(
         return Err(AgentError::new("invalid_answer", "回答不能为空。"));
     }
     let runtime = runtime(&app)?;
+    let (conversation_id, cancel) = runtime.begin_answer(&ask_id).await?;
     let app_clone = app.clone();
     let runtime_clone = runtime.clone();
     tauri::async_runtime::spawn(async move {
-        let _ = continue_after_ask(app_clone, runtime_clone, ask_id, text).await;
+        let _ = continue_after_ask(
+            app_clone,
+            runtime_clone,
+            ask_id,
+            conversation_id,
+            text,
+            cancel,
+        )
+        .await;
     });
     Ok(())
 }

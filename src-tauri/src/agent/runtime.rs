@@ -17,13 +17,8 @@ pub async fn run_turn(
     runtime: Arc<AgentRuntime>,
     conversation_id: String,
     user_text: String,
+    cancel: Arc<AtomicBool>,
 ) -> Result<(), AgentError> {
-    let cancel = Arc::new(AtomicBool::new(false));
-    {
-        let mut flags = runtime.cancel_flags.lock().await;
-        flags.insert(conversation_id.clone(), cancel.clone());
-    }
-
     let editor = app.state::<EditorService>();
     let result = run_turn_inner(
         &app,
@@ -32,11 +27,11 @@ pub async fn run_turn(
         &conversation_id,
         Some(user_text),
         None,
-        cancel,
+        cancel.clone(),
     )
     .await;
 
-    runtime.cancel_flags.lock().await.remove(&conversation_id);
+    let result = finalize_turn(&runtime, &conversation_id, &cancel, result).await;
     emit_finished(&app, &conversation_id, &result);
     result.map(|_| ())
 }
@@ -45,53 +40,55 @@ pub async fn continue_after_ask(
     app: AppHandle,
     runtime: Arc<AgentRuntime>,
     ask_id: String,
+    conversation_id: String,
     answer: String,
+    cancel: Arc<AtomicBool>,
 ) -> Result<(), AgentError> {
-    let (ask, _tool_call_id) = runtime
-        .store
-        .take_pending_ask(&ask_id)?
-        .ok_or_else(|| AgentError::new("ask_not_found", "没有等待中的提问。"))?;
+    let result = async {
+        let (ask, _tool_call_id) = runtime
+            .store
+            .take_pending_ask(&ask_id)?
+            .ok_or_else(|| AgentError::new("ask_not_found", "没有等待中的提问。"))?;
+        if ask.conversation_id != conversation_id {
+            return Err(AgentError::new("ask_not_found", "提问上下文已失效。"));
+        }
 
-    let continuation = {
-        let mut pending = runtime.pending_continuations.lock().await;
-        pending.remove(&ask.ask_id)
+        let continuation = runtime
+            .pending_continuations
+            .lock()
+            .await
+            .remove(&ask.ask_id)
+            .ok_or_else(|| AgentError::new("ask_not_found", "提问上下文已失效。"))?;
+
+        let mut messages = continuation.messages;
+        messages.push(json!({
+            "role": "tool",
+            "tool_call_id": continuation.tool_call_id,
+            "content": answer.clone(),
+        }));
+        let _ = runtime.store.append_message(
+            &ask.conversation_id,
+            "user",
+            &format!("回答：{answer}"),
+            None,
+            None,
+        );
+
+        let editor = app.state::<EditorService>();
+        run_turn_inner(
+            &app,
+            &runtime,
+            editor.inner(),
+            &conversation_id,
+            None,
+            Some(messages),
+            cancel.clone(),
+        )
+        .await
     }
-    .ok_or_else(|| AgentError::new("ask_not_found", "提问上下文已失效。"))?;
-
-    let mut messages = continuation.messages;
-    messages.push(json!({
-        "role": "tool",
-        "tool_call_id": continuation.tool_call_id,
-        "content": answer.clone(),
-    }));
-    let _ = runtime.store.append_message(
-        &ask.conversation_id,
-        "user",
-        &format!("回答：{answer}"),
-        None,
-        None,
-    );
-
-    let cancel = Arc::new(AtomicBool::new(false));
-    {
-        let mut flags = runtime.cancel_flags.lock().await;
-        flags.insert(ask.conversation_id.clone(), cancel.clone());
-    }
-
-    let conversation_id = ask.conversation_id.clone();
-    let editor = app.state::<EditorService>();
-    let result = run_turn_inner(
-        &app,
-        &runtime,
-        editor.inner(),
-        &conversation_id,
-        None,
-        Some(messages),
-        cancel,
-    )
     .await;
 
-    runtime.cancel_flags.lock().await.remove(&conversation_id);
+    let result = finalize_turn(&runtime, &conversation_id, &cancel, result).await;
     emit_finished(&app, &conversation_id, &result);
     result.map(|_| ())
 }
@@ -99,6 +96,21 @@ pub async fn continue_after_ask(
 enum TurnEnd {
     Finished,
     WaitingAsk,
+}
+
+async fn finalize_turn(
+    runtime: &AgentRuntime,
+    conversation_id: &str,
+    cancel: &Arc<AtomicBool>,
+    result: Result<TurnEnd, AgentError>,
+) -> Result<TurnEnd, AgentError> {
+    if !runtime.finish_turn(conversation_id, cancel).await || result.is_err() {
+        return result;
+    }
+    if matches!(&result, Ok(TurnEnd::WaitingAsk)) {
+        runtime.clear_pending_ask(conversation_id).await?;
+    }
+    Err(AgentError::new("cancelled", "已取消。"))
 }
 
 fn emit_finished(app: &AppHandle, conversation_id: &str, result: &Result<TurnEnd, AgentError>) {
