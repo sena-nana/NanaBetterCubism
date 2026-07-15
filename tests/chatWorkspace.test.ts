@@ -12,7 +12,7 @@ const listeners = vi.hoisted(() => ({
 
 const bridge = vi.hoisted(() => ({
   answerAsk: vi.fn(async () => undefined),
-  archiveConversation: vi.fn(async () => true),
+  deleteConversation: vi.fn(async () => undefined),
   bindProject: vi.fn(async () => undefined),
   cancelTurn: vi.fn(async () => ({ state: "idle" as const })),
   consolidateMemory: vi.fn(async () => undefined),

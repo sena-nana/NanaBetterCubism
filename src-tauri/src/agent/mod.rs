@@ -110,7 +110,7 @@ impl AgentRuntime {
         }
     }
 
-    pub async fn archive_conversation(&self, conversation_id: &str) -> Result<bool, AgentError> {
+    pub async fn delete_conversation(&self, conversation_id: &str) -> Result<(), AgentError> {
         let _lifecycle = self.conversation_lifecycle.lock().await;
         self.store.ensure_active_conversation(conversation_id)?;
         let running = self.cancel_flags.lock().await.contains_key(conversation_id);
@@ -124,10 +124,10 @@ impl AgentRuntime {
         if running || awaiting_input {
             return Err(AgentError::new(
                 "conversation_busy",
-                "对话正在运行或等待回答，暂时无法归档。",
+                "对话正在运行或等待回答，暂时无法删除。",
             ));
         }
-        self.store.archive_conversation(conversation_id)
+        self.store.delete_conversation(conversation_id)
     }
 
     pub async fn begin_answer(
@@ -290,14 +290,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn archive_rejects_active_and_pending_conversations() {
+    async fn delete_rejects_active_and_pending_conversations() {
         let runtime = AgentRuntime::default();
         runtime.store.open(":memory:".into()).unwrap();
         let conversation = runtime.store.create_conversation(None).unwrap();
         let active = runtime.begin_turn(&conversation.id).await.unwrap();
 
         assert!(matches!(
-            runtime.archive_conversation(&conversation.id).await,
+            runtime.delete_conversation(&conversation.id).await,
             Err(error) if error.code == "conversation_busy"
         ));
         runtime.finish_turn(&conversation.id, &active).await;
@@ -310,12 +310,12 @@ mod tests {
         };
         runtime.store.set_pending_ask(&ask, "tool-call").unwrap();
         assert!(matches!(
-            runtime.archive_conversation(&conversation.id).await,
+            runtime.delete_conversation(&conversation.id).await,
             Err(error) if error.code == "conversation_busy"
         ));
         runtime.clear_pending_ask(&conversation.id).await.unwrap();
 
-        assert!(runtime.archive_conversation(&conversation.id).await.unwrap());
+        runtime.delete_conversation(&conversation.id).await.unwrap();
         assert!(matches!(
             runtime.begin_turn(&conversation.id).await,
             Err(error) if error.code == "not_found"

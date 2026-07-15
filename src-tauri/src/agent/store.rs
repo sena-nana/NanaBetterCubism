@@ -284,7 +284,7 @@ impl AgentStore {
                     |_| Ok(()),
                 )
                 .optional()?;
-            active.ok_or_else(|| AgentError::new("not_found", "对话不存在或已归档。"))
+            active.ok_or_else(|| AgentError::new("not_found", "对话不存在。"))
         })
     }
 
@@ -300,22 +300,28 @@ impl AgentStore {
             )?)
         })?;
         if changed == 0 {
-            return Err(AgentError::new("not_found", "对话不存在或已归档。"));
+            return Err(AgentError::new("not_found", "对话不存在。"));
         }
         Ok(pinned)
     }
 
-    pub fn archive_conversation(&self, conversation_id: &str) -> Result<bool, AgentError> {
-        let changed = self.with_conn(|conn| {
-            Ok(conn.execute(
-                "UPDATE conversations SET archived = 1, updated_at = ?1 WHERE id = ?2 AND archived = 0",
-                params![Utc::now().to_rfc3339(), conversation_id],
-            )?)
-        })?;
-        if changed == 0 {
-            return Err(AgentError::new("not_found", "对话不存在或已归档。"));
-        }
-        Ok(true)
+    pub fn delete_conversation(&self, conversation_id: &str) -> Result<(), AgentError> {
+        self.with_conn(|conn| {
+            let transaction = conn.unchecked_transaction()?;
+            transaction.execute(
+                "UPDATE memories SET source_conversation_id = NULL WHERE source_conversation_id = ?1",
+                params![conversation_id],
+            )?;
+            let deleted = transaction.execute(
+                "DELETE FROM conversations WHERE id = ?1 AND archived = 0",
+                params![conversation_id],
+            )?;
+            if deleted == 0 {
+                return Err(AgentError::new("not_found", "对话不存在。"));
+            }
+            transaction.commit()?;
+            Ok(())
+        })
     }
 
     pub fn set_conversation_title_if_default(
@@ -934,7 +940,102 @@ mod tests {
     }
 
     #[test]
-    fn migrates_and_manages_active_conversations_without_deleting_history() {
+    fn deleting_conversation_cascades_owned_data_and_detaches_memories() {
+        let store = AgentStore::default();
+        store.open(":memory:".into()).unwrap();
+        let deleted = store.create_conversation(Some("待删除".into())).unwrap();
+        let retained = store.create_conversation(Some("保留".into())).unwrap();
+        store
+            .append_message(&deleted.id, "user", "删除的消息", None, None)
+            .unwrap();
+        store
+            .append_message(&retained.id, "user", "保留的消息", None, None)
+            .unwrap();
+        store
+            .upsert_plan(
+                &deleted.id,
+                vec![PlanStep {
+                    id: "step-1".into(),
+                    title: "测试".into(),
+                    status: "pending".into(),
+                }],
+            )
+            .unwrap();
+        store
+            .set_pending_ask(
+                &PendingAsk {
+                    ask_id: "ask-1".into(),
+                    conversation_id: deleted.id.clone(),
+                    question: "继续？".into(),
+                    options: Vec::new(),
+                },
+                "tool-call",
+            )
+            .unwrap();
+        store
+            .append_tool_trace(
+                &deleted.id,
+                "call-1",
+                "get_editor_snapshot",
+                "{}",
+                "{}",
+                "finished",
+            )
+            .unwrap();
+        let memory = store
+            .upsert_memory(MemoryUpsertInput {
+                id: None,
+                scope: "global".into(),
+                kind: "experience".into(),
+                project_id: None,
+                title: "保留的记忆".into(),
+                body: "记忆内容".into(),
+                enabled: Some(true),
+                source_conversation_id: Some(deleted.id.clone()),
+            })
+            .unwrap();
+
+        store.delete_conversation(&deleted.id).unwrap();
+
+        let memories = store.list_memories(None).unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].id, memory.id);
+        assert_eq!(memories[0].source_conversation_id, None);
+        assert_eq!(store.get_messages(&retained.id).unwrap().len(), 1);
+        store
+            .with_conn(|conn| {
+                for table in [
+                    "conversations",
+                    "messages",
+                    "plans",
+                    "pending_asks",
+                    "tool_traces",
+                ] {
+                    let count: i64 = conn.query_row(
+                        &format!(
+                            "SELECT COUNT(*) FROM {table} WHERE {} = ?1",
+                            if table == "conversations" {
+                                "id"
+                            } else {
+                                "conversation_id"
+                            }
+                        ),
+                        params![deleted.id],
+                        |row| row.get(0),
+                    )?;
+                    assert_eq!(count, 0, "{table} still contains deleted conversation data");
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert!(matches!(
+            store.delete_conversation(&deleted.id),
+            Err(error) if error.code == "not_found"
+        ));
+    }
+
+    #[test]
+    fn migrates_legacy_schema_without_purging_archived_history() {
         let dir = std::env::temp_dir().join(format!("nbc-agent-migration-{}", new_id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("agent.db");
@@ -968,7 +1069,15 @@ mod tests {
         assert_eq!(listed[0].id, "older");
         assert!(listed[0].pinned);
 
-        store.archive_conversation(&newer.id).unwrap();
+        store
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE conversations SET archived = 1 WHERE id = ?1",
+                    params![newer.id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
         assert!(store
             .list_conversations()
             .unwrap()

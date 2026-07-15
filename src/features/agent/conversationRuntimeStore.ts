@@ -39,6 +39,12 @@ export function getConversationTurnPhase(conversationId: string): ConversationTu
   return phases[conversationId] ?? "idle";
 }
 
+export function clearConversationTurnPhase(conversationId: string) {
+  if (!(conversationId in phases)) return;
+  delete phases[conversationId];
+  for (const listener of phaseListeners) listener();
+}
+
 export function subscribeConversationTurnPhases(listener: () => void) {
   phaseListeners.add(listener);
   return () => phaseListeners.delete(listener);
