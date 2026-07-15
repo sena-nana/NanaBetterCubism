@@ -24,7 +24,7 @@ pub enum RpcError {
 }
 
 impl RpcError {
-    pub fn is_uncertain_mutation(&self) -> bool {
+    pub fn is_transport_failure(&self) -> bool {
         matches!(
             self,
             Self::Connection(_) | Self::Disconnected | Self::Timeout
@@ -245,5 +245,17 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.editor_kind(), Some("UnsupportedVersion"));
+    }
+
+    #[test]
+    fn classifies_transport_failures() {
+        assert!(RpcError::Connection("refused".into()).is_transport_failure());
+        assert!(RpcError::Disconnected.is_transport_failure());
+        assert!(RpcError::Timeout.is_transport_failure());
+        assert!(!RpcError::Protocol("invalid response".into()).is_transport_failure());
+        assert!(!RpcError::Editor {
+            kind: "InvalidData".into(),
+        }
+        .is_transport_failure());
     }
 }

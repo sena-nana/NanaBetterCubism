@@ -38,6 +38,7 @@ use uuid::Uuid;
 const EDITOR_STATE_EVENT: &str = "cubism://editor-state";
 const BATCH_PROGRESS_EVENT: &str = "cubism://parameter-batch-progress";
 const BATCH_FINISHED_EVENT: &str = "cubism://parameter-batch-finished";
+const RECONNECT_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -167,10 +168,7 @@ impl EditorService {
                 },
                 message: "正在连接 Cubism Editor…".into(),
             };
-            inner.model_uid = None;
-            inner.structure = ModelStructure::default();
-            inner.previews.clear();
-            inner.part_query_in_progress = false;
+            clear_session_data(&mut inner);
             let previous = inner.rpc.take();
             (inner.connection_request, previous)
         };
@@ -185,27 +183,32 @@ impl EditorService {
         Ok(self.snapshot().await)
     }
 
+    async fn wait_to_retry(&self, app: &AppHandle, request: u64) -> bool {
+        {
+            let mut inner = self.inner.lock().await;
+            if !inner.desired_connected || inner.connection_request != request {
+                return false;
+            }
+            clear_session_data(&mut inner);
+            inner.snapshot.state = EditorConnectionState::Connecting;
+            inner.snapshot.message = "Editor 暂未连接，正在自动重试…".into();
+        }
+        self.emit_snapshot(app).await;
+        tokio::time::sleep(RECONNECT_INTERVAL).await;
+        self.request_is_current(request).await
+    }
+
     async fn connection_loop(&self, app: AppHandle, request: u64, port: u16) {
-        let retry_delays = [0_u64, 1, 2, 4];
-        for (attempt, delay) in retry_delays.into_iter().enumerate() {
+        loop {
             if !self.request_is_current(request).await {
                 return;
             }
-            if delay > 0 {
-                self.set_snapshot(
-                    &app,
-                    EditorConnectionState::Connecting,
-                    format!("连接中断，正在进行第 {attempt} 次重连…"),
-                    false,
-                )
-                .await;
-                tokio::time::sleep(Duration::from_secs(delay)).await;
-            }
-
             let rpc = match RpcClient::connect(port).await {
                 Ok(rpc) => rpc,
-                Err(error) if attempt + 1 < retry_delays.len() => {
-                    let _ = error;
+                Err(error) if error.is_transport_failure() => {
+                    if !self.wait_to_retry(&app, request).await {
+                        return;
+                    }
                     continue;
                 }
                 Err(error) => {
@@ -241,34 +244,29 @@ impl EditorService {
                         let mut inner = self.inner.lock().await;
                         if inner.connection_request == request {
                             inner.rpc = None;
-                            inner.model_uid = None;
-                            inner.previews.clear();
+                            clear_session_data(&mut inner);
                         }
                     }
                     if !self.request_is_current(request).await {
                         return;
                     }
-                    if !error.is_uncertain_mutation() {
-                        self.set_snapshot(
-                            &app,
-                            EditorConnectionState::Failed,
-                            error.to_string(),
-                            false,
-                        )
-                        .await;
-                        return;
+                    if error.is_transport_failure() {
+                        if !self.wait_to_retry(&app, request).await {
+                            return;
+                        }
+                        continue;
                     }
+                    self.set_snapshot(
+                        &app,
+                        EditorConnectionState::Failed,
+                        error.to_string(),
+                        false,
+                    )
+                    .await;
+                    return;
                 }
             }
         }
-
-        self.set_snapshot(
-            &app,
-            EditorConnectionState::Failed,
-            "无法重新连接 Cubism Editor。",
-            false,
-        )
-        .await;
     }
 
     async fn run_session(
@@ -493,10 +491,7 @@ impl EditorService {
             inner.desired_connected = false;
             inner.connection_request = inner.connection_request.wrapping_add(1);
             inner.generation = inner.generation.wrapping_add(1);
-            inner.model_uid = None;
-            inner.structure = ModelStructure::default();
-            inner.previews.clear();
-            inner.part_query_in_progress = false;
+            clear_session_data(&mut inner);
             inner.snapshot = EditorSnapshot::default();
             inner.rpc.take()
         };
@@ -1033,7 +1028,7 @@ impl EditorService {
                 .await;
             return;
         }
-        if matches!(error, ExecutionError::Rpc(ref rpc_error) if rpc_error.is_uncertain_mutation())
+        if matches!(error, ExecutionError::Rpc(ref rpc_error) if rpc_error.is_transport_failure())
         {
             self.finish_operation(
                 app,
@@ -1134,6 +1129,18 @@ impl EditorService {
         let _ = app.emit(BATCH_FINISHED_EVENT, &finished);
         self.emit_snapshot(app).await;
     }
+}
+
+fn clear_session_data(inner: &mut ServiceState) {
+    inner.model_uid = None;
+    inner.structure = ModelStructure::default();
+    inner.previews.clear();
+    inner.part_query_in_progress = false;
+    inner.snapshot.api_version = None;
+    inner.snapshot.model_label = None;
+    inner.snapshot.groups.clear();
+    inner.snapshot.capabilities.batch_create_parameters = false;
+    inner.snapshot.capabilities.find_part_parameters = false;
 }
 
 fn response_bool(value: Value) -> Result<bool, RpcError> {
