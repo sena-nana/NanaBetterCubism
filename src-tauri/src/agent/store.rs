@@ -136,6 +136,8 @@ impl AgentStore {
             CREATE TABLE IF NOT EXISTS projects (
               id TEXT PRIMARY KEY,
               name TEXT NOT NULL,
+              document_key TEXT,
+              document_path TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
@@ -203,6 +205,11 @@ impl AgentStore {
             "archived",
             "INTEGER NOT NULL DEFAULT 0",
         )?;
+        ensure_column(&conn, "projects", "document_key", "TEXT")?;
+        ensure_column(&conn, "projects", "document_path", "TEXT")?;
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS projects_document_key_unique ON projects(document_key) WHERE document_key IS NOT NULL",
+        )?;
         *self.conn.lock().unwrap() = Some(conn);
         *self.path.lock().unwrap() = Some(path);
         Ok(())
@@ -241,26 +248,34 @@ impl AgentStore {
         })
     }
 
-    pub fn create_conversation(&self, title: Option<String>) -> Result<ConversationSummary, AgentError> {
+    pub fn create_conversation(
+        &self,
+        title: Option<String>,
+        document: Option<(&str, &str)>,
+    ) -> Result<ConversationSummary, AgentError> {
         let id = new_id();
         let now = Utc::now().to_rfc3339();
         let title = title
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "新对话".into());
         self.with_conn(|conn| {
-            conn.execute(
-                "INSERT INTO conversations (id, title, project_id, pinned, archived, updated_at) VALUES (?1, ?2, NULL, 0, 0, ?3)",
-                params![id, title, now],
+            let transaction = conn.unchecked_transaction()?;
+            let project = document
+                .map(|(key, path)| resolve_document_project(&transaction, key, path, &now))
+                .transpose()?;
+            transaction.execute(
+                "INSERT INTO conversations (id, title, project_id, pinned, archived, updated_at) VALUES (?1, ?2, ?3, 0, 0, ?4)",
+                params![id, title, project.as_ref().map(|item| item.0.as_str()), now],
             )?;
-            Ok(())
-        })?;
-        Ok(ConversationSummary {
-            id,
-            title,
-            project_id: None,
-            project_name: None,
-            updated_at: now,
-            pinned: false,
+            transaction.commit()?;
+            Ok(ConversationSummary {
+                id,
+                title,
+                project_id: project.as_ref().map(|item| item.0.clone()),
+                project_name: project.map(|item| item.1),
+                updated_at: now,
+                pinned: false,
+            })
         })
     }
 
@@ -595,49 +610,6 @@ impl AgentStore {
         })
     }
 
-    pub fn upsert_project(
-        &self,
-        id: Option<String>,
-        name: String,
-    ) -> Result<ProjectRecord, AgentError> {
-        let name = name.trim().to_string();
-        if name.is_empty() {
-            return Err(AgentError::new("invalid_project", "项目名不能为空。"));
-        }
-        let now = Utc::now().to_rfc3339();
-        let id = id.unwrap_or_else(new_id);
-        self.with_conn(|conn| {
-            conn.execute(
-                r#"
-                INSERT INTO projects (id, name, created_at, updated_at)
-                VALUES (?1, ?2, ?3, ?3)
-                ON CONFLICT(id) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at
-                "#,
-                params![id, name, now],
-            )?;
-            Ok(())
-        })?;
-        Ok(ProjectRecord {
-            id,
-            name,
-            updated_at: now,
-        })
-    }
-
-    pub fn bind_project(
-        &self,
-        conversation_id: &str,
-        project_id: Option<String>,
-    ) -> Result<(), AgentError> {
-        self.with_conn(|conn| {
-            conn.execute(
-                "UPDATE conversations SET project_id = ?1, updated_at = ?2 WHERE id = ?3",
-                params![project_id, Utc::now().to_rfc3339(), conversation_id],
-            )?;
-            Ok(())
-        })
-    }
-
     pub fn conversation_project_id(
         &self,
         conversation_id: &str,
@@ -711,7 +683,18 @@ impl AgentStore {
         })
     }
 
-    pub fn upsert_memory(&self, input: MemoryUpsertInput) -> Result<MemoryRecord, AgentError> {
+    pub fn upsert_memory(&self, mut input: MemoryUpsertInput) -> Result<MemoryRecord, AgentError> {
+        match input.scope.as_str() {
+            "project" if input.project_id.is_none() => {
+                return Err(AgentError::new(
+                    "project_required",
+                    "当前对话未归入已保存的 Cubism 项目。",
+                ));
+            }
+            "global" => input.project_id = None,
+            "project" => {}
+            _ => return Err(AgentError::new("invalid_memory", "记忆范围无效。")),
+        }
         let id = input.id.unwrap_or_else(new_id);
         let enabled = input.enabled.unwrap_or(true);
         let updated_at = Utc::now().to_rfc3339();
@@ -822,6 +805,101 @@ impl AgentStore {
     }
 }
 
+fn resolve_document_project(
+    conn: &Connection,
+    document_key: &str,
+    document_path: &str,
+    now: &str,
+) -> Result<(String, String), AgentError> {
+    let existing = conn
+        .query_row(
+            "SELECT id FROM projects WHERE document_key = ?1",
+            params![document_key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let (project_id, reused) = match existing {
+        Some(id) => (id, true),
+        None => (new_id(), false),
+    };
+    if reused {
+        conn.execute(
+            "UPDATE projects SET document_path = ?1, updated_at = ?2 WHERE id = ?3",
+            params![document_path, now, project_id],
+        )?;
+    } else {
+        conn.execute(
+            "INSERT INTO projects (id, name, document_key, document_path, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![project_id, document_stem(document_path), document_key, document_path, now],
+        )?;
+    }
+    refresh_duplicate_document_names(conn, document_path)?;
+    let name = conn.query_row(
+        "SELECT name FROM projects WHERE id = ?1",
+        params![project_id],
+        |row| row.get(0),
+    )?;
+    Ok((project_id, name))
+}
+
+fn refresh_duplicate_document_names(
+    conn: &Connection,
+    current_path: &str,
+) -> Result<(), AgentError> {
+    let current_stem = document_stem(current_path);
+    let projects = {
+        let mut stmt = conn.prepare(
+            "SELECT id, document_path FROM projects WHERE document_key IS NOT NULL AND document_path IS NOT NULL",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .filter_map(Result::ok)
+            .filter(|(_, path)| same_document_stem(&document_stem(path), &current_stem))
+            .collect::<Vec<_>>();
+        rows
+    };
+    let duplicate = projects.len() > 1;
+    for (id, path) in projects {
+        let stem = document_stem(&path);
+        let name = if duplicate {
+            document_parent(&path)
+                .map(|parent| format!("{stem} — {parent}"))
+                .unwrap_or(stem)
+        } else {
+            stem
+        };
+        conn.execute(
+            "UPDATE projects SET name = ?1 WHERE id = ?2",
+            params![name, id],
+        )?;
+    }
+    Ok(())
+}
+
+fn document_stem(path: &str) -> String {
+    let file_name = path.rsplit('/').next().unwrap_or(path);
+    file_name
+        .rfind('.')
+        .map(|index| &file_name[..index])
+        .filter(|name| !name.is_empty())
+        .unwrap_or(file_name)
+        .to_string()
+}
+
+fn document_parent(path: &str) -> Option<&str> {
+    path.rsplit('/').nth(1).filter(|value| !value.is_empty())
+}
+
+fn same_document_stem(left: &str, right: &str) -> bool {
+    if cfg!(windows) {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
 fn map_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> {
     Ok(MemoryRecord {
         id: row.get(0)?,
@@ -894,27 +972,29 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let store = AgentStore::default();
         store.open(dir.join("agent.db")).unwrap();
-        let conversation = store.create_conversation(Some("测试".into())).unwrap();
+        let conversation = store
+            .create_conversation(
+                Some("测试".into()),
+                Some(("c:/models/角色a.cmo3", "C:/models/角色A.cmo3")),
+            )
+            .unwrap();
+        let project_id = conversation.project_id.clone().unwrap();
         store
             .append_message(&conversation.id, "user", "hello", None, None)
-            .unwrap();
-        let project = store.upsert_project(None, "角色A".into()).unwrap();
-        store
-            .bind_project(&conversation.id, Some(project.id.clone()))
             .unwrap();
         store
             .upsert_memory(MemoryUpsertInput {
                 id: None,
                 scope: "project".into(),
                 kind: "stage".into(),
-                project_id: Some(project.id.clone()),
+                project_id: Some(project_id.clone()),
                 title: "阶段".into(),
                 body: "已创建眼睛参数".into(),
                 enabled: Some(true),
                 source_conversation_id: Some(conversation.id.clone()),
             })
             .unwrap();
-        let memories = store.memories_for_injection(Some(&project.id)).unwrap();
+        let memories = store.memories_for_injection(Some(&project_id)).unwrap();
         assert_eq!(memories.len(), 1);
         store
             .append_tool_trace(
@@ -943,8 +1023,12 @@ mod tests {
     fn deleting_conversation_cascades_owned_data_and_detaches_memories() {
         let store = AgentStore::default();
         store.open(":memory:".into()).unwrap();
-        let deleted = store.create_conversation(Some("待删除".into())).unwrap();
-        let retained = store.create_conversation(Some("保留".into())).unwrap();
+        let deleted = store
+            .create_conversation(Some("待删除".into()), None)
+            .unwrap();
+        let retained = store
+            .create_conversation(Some("保留".into()), None)
+            .unwrap();
         store
             .append_message(&deleted.id, "user", "删除的消息", None, None)
             .unwrap();
@@ -1035,6 +1119,76 @@ mod tests {
     }
 
     #[test]
+    fn automatic_projects_reuse_paths_and_disambiguate_duplicate_file_names() {
+        let store = AgentStore::default();
+        store.open(":memory:".into()).unwrap();
+
+        let first = store
+            .create_conversation(
+                Some("A1".into()),
+                Some((
+                    "c:/characters/alpha/nana.cmo3",
+                    "C:/Characters/Alpha/Nana.cmo3",
+                )),
+            )
+            .unwrap();
+        let repeated = store
+            .create_conversation(
+                Some("A2".into()),
+                Some((
+                    "c:/characters/alpha/nana.cmo3",
+                    "C:/Characters/Alpha/Nana.cmo3",
+                )),
+            )
+            .unwrap();
+        let second = store
+            .create_conversation(
+                Some("B".into()),
+                Some((
+                    "d:/characters/beta/nana.cmo3",
+                    "D:/Characters/Beta/Nana.cmo3",
+                )),
+            )
+            .unwrap();
+
+        assert_eq!(first.project_id, repeated.project_id);
+        assert_ne!(first.project_id, second.project_id);
+        let conversations = store.list_conversations().unwrap();
+        let project_names = conversations
+            .iter()
+            .map(|item| item.project_name.as_deref().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            project_names,
+            std::collections::BTreeSet::from(["Nana — Alpha", "Nana — Beta"])
+        );
+        assert_eq!(store.list_projects().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn automatic_project_resolution_rolls_back_when_conversation_insert_fails() {
+        let store = AgentStore::default();
+        store.open(":memory:".into()).unwrap();
+        store
+            .with_conn(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER reject_conversation BEFORE INSERT ON conversations BEGIN SELECT RAISE(ABORT, 'rejected'); END;",
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let result = store.create_conversation(
+            Some("失败".into()),
+            Some(("c:/characters/nana.cmo3", "C:/Characters/Nana.cmo3")),
+        );
+
+        assert!(result.is_err());
+        assert!(store.list_projects().unwrap().is_empty());
+        assert!(store.list_conversations().unwrap().is_empty());
+    }
+
+    #[test]
     fn migrates_legacy_schema_without_purging_archived_history() {
         let dir = std::env::temp_dir().join(format!("nbc-agent-migration-{}", new_id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1043,6 +1197,14 @@ mod tests {
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch(
                 r#"
+                CREATE TABLE projects (
+                  id TEXT PRIMARY KEY,
+                  name TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                INSERT INTO projects (id, name, created_at, updated_at)
+                VALUES ('legacy-project', '旧项目', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
                 CREATE TABLE conversations (
                   id TEXT PRIMARY KEY,
                   title TEXT NOT NULL,
@@ -1051,7 +1213,7 @@ mod tests {
                   updated_at TEXT NOT NULL
                 );
                 INSERT INTO conversations (id, title, project_id, pinned, updated_at)
-                VALUES ('older', '较早对话', NULL, 0, '2026-01-01T00:00:00Z');
+                VALUES ('older', '较早对话', 'legacy-project', 0, '2026-01-01T00:00:00Z');
                 "#,
             )
             .unwrap();
@@ -1059,7 +1221,9 @@ mod tests {
 
         let store = AgentStore::default();
         store.open(path).unwrap();
-        let newer = store.create_conversation(Some("较新对话".into())).unwrap();
+        let newer = store
+            .create_conversation(Some("较新对话".into()), None)
+            .unwrap();
         store
             .append_message(&newer.id, "user", "保留的消息", None, None)
             .unwrap();
@@ -1068,6 +1232,8 @@ mod tests {
         let listed = store.list_conversations().unwrap();
         assert_eq!(listed[0].id, "older");
         assert!(listed[0].pinned);
+        assert_eq!(listed[0].project_name.as_deref(), Some("旧项目"));
+        assert_eq!(store.list_projects().unwrap().len(), 1);
 
         store
             .with_conn(|conn| {

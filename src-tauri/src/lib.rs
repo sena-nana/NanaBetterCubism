@@ -4,12 +4,12 @@ mod protocol;
 mod service;
 
 use agent::{
-    agent_answer_ask, agent_bind_project, agent_cancel_turn, agent_consolidate_memory,
+    agent_answer_ask, agent_cancel_turn, agent_consolidate_memory,
     agent_create_conversation, agent_delete_conversation, agent_get_messages,
     agent_get_pending_ask, agent_get_plan, agent_list_conversations, agent_list_projects,
-    agent_send_message, agent_set_conversation_pinned, agent_upsert_project, llm_get_config,
-    llm_set_config, llm_test_connection, memory_list, memory_set_enabled, memory_upsert,
-    AgentRuntime, AgentStore,
+    agent_send_message, agent_set_conversation_pinned, llm_get_config, llm_set_config,
+    llm_test_connection, memory_list, memory_set_enabled, memory_upsert, AgentRuntime,
+    AgentStore,
 };
 use service::{
     cancel_parameter_batch, connect_editor, disconnect_editor, execute_parameter_batch,
@@ -60,8 +60,6 @@ pub fn run() {
             agent_get_plan,
             agent_get_pending_ask,
             agent_list_projects,
-            agent_upsert_project,
-            agent_bind_project,
             memory_list,
             memory_upsert,
             memory_set_enabled,

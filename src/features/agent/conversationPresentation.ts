@@ -37,8 +37,6 @@ const TOOL_LABELS: Record<string, string> = {
   execute_parameter_batch: "应用参数修改",
   cancel_parameter_batch: "取消参数修改",
   capture_cubism_editor_window: "查看 Editor 窗口",
-  list_projects: "读取项目",
-  bind_conversation_project: "更新项目归属",
   list_memories: "读取记忆",
   upsert_memory: "更新记忆",
   archive_memory: "停用记忆",

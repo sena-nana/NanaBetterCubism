@@ -13,7 +13,6 @@ const listeners = vi.hoisted(() => ({
 const bridge = vi.hoisted(() => ({
   answerAsk: vi.fn(async () => undefined),
   deleteConversation: vi.fn(async () => undefined),
-  bindProject: vi.fn(async () => undefined),
   cancelTurn: vi.fn(async () => ({ state: "idle" as const })),
   consolidateMemory: vi.fn(async () => undefined),
   getLlmConfig: vi.fn(async () => ({ baseUrl: null, model: "test-model", hasApiKey: true })),
@@ -36,7 +35,6 @@ const bridge = vi.hoisted(() => ({
   normalizeCommandError: vi.fn((error: unknown) => ({ code: "test", message: String(error) })),
   sendMessage: vi.fn(async () => undefined),
   setConversationPinned: vi.fn(async () => true),
-  upsertProject: vi.fn(),
 }));
 
 vi.mock("../src/features/agent/bridge", () => bridge);

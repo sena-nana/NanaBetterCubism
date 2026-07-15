@@ -294,6 +294,124 @@ async fn document_refs_are_connection_scoped_and_hide_document_uids() {
 }
 
 #[tokio::test]
+async fn reads_saved_current_modeling_document_without_exposing_uid() {
+    let port = sequence_server(vec![
+        (
+            "GetCurrentDocumentUID",
+            json!({}),
+            json!({"DocumentUID": "private-document"}),
+        ),
+        (
+            "GetDocument",
+            json!({"DocumentUID": "private-document"}),
+            json!({
+                "ModelingDocuments": [{
+                    "DocumentFilePath": "C:\\Models\\Nana.cmo3",
+                    "Views": [{"ModelUID": "private-model"}]
+                }]
+            }),
+        ),
+    ])
+    .await;
+    let service = connected_service(port).await;
+
+    let document = current_modeling_document(&service).await.unwrap();
+
+    assert_eq!(document.document_path, "C:/Models/Nana.cmo3");
+    assert_eq!(
+        document.document_key,
+        if cfg!(windows) {
+            "c:/models/nana.cmo3"
+        } else {
+            "C:/Models/Nana.cmo3"
+        }
+    );
+    assert!(!format!("{document:?}").contains("private-document"));
+    assert!(!format!("{document:?}").contains("private-model"));
+}
+
+#[tokio::test]
+async fn ignores_unsaved_and_non_modeling_current_documents() {
+    for document in [
+        json!({"ModelingDocuments": [{"DocumentFilePath": "", "Views": []}]}),
+        json!({"AnimationDocuments": [{"DocumentFilePath": "C:/Models/Nana.can3"}]}),
+    ] {
+        let port = sequence_server(vec![
+            (
+                "GetCurrentDocumentUID",
+                json!({}),
+                json!({"DocumentUID": "private-document"}),
+            ),
+            (
+                "GetDocument",
+                json!({"DocumentUID": "private-document"}),
+                document,
+            ),
+        ])
+        .await;
+        let service = connected_service(port).await;
+        assert!(current_modeling_document(&service).await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn ignores_current_document_while_editor_is_disconnected() {
+    let service = EditorService::default();
+
+    assert!(current_modeling_document(&service).await.is_none());
+}
+
+#[tokio::test]
+async fn ignores_document_result_from_superseded_connection() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (received_tx, received_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        let mut received_tx = Some(received_tx);
+        let mut release_rx = Some(release_rx);
+        for index in 0..2 {
+            let request = socket.next().await.unwrap().unwrap().into_text().unwrap();
+            let request: Value = serde_json::from_str(&request).unwrap();
+            let method = request["Method"].as_str().unwrap();
+            if index == 1 {
+                let _ = received_tx.take().unwrap().send(());
+                let _ = release_rx.take().unwrap().await;
+            }
+            let data = if index == 0 {
+                json!({"DocumentUID": "private-document"})
+            } else {
+                json!({"ModelingDocuments": [{"DocumentFilePath": "C:/Models/Nana.cmo3"}]})
+            };
+            socket
+                .send(Message::Text(
+                    json!({
+                        "Version": "1.1.0",
+                        "RequestId": request["RequestId"],
+                        "Type": "Response",
+                        "Method": method,
+                        "Data": data,
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+        }
+    });
+    let service = connected_service(port).await;
+    let task_service = service.clone();
+    let task = tokio::spawn(async move { current_modeling_document(&task_service).await });
+    received_rx.await.unwrap();
+    service.inner.lock().await.generation = 8;
+    release_tx.send(()).unwrap();
+
+    assert!(task.await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn edit_preview_executes_documented_transaction_and_verifies_postcondition() {
     let before = json!({
         "ParameterStructure": {

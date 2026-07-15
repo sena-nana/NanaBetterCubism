@@ -1,11 +1,11 @@
 ---
 name: project-memory
-description: List or bind named projects and read, write, or archive project-stage and reusable Live2D memories.
+description: Read, write, or archive the current Cubism project's stage memory and reusable Live2D memories.
 ---
 
 # Project And Memory
 
-1. Bind a conversation only to a project explicitly identified by the user; a project identity is not a Cubism file path.
+1. The current conversation's project is assigned automatically from the active saved CMO3 document; do not ask the user to bind or name it.
 2. Store current-project facts as project stage memory and transferable modeling guidance as global experience memory.
 3. Read existing memories before replacing related content, and archive obsolete entries instead of claiming they were deleted.
-4. Never claim a project binding or memory write succeeded unless the corresponding tool returned success.
+4. If the conversation is in the inbox, do not claim project-stage memory was stored; global experience remains available.

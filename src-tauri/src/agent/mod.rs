@@ -284,8 +284,8 @@ mod tests {
     async fn only_one_turn_can_own_a_conversation() {
         let runtime = AgentRuntime::default();
         runtime.store.open(":memory:".into()).unwrap();
-        let conversation_a = runtime.store.create_conversation(None).unwrap();
-        let conversation_b = runtime.store.create_conversation(None).unwrap();
+        let conversation_a = runtime.store.create_conversation(None, None).unwrap();
+        let conversation_b = runtime.store.create_conversation(None, None).unwrap();
         let first = runtime.begin_turn(&conversation_a.id).await.unwrap();
 
         assert!(matches!(
@@ -302,7 +302,7 @@ mod tests {
     async fn cancellation_result_reflects_active_pending_and_idle_state() {
         let runtime = AgentRuntime::default();
         runtime.store.open(":memory:".into()).unwrap();
-        let conversation = runtime.store.create_conversation(None).unwrap();
+        let conversation = runtime.store.create_conversation(None, None).unwrap();
 
         let active = runtime.begin_turn(&conversation.id).await.unwrap();
         assert_eq!(
@@ -359,7 +359,7 @@ mod tests {
     async fn delete_rejects_active_and_pending_conversations() {
         let runtime = AgentRuntime::default();
         runtime.store.open(":memory:".into()).unwrap();
-        let conversation = runtime.store.create_conversation(None).unwrap();
+        let conversation = runtime.store.create_conversation(None, None).unwrap();
         let active = runtime.begin_turn(&conversation.id).await.unwrap();
 
         assert!(matches!(

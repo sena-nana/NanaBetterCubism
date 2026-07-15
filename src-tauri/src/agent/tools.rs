@@ -1,7 +1,7 @@
 use crate::agent::capture::capture_cubism_editor_window;
 use crate::agent::skills;
 use crate::agent::store::{truncate_summary, MemoryUpsertInput, PendingAsk, PlanStep};
-use crate::agent::{emit_conversations_changed, new_id, AgentError, AgentRuntime};
+use crate::agent::{new_id, AgentError, AgentRuntime};
 use crate::domain::ParameterBatchInput;
 use crate::service::{CommandError, EditorService};
 use serde_json::{json, Value};
@@ -73,28 +73,9 @@ fn all_domain_tool_definitions() -> Vec<Value> {
             }),
         ),
         tool(
-            "list_projects",
-            "列出用户手绑的项目。",
-            json!({"type": "object", "properties": {}}),
-        ),
-        tool(
-            "bind_conversation_project",
-            "将当前对话绑定到项目，或解除绑定。",
-            json!({
-                "type": "object",
-                "properties": {
-                    "projectId": { "type": ["string", "null"] },
-                    "projectName": { "type": "string", "description": "若提供且无 projectId，则新建项目并绑定" }
-                }
-            }),
-        ),
-        tool(
             "list_memories",
-            "列出项目阶段记忆与全局经验。",
-            json!({
-                "type": "object",
-                "properties": { "projectId": { "type": ["string", "null"] } }
-            }),
+            "列出当前对话所属项目的阶段记忆与全局经验。",
+            json!({"type": "object", "properties": {}}),
         ),
         tool(
             "upsert_memory",
@@ -105,7 +86,6 @@ fn all_domain_tool_definitions() -> Vec<Value> {
                     "id": { "type": "string" },
                     "scope": { "type": "string" },
                     "kind": { "type": "string" },
-                    "projectId": { "type": ["string", "null"] },
                     "title": { "type": "string" },
                     "body": { "type": "string" },
                     "enabled": { "type": "boolean" }
@@ -393,55 +373,30 @@ pub async fn execute_tool(
                 image_path: Some(captured.path),
             })
         }
-        "list_projects" => {
-            let projects = runtime.store.list_projects()?;
-            Ok(tool_result(serde_json::to_string_pretty(&projects)?))
-        }
-        "bind_conversation_project" => {
-            let mut project_id = args
-                .get("projectId")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-            if project_id.is_none() {
-                if let Some(name) = args.get("projectName").and_then(|v| v.as_str()) {
-                    let project = runtime.store.upsert_project(None, name.into())?;
-                    project_id = Some(project.id);
-                }
-            }
-            runtime
-                .store
-                .bind_project(conversation_id, project_id.clone())?;
-            emit_conversations_changed(app);
-            Ok(tool_result(serde_json::to_string_pretty(&json!({
-                "projectId": project_id
-            }))?))
-        }
         "list_memories" => {
-            let project_id = args
-                .get("projectId")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
+            let project_id = runtime.store.conversation_project_id(conversation_id)?;
             let memories = runtime.store.list_memories(project_id)?;
             Ok(tool_result(serde_json::to_string_pretty(&memories)?))
         }
         "upsert_memory" => {
+            let scope = args
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .unwrap_or("project");
+            let project_id = if scope == "project" {
+                runtime.store.conversation_project_id(conversation_id)?
+            } else {
+                None
+            };
             let memory = runtime.store.upsert_memory(MemoryUpsertInput {
                 id: args.get("id").and_then(|v| v.as_str()).map(str::to_string),
-                scope: args
-                    .get("scope")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("project")
-                    .into(),
+                scope: scope.into(),
                 kind: args
                     .get("kind")
                     .and_then(|v| v.as_str())
                     .unwrap_or("stage")
                     .into(),
-                project_id: args
-                    .get("projectId")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string)
-                    .or(runtime.store.conversation_project_id(conversation_id)?),
+                project_id,
                 title: args
                     .get("title")
                     .and_then(|v| v.as_str())

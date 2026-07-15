@@ -85,13 +85,7 @@ const OBJECT_EDITING_TOOLS: &[&str] = &[
     "cancel_editor_edit",
 ];
 
-const PROJECT_MEMORY_TOOLS: &[&str] = &[
-    "list_projects",
-    "bind_conversation_project",
-    "list_memories",
-    "upsert_memory",
-    "archive_memory",
-];
+const PROJECT_MEMORY_TOOLS: &[&str] = &["list_memories", "upsert_memory", "archive_memory"];
 
 struct SkillSource {
     content: &'static str,
