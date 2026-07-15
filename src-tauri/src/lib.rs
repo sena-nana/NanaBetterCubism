@@ -74,17 +74,23 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn main_window_starts_hidden_until_plugin_restores_it() {
-        let config: serde_json::Value =
-            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
-        let main_window = config["app"]["windows"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|window| window["label"].as_str() == Some("main"))
-            .unwrap();
+    fn main_window_starts_hidden_at_minimum_size_until_plugin_restores_it() {
+        for source in [
+            include_str!("../tauri.conf.json"),
+            include_str!("../tauri.macos.conf.json"),
+        ] {
+            let config: serde_json::Value = serde_json::from_str(source).unwrap();
+            let main_window = config["app"]["windows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|window| window["label"].as_str() == Some("main"))
+                .unwrap();
 
-        assert_eq!(main_window["visible"].as_bool(), Some(false));
+            assert_eq!(main_window["width"], main_window["minWidth"]);
+            assert_eq!(main_window["height"], main_window["minHeight"]);
+            assert_eq!(main_window["visible"].as_bool(), Some(false));
+        }
     }
 
     #[test]
