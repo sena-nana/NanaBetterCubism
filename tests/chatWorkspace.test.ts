@@ -4,27 +4,33 @@ import { describe, expect, it, vi } from "vitest";
 import { defineComponent, ref } from "vue";
 import ChatPage from "../src/features/agent/ChatPage.vue";
 import ConversationComposer from "../src/features/agent/components/ConversationComposer.vue";
-import type { AgentPlanEvent, ChatMessage } from "../src/features/agent/types";
+import type {
+  AgentPlanEvent,
+  AgentUserActionEvent,
+  ChatMessage,
+} from "../src/features/agent/types";
 
 const listeners = vi.hoisted(() => ({
   plan: null as null | ((payload: AgentPlanEvent) => void),
+  userAction: null as null | ((payload: AgentUserActionEvent) => void),
 }));
 
 const bridge = vi.hoisted(() => ({
-  answerAsk: vi.fn(async () => undefined),
+  answerQuestion: vi.fn(async () => undefined),
   deleteConversation: vi.fn(async () => undefined),
   cancelTurn: vi.fn(async () => ({ state: "idle" as const })),
   consolidateMemory: vi.fn(async () => undefined),
+  decideComputerOperation: vi.fn(async () => undefined),
   getLlmConfig: vi.fn(async () => ({ baseUrl: null, model: "test-model", hasApiKey: true })),
   getMessages: vi.fn(),
-  getPendingAsk: vi.fn(async () => null),
+  getPendingUserAction: vi.fn(async () => null),
   getPlan: vi.fn(async () => null),
   listConversations: vi.fn(async () => [
     { id: "a", title: "会话 A", projectId: null, projectName: null, updatedAt: "", pinned: false },
     { id: "b", title: "会话 B", projectId: null, projectName: null, updatedAt: "", pinned: false },
   ]),
   listProjects: vi.fn(async () => []),
-  listenAsk: vi.fn(async () => () => undefined),
+  listenComputerOperation: vi.fn(async () => () => undefined),
   listenPlan: vi.fn(async (handler) => {
     listeners.plan = handler;
     return () => undefined;
@@ -32,6 +38,10 @@ const bridge = vi.hoisted(() => ({
   listenToolEvent: vi.fn(async () => () => undefined),
   listenTurnDelta: vi.fn(async () => () => undefined),
   listenTurnFinished: vi.fn(async () => () => undefined),
+  listenUserAction: vi.fn(async (handler) => {
+    listeners.userAction = handler;
+    return () => undefined;
+  }),
   normalizeCommandError: vi.fn((error: unknown) => ({ code: "test", message: String(error) })),
   sendMessage: vi.fn(async () => undefined),
   setConversationPinned: vi.fn(async () => true),
@@ -70,8 +80,9 @@ describe("对话工作区", () => {
           v-model="draft"
           v-model:ask-answer="answer"
           :can-send="true"
-          :pending-ask="{
-            askId: 'ask-1',
+          :pending-action="{
+            kind: 'question',
+            actionId: 'ask-1',
             conversationId: 'a',
             question: '选择处理方式',
             options: ['继续']
@@ -97,6 +108,69 @@ describe("对话工作区", () => {
     expect(regular.emitted().send).toBeUndefined();
     await fireEvent.keyDown(input, { key: "Enter" });
     expect(regular.emitted().send).toHaveLength(1);
+  });
+
+  it("电脑代理授权只能通过独立的批准或拒绝操作", async () => {
+    const view = render(ConversationComposer, {
+      props: {
+        modelValue: "",
+        pendingAction: {
+          kind: "computer_approval",
+          actionId: "approval-1",
+          conversationId: "a",
+          goal: "调整 Warp 控制点",
+          reason: "Cubism 没有可用于此操作的 API，只能由 Agent 代理操作 Cubism 窗口。",
+          targetWindowTitle: "Cubism Editor",
+          steps: [{ id: "move", title: "拖动控制点" }],
+          allowedActions: ["drag"],
+          includesFileDialogs: false,
+          impact: "Agent 将向 Cubism 注入鼠标输入。",
+          cannotUndo: true,
+          expiresAt: "2026-07-15T00:05:00Z",
+        },
+      },
+    });
+
+    expect(screen.queryByPlaceholderText("输入回答")).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "拒绝" }));
+    await fireEvent.click(screen.getByRole("button", { name: "授权本次操作" }));
+    expect(view.emitted().decide).toEqual([[false], [true]]);
+  });
+
+  it("授权事件绑定当前会话并调用独立授权命令", async () => {
+    bridge.getMessages.mockResolvedValue([]);
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: "/chats/:id", component: ChatPage }],
+    });
+    await router.push("/chats/a");
+    await router.isReady();
+    render({ template: "<RouterView />" }, { global: { plugins: [router] } });
+    await vi.waitFor(() => expect(listeners.userAction).not.toBeNull());
+
+    const approval = {
+      kind: "computer_approval" as const,
+      actionId: "approval-a",
+      conversationId: "a",
+      goal: "调整 Warp 控制点",
+      reason: "Cubism 没有可用于此操作的 API，只能由 Agent 代理操作 Cubism 窗口。",
+      targetWindowTitle: "Cubism Editor",
+      steps: [{ id: "move", title: "拖动控制点" }],
+      allowedActions: ["drag" as const],
+      includesFileDialogs: false,
+      impact: "Agent 将向 Cubism 注入鼠标输入。",
+      cannotUndo: true,
+      expiresAt: "2026-07-15T00:05:00Z",
+    };
+    listeners.userAction?.({
+      conversationId: "b",
+      action: { ...approval, actionId: "approval-b", conversationId: "b" },
+    });
+    expect(screen.queryByRole("button", { name: "授权本次操作" })).toBeNull();
+
+    listeners.userAction?.({ conversationId: "a", action: approval });
+    await fireEvent.click(await screen.findByRole("button", { name: "授权本次操作" }));
+    expect(bridge.decideComputerOperation).toHaveBeenCalledWith("approval-a", true);
   });
 
   it("快速切换会话时忽略旧会话迟到的加载结果", async () => {

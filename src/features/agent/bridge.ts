@@ -2,11 +2,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { domainError, isTauriRuntime, normalizeCommandError } from "../editor/bridge";
 import type {
-  AgentAskEvent,
+  AgentComputerOperationEvent,
   AgentPlanEvent,
   AgentToolEvent,
   AgentTurnDelta,
   AgentTurnFinished,
+  AgentUserActionEvent,
   CancelTurnResult,
   ChatMessage,
   ConversationPlan,
@@ -15,7 +16,7 @@ import type {
   LlmConfigView,
   LlmTestResult,
   MemoryRecord,
-  PendingAsk,
+  PendingUserAction,
   ProjectRecord,
 } from "./types";
 
@@ -67,11 +68,21 @@ export async function deleteConversation(conversationId: string): Promise<void> 
   await invoke("agent_delete_conversation", { conversationId });
 }
 
-export async function answerAsk(askId: string, answer: string): Promise<void> {
+export async function answerQuestion(actionId: string, answer: string): Promise<void> {
   if (!isTauriRuntime()) {
     throw domainError("desktop_required", "请在桌面应用中回答提问。");
   }
-  await invoke("agent_answer_ask", { askId, answer });
+  await invoke("agent_answer_question", { actionId, answer });
+}
+
+export async function decideComputerOperation(
+  actionId: string,
+  approved: boolean,
+): Promise<void> {
+  if (!isTauriRuntime()) {
+    throw domainError("desktop_required", "请在桌面应用中处理电脑代理授权。");
+  }
+  await invoke("agent_decide_computer_operation", { actionId, approved });
 }
 
 export async function getPlan(conversationId: string): Promise<ConversationPlan | null> {
@@ -79,9 +90,11 @@ export async function getPlan(conversationId: string): Promise<ConversationPlan 
   return invoke<ConversationPlan | null>("agent_get_plan", { conversationId });
 }
 
-export async function getPendingAsk(conversationId: string): Promise<PendingAsk | null> {
+export async function getPendingUserAction(
+  conversationId: string,
+): Promise<PendingUserAction | null> {
   if (!isTauriRuntime()) return null;
-  return invoke<PendingAsk | null>("agent_get_pending_ask", { conversationId });
+  return invoke<PendingUserAction | null>("agent_get_pending_user_action", { conversationId });
 }
 
 export async function listProjects(): Promise<ProjectRecord[]> {
@@ -163,9 +176,18 @@ export async function listenTurnFinished(handler: (payload: AgentTurnFinished) =
   return listen<AgentTurnFinished>("agent://turn-finished", (e) => handler(e.payload));
 }
 
-export async function listenAsk(handler: (payload: AgentAskEvent) => void) {
+export async function listenUserAction(handler: (payload: AgentUserActionEvent) => void) {
   if (!isTauriRuntime()) return noopUnlisten;
-  return listen<AgentAskEvent>("agent://ask", (e) => handler(e.payload));
+  return listen<AgentUserActionEvent>("agent://user-action", (e) => handler(e.payload));
+}
+
+export async function listenComputerOperation(
+  handler: (payload: AgentComputerOperationEvent) => void,
+) {
+  if (!isTauriRuntime()) return noopUnlisten;
+  return listen<AgentComputerOperationEvent>("agent://computer-operation", (e) =>
+    handler(e.payload),
+  );
 }
 
 export async function listenPlan(handler: (payload: AgentPlanEvent) => void) {

@@ -48,8 +48,8 @@ pub struct ConversationPlan {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PendingAsk {
-    pub ask_id: String,
+pub struct PendingQuestion {
+    pub action_id: String,
     pub conversation_id: String,
     pub question: String,
     pub options: Vec<String>,
@@ -163,9 +163,10 @@ impl AgentStore {
               steps_json TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS pending_asks (
-              ask_id TEXT PRIMARY KEY,
+            CREATE TABLE IF NOT EXISTS pending_user_actions (
+              action_id TEXT PRIMARY KEY,
               conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+              kind TEXT NOT NULL CHECK (kind = 'question'),
               question TEXT NOT NULL,
               options_json TEXT NOT NULL,
               tool_call_id TEXT NOT NULL,
@@ -207,6 +208,7 @@ impl AgentStore {
         )?;
         ensure_column(&conn, "projects", "document_key", "TEXT")?;
         ensure_column(&conn, "projects", "document_path", "TEXT")?;
+        migrate_pending_asks(&conn)?;
         conn.execute_batch(
             "CREATE UNIQUE INDEX IF NOT EXISTS projects_document_key_unique ON projects(document_key) WHERE document_key IS NOT NULL",
         )?;
@@ -494,27 +496,27 @@ impl AgentStore {
         })
     }
 
-    pub fn set_pending_ask(
+    pub fn set_pending_question(
         &self,
-        ask: &PendingAsk,
+        question: &PendingQuestion,
         tool_call_id: &str,
     ) -> Result<(), AgentError> {
-        let options_json = serde_json::to_string(&ask.options)?;
+        let options_json = serde_json::to_string(&question.options)?;
         let created_at = Utc::now().to_rfc3339();
         self.with_conn(|conn| {
             conn.execute(
-                "DELETE FROM pending_asks WHERE conversation_id = ?1",
-                params![ask.conversation_id],
+                "DELETE FROM pending_user_actions WHERE conversation_id = ?1",
+                params![question.conversation_id],
             )?;
             conn.execute(
                 r#"
-                INSERT INTO pending_asks (ask_id, conversation_id, question, options_json, tool_call_id, created_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                INSERT INTO pending_user_actions (action_id, conversation_id, kind, question, options_json, tool_call_id, created_at)
+                VALUES (?1, ?2, 'question', ?3, ?4, ?5, ?6)
                 "#,
                 params![
-                    ask.ask_id,
-                    ask.conversation_id,
-                    ask.question,
+                    question.action_id,
+                    question.conversation_id,
+                    question.question,
                     options_json,
                     tool_call_id,
                     created_at
@@ -524,11 +526,14 @@ impl AgentStore {
         })
     }
 
-    pub fn get_pending_ask(&self, conversation_id: &str) -> Result<Option<PendingAsk>, AgentError> {
+    pub fn get_pending_question(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<PendingQuestion>, AgentError> {
         self.with_conn(|conn| {
             let row = conn
                 .query_row(
-                    "SELECT ask_id, question, options_json FROM pending_asks WHERE conversation_id = ?1",
+                    "SELECT action_id, question, options_json FROM pending_user_actions WHERE conversation_id = ?1 AND kind = 'question'",
                     params![conversation_id],
                     |row| {
                         Ok((
@@ -539,8 +544,8 @@ impl AgentStore {
                     },
                 )
                 .optional()?;
-            Ok(row.map(|(ask_id, question, options_json)| PendingAsk {
-                ask_id,
+            Ok(row.map(|(action_id, question, options_json)| PendingQuestion {
+                action_id,
                 conversation_id: conversation_id.into(),
                 question,
                 options: serde_json::from_str(&options_json).unwrap_or_default(),
@@ -548,15 +553,15 @@ impl AgentStore {
         })
     }
 
-    pub fn take_pending_ask(
+    pub fn take_pending_question(
         &self,
-        ask_id: &str,
-    ) -> Result<Option<(PendingAsk, String)>, AgentError> {
+        action_id: &str,
+    ) -> Result<Option<(PendingQuestion, String)>, AgentError> {
         self.with_conn(|conn| {
             let row = conn
                 .query_row(
-                    "SELECT ask_id, conversation_id, question, options_json, tool_call_id FROM pending_asks WHERE ask_id = ?1",
-                    params![ask_id],
+                    "SELECT action_id, conversation_id, question, options_json, tool_call_id FROM pending_user_actions WHERE action_id = ?1 AND kind = 'question'",
+                    params![action_id],
                     |row| {
                         Ok((
                             row.get::<_, String>(0)?,
@@ -568,11 +573,14 @@ impl AgentStore {
                     },
                 )
                 .optional()?;
-            if let Some((ask_id, conversation_id, question, options_json, tool_call_id)) = row {
-                conn.execute("DELETE FROM pending_asks WHERE ask_id = ?1", params![ask_id])?;
+            if let Some((action_id, conversation_id, question, options_json, tool_call_id)) = row {
+                conn.execute(
+                    "DELETE FROM pending_user_actions WHERE action_id = ?1",
+                    params![action_id],
+                )?;
                 Ok(Some((
-                    PendingAsk {
-                        ask_id,
+                    PendingQuestion {
+                        action_id,
                         conversation_id,
                         question,
                         options: serde_json::from_str(&options_json).unwrap_or_default(),
@@ -585,13 +593,20 @@ impl AgentStore {
         })
     }
 
-    pub fn clear_pending_ask(&self, conversation_id: &str) -> Result<bool, AgentError> {
+    pub fn clear_pending_user_action(&self, conversation_id: &str) -> Result<bool, AgentError> {
         self.with_conn(|conn| {
             let deleted = conn.execute(
-                "DELETE FROM pending_asks WHERE conversation_id = ?1",
+                "DELETE FROM pending_user_actions WHERE conversation_id = ?1",
                 params![conversation_id],
             )?;
             Ok(deleted > 0)
+        })
+    }
+
+    pub fn clear_unresumable_pending_user_actions(&self) -> Result<(), AgentError> {
+        self.with_conn(|conn| {
+            conn.execute("DELETE FROM pending_user_actions", [])?;
+            Ok(())
         })
     }
 
@@ -915,6 +930,27 @@ fn map_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> {
     })
 }
 
+fn migrate_pending_asks(conn: &Connection) -> Result<(), AgentError> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pending_asks')",
+        [],
+        |row| row.get(0),
+    )?;
+    if exists {
+        conn.execute_batch(
+            r#"
+            INSERT OR IGNORE INTO pending_user_actions (
+              action_id, conversation_id, kind, question, options_json, tool_call_id, created_at
+            )
+            SELECT ask_id, conversation_id, 'question', question, options_json, tool_call_id, created_at
+            FROM pending_asks;
+            DROP TABLE pending_asks;
+            "#,
+        )?;
+    }
+    Ok(())
+}
+
 fn ensure_column(
     conn: &Connection,
     table: &str,
@@ -1046,9 +1082,9 @@ mod tests {
             )
             .unwrap();
         store
-            .set_pending_ask(
-                &PendingAsk {
-                    ask_id: "ask-1".into(),
+            .set_pending_question(
+                &PendingQuestion {
+                    action_id: "ask-1".into(),
                     conversation_id: deleted.id.clone(),
                     question: "继续？".into(),
                     options: Vec::new(),
@@ -1092,7 +1128,7 @@ mod tests {
                     "conversations",
                     "messages",
                     "plans",
-                    "pending_asks",
+                    "pending_user_actions",
                     "tool_traces",
                 ] {
                     let count: i64 = conn.query_row(
@@ -1214,6 +1250,19 @@ mod tests {
                 );
                 INSERT INTO conversations (id, title, project_id, pinned, updated_at)
                 VALUES ('older', '较早对话', 'legacy-project', 0, '2026-01-01T00:00:00Z');
+                CREATE TABLE pending_asks (
+                  ask_id TEXT PRIMARY KEY,
+                  conversation_id TEXT NOT NULL,
+                  question TEXT NOT NULL,
+                  options_json TEXT NOT NULL,
+                  tool_call_id TEXT NOT NULL,
+                  created_at TEXT NOT NULL
+                );
+                INSERT INTO pending_asks (
+                  ask_id, conversation_id, question, options_json, tool_call_id, created_at
+                ) VALUES (
+                  'legacy-question', 'older', '继续？', '["继续"]', 'tool-call', '2026-01-01T00:00:00Z'
+                );
                 "#,
             )
             .unwrap();
@@ -1234,6 +1283,9 @@ mod tests {
         assert!(listed[0].pinned);
         assert_eq!(listed[0].project_name.as_deref(), Some("旧项目"));
         assert_eq!(store.list_projects().unwrap().len(), 1);
+        let pending = store.get_pending_question("older").unwrap().unwrap();
+        assert_eq!(pending.action_id, "legacy-question");
+        assert_eq!(pending.options, vec!["继续"]);
 
         store
             .with_conn(|conn| {

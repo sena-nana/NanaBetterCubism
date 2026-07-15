@@ -7,6 +7,7 @@ use super::{
 };
 use crate::protocol::RpcClient;
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use uuid::Uuid;
 
@@ -26,18 +27,21 @@ pub(crate) async fn current_modeling_document(
         .request("GetDocument", json!({"DocumentUID": document_uid}))
         .await
         .ok()?;
-    let detected = document
+    let document_path = document
         .get("ModelingDocuments")?
         .as_array()?
         .iter()
-        .find_map(|item| item.get("DocumentFilePath")?.as_str())
-        .and_then(normalize_modeling_document_path)?;
+        .find_map(|item| item.get("DocumentFilePath")?.as_str())?;
+    let detected = normalize_modeling_document_path(document_path, document_uid)?;
 
     let inner = service.inner.lock().await;
     (inner.generation == generation && inner.rpc.is_some()).then_some(detected)
 }
 
-fn normalize_modeling_document_path(value: &str) -> Option<CurrentModelingDocument> {
+fn normalize_modeling_document_path(
+    value: &str,
+    document_uid: &str,
+) -> Option<CurrentModelingDocument> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return None;
@@ -53,6 +57,7 @@ fn normalize_modeling_document_path(value: &str) -> Option<CurrentModelingDocume
         document_path.clone()
     };
     Some(CurrentModelingDocument {
+        document_instance_key: format!("{:x}", Sha256::digest(document_uid.as_bytes())),
         document_key,
         document_path,
     })

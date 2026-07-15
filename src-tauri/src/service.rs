@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex as StdMutex,
 };
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
@@ -76,11 +76,61 @@ impl From<RpcError> for CommandError {
 #[derive(Clone)]
 pub struct EditorService {
     inner: Arc<Mutex<ServiceState>>,
+    operation_coordinator: OperationCoordinator,
 }
 
 struct ActiveOperation {
     id: String,
     cancel: Arc<AtomicBool>,
+    _permit: OperationPermit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OperationOwnerKind {
+    EditorTransaction,
+    ComputerControl,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct OperationCoordinator {
+    owner: Arc<StdMutex<Option<(OperationOwnerKind, String)>>>,
+}
+
+pub(crate) struct OperationPermit {
+    coordinator: OperationCoordinator,
+    kind: OperationOwnerKind,
+    id: String,
+}
+
+impl OperationCoordinator {
+    pub(crate) fn try_acquire(
+        &self,
+        kind: OperationOwnerKind,
+        id: &str,
+    ) -> Result<OperationPermit, ()> {
+        let mut owner = self.owner.lock().unwrap();
+        if owner.is_some() {
+            return Err(());
+        }
+        *owner = Some((kind, id.to_string()));
+        Ok(OperationPermit {
+            coordinator: self.clone(),
+            kind,
+            id: id.to_string(),
+        })
+    }
+}
+
+impl Drop for OperationPermit {
+    fn drop(&mut self) {
+        let mut owner = self.coordinator.owner.lock().unwrap();
+        if owner
+            .as_ref()
+            .is_some_and(|(kind, id)| *kind == self.kind && id == &self.id)
+        {
+            *owner = None;
+        }
+    }
 }
 
 #[derive(Default)]
@@ -111,11 +161,16 @@ impl Default for EditorService {
     fn default() -> Self {
         Self {
             inner: Arc::new(Mutex::new(ServiceState::default())),
+            operation_coordinator: OperationCoordinator::default(),
         }
     }
 }
 
 impl EditorService {
+    pub(crate) fn operation_coordinator(&self) -> OperationCoordinator {
+        self.operation_coordinator.clone()
+    }
+
     pub(crate) async fn snapshot(&self) -> EditorSnapshot {
         self.inner.lock().await.snapshot.clone()
     }
@@ -675,7 +730,17 @@ impl EditorService {
         app: AppHandle,
         preview_id: String,
     ) -> Result<OperationAccepted, CommandError> {
-        let (operation_id, plan, rpc, cancel) = {
+        let operation_id = Uuid::new_v4().simple().to_string();
+        let permit = self
+            .operation_coordinator
+            .try_acquire(OperationOwnerKind::EditorTransaction, &operation_id)
+            .map_err(|_| {
+                CommandError::new(
+                    "operation_active",
+                    "已有 Editor 编辑事务或电脑代理操作正在执行。",
+                )
+            })?;
+        let (plan, rpc, cancel) = {
             let mut inner = self.inner.lock().await;
             if inner.operation.is_some() {
                 return Err(CommandError::new(
@@ -706,18 +771,18 @@ impl EditorService {
                 .rpc
                 .clone()
                 .ok_or_else(|| CommandError::new("disconnected", "Editor 连接不可用。"))?;
-            let operation_id = Uuid::new_v4().simple().to_string();
             let cancel = Arc::new(AtomicBool::new(false));
             inner.operation = Some(ActiveOperation {
                 id: operation_id.clone(),
                 cancel: cancel.clone(),
+                _permit: permit,
             });
             inner.snapshot.state = EditorConnectionState::Editing;
             inner.snapshot.capabilities.batch_create_parameters = false;
             inner.snapshot.capabilities.find_part_parameters = false;
             inner.snapshot.capabilities.official_edit_api = false;
             inner.snapshot.message = format!("正在创建 {} 个参数…", plan.rows.len());
-            (operation_id, plan, rpc, cancel)
+            (plan, rpc, cancel)
         };
         self.emit_snapshot(&app).await;
         let service = self.clone();
@@ -1467,5 +1532,20 @@ mod tests {
         let result = mutation_request(&rpc, &mut events, &cancel, "AddParameter", json!({})).await;
 
         assert!(matches!(result, Err(ExecutionError::AppCancelled)));
+    }
+
+    #[test]
+    fn editor_and_computer_operations_share_one_exclusive_lease() {
+        let coordinator = OperationCoordinator::default();
+        let editor = coordinator
+            .try_acquire(OperationOwnerKind::EditorTransaction, "editor")
+            .unwrap();
+        assert!(coordinator
+            .try_acquire(OperationOwnerKind::ComputerControl, "computer")
+            .is_err());
+        drop(editor);
+        assert!(coordinator
+            .try_acquire(OperationOwnerKind::ComputerControl, "computer")
+            .is_ok());
     }
 }

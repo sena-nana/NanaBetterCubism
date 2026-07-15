@@ -1,16 +1,19 @@
 mod capture;
 pub(crate) mod commands;
+pub(crate) mod computer_control;
 mod llm;
 mod runtime;
 mod skills;
 pub(crate) mod store;
 pub(crate) mod tools;
+mod user_action;
 
 pub use commands::*;
 pub use store::AgentStore;
+pub use user_action::PendingUserAction;
 
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::{hash_map::Entry, BTreeSet, HashMap};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -52,9 +55,9 @@ impl From<serde_json::Error> for AgentError {
     }
 }
 
-#[derive(Default)]
 pub struct AgentRuntime {
     pub store: AgentStore,
+    pub computer_control: computer_control::ComputerControlService,
     pub cancel_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub pending_continuations: Mutex<HashMap<String, PendingContinuation>>,
     conversation_lifecycle: Mutex<()>,
@@ -70,6 +73,7 @@ pub struct AgentTurnState {
     pub messages: Vec<serde_json::Value>,
     pub active_skills: BTreeSet<String>,
     pub action_steps: usize,
+    pub computer_action_steps: usize,
     pub skill_load_steps: usize,
 }
 
@@ -79,17 +83,22 @@ impl AgentTurnState {
             messages,
             active_skills: BTreeSet::new(),
             action_steps: 0,
+            computer_action_steps: 0,
             skill_load_steps: 0,
         }
     }
 }
 
 impl PendingContinuation {
-    pub fn resume(mut self, answer: &str) -> AgentTurnState {
+    pub fn resume(mut self, result: Value) -> AgentTurnState {
+        let content = match result {
+            Value::String(value) => value,
+            value => value.to_string(),
+        };
         self.state.messages.push(json!({
             "role": "tool",
             "tool_call_id": self.tool_call_id,
-            "content": answer,
+            "content": content,
         }));
         self.state
     }
@@ -114,9 +123,10 @@ pub struct CancelTurnResult {
 }
 
 impl AgentRuntime {
-    pub fn new(store: AgentStore) -> Self {
+    pub fn new(store: AgentStore, coordinator: crate::service::OperationCoordinator) -> Self {
         Self {
             store,
+            computer_control: computer_control::ComputerControlService::new(coordinator),
             cancel_flags: Mutex::new(HashMap::new()),
             pending_continuations: Mutex::new(HashMap::new()),
             conversation_lifecycle: Mutex::new(()),
@@ -150,7 +160,11 @@ impl AgentRuntime {
             .await
             .values()
             .any(|continuation| continuation.conversation_id == conversation_id)
-            || self.store.get_pending_ask(conversation_id)?.is_some();
+            || self.store.get_pending_question(conversation_id)?.is_some()
+            || self
+                .computer_control
+                .pending_approval_for_conversation(conversation_id)
+                .is_some();
         if running || awaiting_input {
             return Err(AgentError::new(
                 "conversation_busy",
@@ -160,17 +174,39 @@ impl AgentRuntime {
         self.store.delete_conversation(conversation_id)
     }
 
-    pub async fn begin_answer(
+    pub async fn begin_question_answer(
         &self,
-        ask_id: &str,
+        action_id: &str,
     ) -> Result<(String, Arc<AtomicBool>), AgentError> {
         let conversation_id = self
             .pending_continuations
             .lock()
             .await
-            .get(ask_id)
+            .get(action_id)
             .map(|continuation| continuation.conversation_id.clone())
             .ok_or_else(|| AgentError::new("ask_not_found", "提问上下文已失效。"))?;
+        if self
+            .store
+            .get_pending_question(&conversation_id)?
+            .is_none_or(|question| question.action_id != action_id)
+        {
+            return Err(AgentError::new("ask_not_found", "提问上下文已失效。"));
+        }
+        let cancel = self.begin_turn(&conversation_id).await?;
+        Ok((conversation_id, cancel))
+    }
+
+    pub async fn begin_user_action(
+        &self,
+        action_id: &str,
+    ) -> Result<(String, Arc<AtomicBool>), AgentError> {
+        let conversation_id = self
+            .pending_continuations
+            .lock()
+            .await
+            .get(action_id)
+            .map(|continuation| continuation.conversation_id.clone())
+            .ok_or_else(|| AgentError::new("user_action_not_found", "待处理操作已失效。"))?;
         let cancel = self.begin_turn(&conversation_id).await?;
         Ok((conversation_id, cancel))
     }
@@ -189,12 +225,20 @@ impl AgentRuntime {
         }
     }
 
-    pub async fn clear_pending_ask(&self, conversation_id: &str) -> Result<bool, AgentError> {
-        let ask_cleared = self.store.clear_pending_ask(conversation_id)?;
+    pub async fn clear_pending_user_action(
+        &self,
+        conversation_id: &str,
+    ) -> Result<bool, AgentError> {
+        let question_cleared = self.store.clear_pending_user_action(conversation_id)?;
+        let approval_cleared = self
+            .computer_control
+            .pending_approval_for_conversation(conversation_id)
+            .is_some();
+        self.computer_control.cancel_conversation(conversation_id);
         let mut pending = self.pending_continuations.lock().await;
         let previous_len = pending.len();
         pending.retain(|_, value| value.conversation_id != conversation_id);
-        Ok(ask_cleared || pending.len() != previous_len)
+        Ok(question_cleared || approval_cleared || pending.len() != previous_len)
     }
 
     pub async fn request_cancel(
@@ -208,7 +252,7 @@ impl AgentRuntime {
             });
         }
 
-        if self.clear_pending_ask(conversation_id).await? {
+        if self.clear_pending_user_action(conversation_id).await? {
             Ok(CancelTurnResult {
                 state: CancelTurnState::PendingCleared,
             })
@@ -217,6 +261,15 @@ impl AgentRuntime {
                 state: CancelTurnState::Idle,
             })
         }
+    }
+}
+
+impl Default for AgentRuntime {
+    fn default() -> Self {
+        Self::new(
+            AgentStore::default(),
+            crate::service::OperationCoordinator::default(),
+        )
     }
 }
 
@@ -229,7 +282,7 @@ pub const SYSTEM_PROMPT: &str = include_str!("prompt.txt");
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::store::PendingAsk;
+    use crate::agent::store::PendingQuestion;
     use serde_json::json;
     use std::sync::atomic::Ordering;
 
@@ -261,7 +314,7 @@ mod tests {
             tool_call_id: "ask-call".into(),
             state,
         }
-        .resume("确认");
+        .resume(Value::String("确认".into()));
 
         assert_eq!(
             resumed.active_skills,
@@ -314,15 +367,18 @@ mod tests {
         assert!(active.load(Ordering::SeqCst));
         runtime.finish_turn(&conversation.id, &active).await;
 
-        let ask = PendingAsk {
-            ask_id: new_id(),
+        let question = PendingQuestion {
+            action_id: new_id(),
             conversation_id: conversation.id.clone(),
             question: "?".into(),
             options: Vec::new(),
         };
-        runtime.store.set_pending_ask(&ask, "tool-call").unwrap();
+        runtime
+            .store
+            .set_pending_question(&question, "tool-call")
+            .unwrap();
         runtime.pending_continuations.lock().await.insert(
-            ask.ask_id.clone(),
+            question.action_id.clone(),
             PendingContinuation {
                 conversation_id: conversation.id.clone(),
                 tool_call_id: "tool-call".into(),
@@ -330,6 +386,7 @@ mod tests {
                     messages: Vec::new(),
                     active_skills: BTreeSet::new(),
                     action_steps: 0,
+                    computer_action_steps: 0,
                     skill_load_steps: 0,
                 },
             },
@@ -343,7 +400,7 @@ mod tests {
         );
         assert!(runtime
             .store
-            .get_pending_ask(&conversation.id)
+            .get_pending_question(&conversation.id)
             .unwrap()
             .is_none());
         assert!(runtime.pending_continuations.lock().await.is_empty());
@@ -368,23 +425,50 @@ mod tests {
         ));
         runtime.finish_turn(&conversation.id, &active).await;
 
-        let ask = PendingAsk {
-            ask_id: new_id(),
+        let question = PendingQuestion {
+            action_id: new_id(),
             conversation_id: conversation.id.clone(),
             question: "?".into(),
             options: Vec::new(),
         };
-        runtime.store.set_pending_ask(&ask, "tool-call").unwrap();
+        runtime
+            .store
+            .set_pending_question(&question, "tool-call")
+            .unwrap();
         assert!(matches!(
             runtime.delete_conversation(&conversation.id).await,
             Err(error) if error.code == "conversation_busy"
         ));
-        runtime.clear_pending_ask(&conversation.id).await.unwrap();
+        runtime
+            .clear_pending_user_action(&conversation.id)
+            .await
+            .unwrap();
 
         runtime.delete_conversation(&conversation.id).await.unwrap();
         assert!(matches!(
             runtime.begin_turn(&conversation.id).await,
             Err(error) if error.code == "not_found"
         ));
+    }
+
+    #[tokio::test]
+    async fn free_text_answers_cannot_resume_a_structured_approval() {
+        let runtime = AgentRuntime::default();
+        runtime.store.open(":memory:".into()).unwrap();
+        let conversation = runtime.store.create_conversation(None, None).unwrap();
+        runtime.pending_continuations.lock().await.insert(
+            "approval".into(),
+            PendingContinuation {
+                conversation_id: conversation.id,
+                tool_call_id: "computer-call".into(),
+                state: AgentTurnState::new(Vec::new()),
+            },
+        );
+
+        assert!(matches!(
+            runtime.begin_question_answer("approval").await,
+            Err(error) if error.code == "ask_not_found"
+        ));
+        assert!(runtime.cancel_flags.lock().await.is_empty());
     }
 }

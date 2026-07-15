@@ -1,5 +1,5 @@
 import { computed, reactive } from "vue";
-import { listenAsk, listenTurnFinished } from "./bridge";
+import { listenTurnFinished, listenUserAction } from "./bridge";
 
 export type ConversationTurnPhase = "idle" | "running" | "awaiting_input" | "cancelling";
 
@@ -10,7 +10,9 @@ let installPromise: Promise<void> | null = null;
 export function installConversationRuntimeStore() {
   if (installPromise) return installPromise;
   installPromise = Promise.all([
-    listenAsk((payload) => setConversationTurnPhase(payload.conversationId, "awaiting_input")),
+    listenUserAction((payload) =>
+      setConversationTurnPhase(payload.conversationId, "awaiting_input"),
+    ),
     listenTurnFinished((payload) => setConversationTurnPhase(payload.conversationId, "idle")),
   ]).then(() => undefined);
   return installPromise;
