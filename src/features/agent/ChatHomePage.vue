@@ -74,6 +74,8 @@ function goSettings(tab: string) {
     <ConversationTranscript
       :messages="[]"
       :loading="loading"
+      :running="sending"
+      agent-id-prefix="agent.home"
       empty-title="想在 Cubism Editor 中完成什么？"
       empty-description="输入目标开始新对话；会话会在首次发送时创建。"
     />

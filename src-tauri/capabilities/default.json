@@ -11,6 +11,8 @@
     "core:window:allow-is-maximized",
     "core:window:allow-internal-toggle-maximize",
     "core:window:allow-close",
-    "store:default"
+    "store:default",
+    "opener:allow-open-url",
+    "opener:allow-default-urls"
   ]
 }

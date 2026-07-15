@@ -24,6 +24,7 @@ import {
   upsertProject,
 } from "./bridge";
 import ConversationComposer from "./components/ConversationComposer.vue";
+import PlanTodoPanel from "./components/PlanTodoPanel.vue";
 import ConversationSurface from "./components/ConversationSurface.vue";
 import ConversationTranscript from "./components/ConversationTranscript.vue";
 import { editorStatusLabel, modelStatusLabel } from "./conversationPresentation";
@@ -65,7 +66,6 @@ const projects = ref<ProjectRecord[]>([]);
 const projectName = ref("");
 const selectedProjectId = ref("");
 const projectPanelOpen = ref(false);
-const planOpen = ref(false);
 
 const unlisteners: Array<() => void> = [];
 let loadEpoch = 0;
@@ -100,7 +100,6 @@ onUnmounted(() => {
 
 watch(conversationId, () => {
   projectPanelOpen.value = false;
-  planOpen.value = false;
   void reloadConversation();
 });
 
@@ -127,7 +126,6 @@ async function installListeners() {
     listenPlan((payload) => {
       if (payload.conversationId !== conversationId.value) return;
       plan.value = payload.plan;
-      if (payload.plan.steps.length) planOpen.value = true;
     }),
   ]);
   if (disposed) {
@@ -322,12 +320,6 @@ function goSettings(tab: string) {
   void router.push(`/settings?tab=${tab}`);
 }
 
-function planStatusLabel(status: string) {
-  if (status === "in_progress") return "进行中";
-  if (status === "completed") return "完成";
-  if (status === "cancelled") return "已取消";
-  return "待处理";
-}
 </script>
 
 <template>
@@ -354,6 +346,8 @@ function planStatusLabel(status: string) {
     <ConversationTranscript
       :messages="messages"
       :loading="loading"
+      :running="turn.running.value"
+      :cancelling="turn.cancelling.value"
       :empty-title="`要在${currentProjectName === '收集箱' ? '' : ` ${currentProjectName} `}完成什么？`"
     />
 
@@ -385,22 +379,7 @@ function planStatusLabel(status: string) {
         </div>
       </section>
 
-      <section
-        v-if="planOpen && plan?.steps.length"
-        class="context-panel"
-        data-agent-id="agent.chat.plan"
-      >
-        <div class="context-panel__heading">
-          <strong>计划</strong>
-          <span>{{ plan.steps.length }} 个步骤</span>
-        </div>
-        <ol class="plan-list">
-          <li v-for="step in plan.steps" :key="step.id" :data-status="step.status">
-            <span>{{ planStatusLabel(step.status) }}</span>
-            <p>{{ step.title }}</p>
-          </li>
-        </ol>
-      </section>
+      <PlanTodoPanel v-if="plan?.steps.length" :plan="plan" data-agent-id="agent.chat.plan" />
     </template>
 
     <template #composer>
@@ -424,14 +403,6 @@ function planStatusLabel(status: string) {
             @click="projectPanelOpen = !projectPanelOpen"
           >
             {{ currentProjectName }}
-          </UiButton>
-          <UiButton
-            v-if="plan?.steps.length"
-            size="sm"
-            agent-id="agent.chat.plan-toggle"
-            @click="planOpen = !planOpen"
-          >
-            计划 {{ plan.steps.length }}
           </UiButton>
           <span class="composer-toolbar__spacer" />
           <UiButton
@@ -495,7 +466,7 @@ function planStatusLabel(status: string) {
 }
 
 .context-panel {
-  width: min(900px, 100%);
+  width: 100%;
   max-height: 220px;
   margin: 0 auto;
   padding: 10px 12px;
@@ -503,10 +474,6 @@ function planStatusLabel(status: string) {
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-md);
   background: var(--bg-subtle);
-}
-
-.context-panel + .context-panel {
-  margin-top: 8px;
 }
 
 .context-panel__heading {
@@ -529,40 +496,6 @@ function planStatusLabel(status: string) {
 .project-controls :deep(.ui-input) {
   flex: 1;
   min-width: 0;
-}
-
-.plan-list {
-  display: grid;
-  gap: 5px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.plan-list li {
-  display: grid;
-  grid-template-columns: 54px minmax(0, 1fr);
-  align-items: baseline;
-  gap: 8px;
-}
-
-.plan-list li > span {
-  color: var(--text-faint);
-  font-size: 11px;
-}
-
-.plan-list li[data-status="in_progress"] > span {
-  color: var(--warn);
-}
-
-.plan-list li[data-status="completed"] > span {
-  color: var(--ok);
-}
-
-.plan-list p {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.45;
 }
 
 .composer-toolbar__spacer {
