@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import { UiButton, UiSwitch, UiTextarea } from "@lilia/ui";
+import { UiButton, UiTextarea } from "@lilia/ui";
 import type { ComputerActionKind, ComputerOperationStatus, PendingUserAction } from "../types";
 
 type TextareaRef = { $el?: HTMLTextAreaElement } | HTMLTextAreaElement | null;
@@ -218,12 +218,15 @@ function onAskKeydown(event: KeyboardEvent) {
       />
       <div class="conversation-composer__actions">
         <div class="conversation-composer__mode">
-          <UiSwitch
-            :model-value="conversationOnly"
-            label="仅对话"
+          <UiButton
+            size="sm"
+            :variant="conversationOnly ? 'primary' : 'ghost'"
+            :aria-pressed="conversationOnly"
             :agent-id="`${agentIdPrefix}.conversation-only`"
-            @update:model-value="emit('update:conversationOnly', Boolean($event))"
-          />
+            @click="emit('update:conversationOnly', !conversationOnly)"
+          >
+            仅对话
+          </UiButton>
           <span class="conversation-composer__hint">Enter 发送 · Shift+Enter 换行</span>
         </div>
         <UiButton
