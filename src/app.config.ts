@@ -30,13 +30,24 @@ export const appConfig = {
       },
     ],
     footerLinks: [{ key: "settings", to: "/settings", label: "设置", icon: "settings" }],
-    footerStatus: {
-      to: "/settings?tab=editor",
-      label: appConfigJson.shell.statusLabel,
-      title: appConfigJson.shell.statusTitle,
-      tone: "warn",
-      icon: "server",
-    },
+    footerStatuses: [
+      {
+        key: "model",
+        to: "/settings?tab=model-config",
+        label: "模型读取中",
+        title: "正在读取模型配置。",
+        tone: "warn",
+        icon: "brain",
+      },
+      {
+        key: "editor",
+        to: "/settings?tab=editor",
+        label: "Editor 未连接",
+        title: appConfigJson.shell.statusTitle,
+        tone: "warn",
+        icon: "server",
+      },
+    ],
   },
   settings: {
     aliases: {

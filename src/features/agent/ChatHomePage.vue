@@ -1,43 +1,39 @@
 <script setup lang="ts">
-import { UiButton } from "@lilia/ui";
 import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
-import { useEditorStore } from "../editor/editorStore";
 import {
   createConversation,
-  getLlmConfig,
   normalizeCommandError,
   sendMessage,
 } from "./bridge";
 import ConversationComposer from "./components/ConversationComposer.vue";
 import ConversationSurface from "./components/ConversationSurface.vue";
 import ConversationTranscript from "./components/ConversationTranscript.vue";
-import { editorStatusLabel, modelStatusLabel } from "./conversationPresentation";
+import { useLlmConfigStore } from "./llmConfigStore";
 import {
   beginConversationTurn,
   failConversationTurn,
   installConversationRuntimeStore,
 } from "./conversationRuntimeStore";
 import { ensureSidebarConversationsLoaded } from "./sidebarConversations";
-import type { LlmConfigView } from "./types";
 
 const router = useRouter();
-const editor = useEditorStore();
+const llm = useLlmConfigStore();
 const draft = ref("");
 const sending = ref(false);
 const loading = ref(true);
 const error = ref<string | null>(null);
-const llm = ref<LlmConfigView>({ baseUrl: null, model: null, hasApiKey: false });
 
 const canSend = computed(
-  () => Boolean(draft.value.trim()) && llm.value.hasApiKey && !sending.value,
+  () => Boolean(draft.value.trim()) && llm.state.config.hasApiKey && !sending.value,
 );
 
 onMounted(async () => {
-  void editor.initialize();
   try {
-    await installConversationRuntimeStore();
-    llm.value = await getLlmConfig();
+    await Promise.all([
+      installConversationRuntimeStore(),
+      llm.initialize(),
+    ]);
   } catch (err) {
     error.value = normalizeCommandError(err).message;
   } finally {
@@ -74,9 +70,6 @@ async function startConversation() {
   }
 }
 
-function goSettings(tab: string) {
-  void router.push(`/settings?tab=${tab}`);
-}
 </script>
 
 <template>
@@ -94,29 +87,12 @@ function goSettings(tab: string) {
       <ConversationComposer
         v-model="draft"
         agent-id-prefix="agent.home"
-        :disabled="!llm.hasApiKey"
+        :disabled="!llm.state.config.hasApiKey"
         :running="sending"
         :can-send="canSend"
         :error="error"
         @send="startConversation"
-      >
-        <template #toolbar>
-          <UiButton
-            size="sm"
-            agent-id="agent.home.model-settings"
-            @click="goSettings('model-config')"
-          >
-            {{ modelStatusLabel(llm) }}
-          </UiButton>
-          <UiButton
-            size="sm"
-            agent-id="agent.home.editor-settings"
-            @click="goSettings('editor')"
-          >
-            {{ editorStatusLabel(editor.state.snapshot.state) }}
-          </UiButton>
-        </template>
-      </ConversationComposer>
+      />
     </template>
   </ConversationSurface>
 </template>

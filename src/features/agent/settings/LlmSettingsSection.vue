@@ -2,11 +2,11 @@
 import { SettingsRow, UiButton, UiCard, UiInput } from "@lilia/ui";
 import { computed, onMounted, ref } from "vue";
 import {
-  getLlmConfig,
   normalizeCommandError,
   setLlmConfig,
   testLlmConnection,
 } from "../bridge";
+import { useLlmConfigStore } from "../llmConfigStore";
 import type { LlmConfigView, LlmTestResult } from "../types";
 
 type Operation = "save" | "test" | "clear";
@@ -21,12 +21,12 @@ const operation = ref<Operation | null>(null);
 const feedback = ref<Feedback | null>(null);
 const testResult = ref<LlmTestResult | null>(null);
 const availableModels = ref<string[]>([]);
+const llmConfig = useLlmConfigStore();
 const operationBusy = computed(() => loading.value || operation.value !== null);
 
 onMounted(async () => {
   try {
-    const config = await getLlmConfig();
-    applyConfig(config);
+    applyForm(await llmConfig.initialize());
   } catch (err) {
     setError(err);
   } finally {
@@ -34,7 +34,7 @@ onMounted(async () => {
   }
 });
 
-function applyConfig(config: LlmConfigView) {
+function applyForm(config: LlmConfigView) {
   baseUrl.value = config.baseUrl ?? "";
   model.value = config.model ?? "";
   hasApiKey.value = config.hasApiKey;
@@ -48,7 +48,8 @@ async function persistConfig(clearApiKey = false) {
     model: model.value.trim() || null,
     clearApiKey,
   });
-  applyConfig(next);
+  llmConfig.applyConfig(next);
+  applyForm(next);
 }
 
 function resetResult() {

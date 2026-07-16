@@ -104,6 +104,14 @@ function message(id: string, content: string): ChatMessage {
 }
 
 describe("对话工作区", () => {
+  it("不再渲染顶部标题和输入框内的连接状态", async () => {
+    await renderChat("a");
+
+    expect(document.querySelector('[data-agent-id="agent.chat.header"]')).toBeNull();
+    expect(document.querySelector('[data-agent-id="agent.chat.open-model-settings"]')).toBeNull();
+    expect(document.querySelector('[data-agent-id="agent.chat.open-editor-settings"]')).toBeNull();
+  });
+
   it("composer 使用 Enter 发送、Shift+Enter 保留换行，并在提问时切换交互", async () => {
     const Host = defineComponent({
       components: { ConversationComposer },
@@ -245,7 +253,7 @@ describe("对话工作区", () => {
     expect(bridge.sendMessage).toHaveBeenCalledWith("a", "A 请求");
 
     await router.push("/chats/b");
-    await screen.findByRole("heading", { name: "会话 B" });
+    await waitForConversationLoad("b");
     const inputB = screen.getByPlaceholderText("描述你想在 Cubism Editor 中完成的事…");
     await fireEvent.update(inputB, "B 请求");
     await fireEvent.keyDown(inputB, { key: "Enter" });
@@ -275,7 +283,7 @@ describe("对话工作区", () => {
     await fireEvent.update(inputA, "A 草稿");
 
     await router.push("/chats/b");
-    await screen.findByRole("heading", { name: "会话 B" });
+    await waitForConversationLoad("b");
     const inputB = screen.getByPlaceholderText("描述你想在 Cubism Editor 中完成的事…");
     await fireEvent.update(inputB, "B 草稿");
 
@@ -345,4 +353,9 @@ async function renderChat(conversationId: string) {
   render({ template: "<RouterView />" }, { global: { plugins: [router] } });
   await vi.waitFor(() => expect(bridge.getMessages).toHaveBeenCalledWith(conversationId));
   return router;
+}
+
+async function waitForConversationLoad(conversationId: string) {
+  await vi.waitFor(() => expect(bridge.getMessages).toHaveBeenCalledWith(conversationId));
+  await vi.waitFor(() => expect(getConversationRuntime(conversationId).loading).toBe(false));
 }

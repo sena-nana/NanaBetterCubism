@@ -41,10 +41,14 @@ describe("Agent 壳层路由", () => {
 
     expect(screen.getByRole("link", { name: "记忆" })).toBeTruthy();
     expect(screen.getAllByRole("link", { name: "设置" })).toHaveLength(1);
-    const status = document.querySelector('[data-agent-id="sidebar.footer.status"]');
-    expect(status).toBeTruthy();
-    expect(status?.className).toContain("sb-conn--warn");
-    expect(status?.getAttribute("href")).toContain("/settings");
+    const primary = document.querySelector('[data-agent-id="sidebar.footer.status"]');
+    const model = document.querySelector('[data-agent-id="sidebar.footer.status.model"]');
+    const editor = document.querySelector('[data-agent-id="sidebar.footer.status.editor"]');
+    expect(primary?.getAttribute("href")).toBe("/settings?tab=model-config");
+    expect(model?.closest("a")).toBe(primary);
+    expect(editor?.getAttribute("href")).toBe("/settings?tab=editor");
+    expect(document.querySelector('[data-agent-id="agent.home.model-settings"]')).toBeNull();
+    expect(document.querySelector('[data-agent-id="agent.home.editor-settings"]')).toBeNull();
   });
 
   it("记忆页可打开", async () => {

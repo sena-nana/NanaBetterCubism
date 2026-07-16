@@ -1,4 +1,8 @@
-import { SIDEBAR_FOOTER_STATUS } from "@lilia/ui";
+import {
+  SIDEBAR_FOOTER_STATUS,
+  SIDEBAR_FOOTER_STATUSES,
+  type SidebarFooterStatus,
+} from "@lilia/ui";
 import { reactive } from "vue";
 import {
   connectEditor,
@@ -35,6 +39,11 @@ let initializePromise: Promise<void> | null = null;
 
 export function useEditorStore() {
   async function initialize() {
+    if (state.initialized) {
+      if (state.error) updateEditorErrorFooter();
+      else updateSnapshot(state.snapshot);
+      return;
+    }
     if (initializePromise) return initializePromise;
     initializePromise = (async () => {
       await listenEditorState((snapshot) => updateSnapshot(snapshot));
@@ -43,6 +52,7 @@ export function useEditorStore() {
     })().catch((error) => {
       state.error = normalizeCommandError(error);
       state.initialized = true;
+      updateEditorErrorFooter();
     });
     return initializePromise;
   }
@@ -54,6 +64,7 @@ export function useEditorStore() {
       updateSnapshot(await connectEditor(port));
     } catch (error) {
       state.error = normalizeCommandError(error);
+      updateEditorErrorFooter();
     } finally {
       state.busy = false;
     }
@@ -67,6 +78,7 @@ export function useEditorStore() {
       updateSnapshot(await getEditorSnapshot());
     } catch (error) {
       state.error = normalizeCommandError(error);
+      updateEditorErrorFooter();
     } finally {
       state.busy = false;
     }
@@ -78,12 +90,36 @@ export function useEditorStore() {
 function updateSnapshot(snapshot: EditorSnapshot) {
   state.snapshot = snapshot;
   const presentation = footerPresentation(snapshot);
-  Object.assign(SIDEBAR_FOOTER_STATUS, {
+  updateEditorFooter({
     to: "/settings?tab=editor",
     label: presentation.label,
     title: snapshot.message,
     tone: presentation.tone,
   });
+}
+
+function updateEditorFooter(presentation: {
+  label: string;
+  title: string;
+  tone: "ok" | "warn" | "error";
+  to?: string;
+}) {
+  const footer = footerStatus("editor");
+  if (!footer) return;
+  Object.assign(footer, { to: "/settings?tab=editor", ...presentation });
+}
+
+function updateEditorErrorFooter() {
+  updateEditorFooter({
+    label: "Editor 状态异常",
+    title: "无法读取 Editor 状态。点击进入设置。",
+    tone: "error",
+  });
+}
+
+function footerStatus(key: string): SidebarFooterStatus | undefined {
+  return SIDEBAR_FOOTER_STATUSES.find((status) => status.key === key)
+    ?? (SIDEBAR_FOOTER_STATUSES.length === 1 ? SIDEBAR_FOOTER_STATUS : undefined);
 }
 
 function footerPresentation(snapshot: EditorSnapshot): {
@@ -94,19 +130,19 @@ function footerPresentation(snapshot: EditorSnapshot): {
     case "ready":
       return { label: "Editor 已就绪", tone: "ok" };
     case "editing":
-      return { label: "正在编辑", tone: "warn" };
+      return { label: "Editor 编辑中", tone: "warn" };
     case "cancelling":
-      return { label: "正在取消", tone: "warn" };
+      return { label: "Editor 取消中", tone: "warn" };
     case "connecting":
-      return { label: "正在连接", tone: "warn" };
+      return { label: "Editor 连接中", tone: "warn" };
     case "awaiting_access":
     case "awaiting_edit_permission":
-      return { label: "等待授权", tone: "warn" };
+      return { label: "Editor 等待授权", tone: "warn" };
     case "failed":
-      return { label: "连接异常", tone: "error" };
+      return { label: "Editor 连接异常", tone: "error" };
     case "incompatible":
-      return { label: "当前不可用", tone: "warn" };
+      return { label: "Editor 当前不可用", tone: "warn" };
     default:
-      return { label: "未连接", tone: "warn" };
+      return { label: "Editor 未连接", tone: "warn" };
   }
 }
