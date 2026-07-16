@@ -2,6 +2,7 @@ mod capture;
 pub(crate) mod commands;
 pub(crate) mod computer_control;
 mod llm;
+mod memory_markdown;
 mod runtime;
 mod skills;
 pub(crate) mod store;

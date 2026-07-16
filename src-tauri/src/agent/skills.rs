@@ -85,7 +85,8 @@ const OBJECT_EDITING_TOOLS: &[&str] = &[
     "cancel_editor_edit",
 ];
 
-const PROJECT_MEMORY_TOOLS: &[&str] = &["list_memories", "upsert_memory", "archive_memory"];
+const PROJECT_MEMORY_TOOLS: &[&str] =
+    &["list_memories", "read_memory", "upsert_memory", "archive_memory"];
 
 const COMPUTER_OPERATION_TOOLS: &[&str] = &[
     "list_cubism_windows",
