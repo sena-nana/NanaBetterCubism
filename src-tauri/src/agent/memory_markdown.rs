@@ -25,6 +25,36 @@ pub fn extract_overview(scope: &str, body: &str) -> Result<String, AgentError> {
         .unwrap_or_default())
 }
 
+pub fn layers_for_display(
+    scope: &str,
+    body: &str,
+) -> Result<Vec<(String, String)>, AgentError> {
+    let layers = layers_for_scope(scope)?;
+    let sections = parse_sections(body)
+        .ok()
+        .filter(|sections| reject_unknown_layers(layers, sections).is_ok());
+    let legacy_body = body.trim();
+
+    Ok(layers
+        .iter()
+        .enumerate()
+        .map(|(index, layer)| {
+            let content = sections
+                .as_ref()
+                .and_then(|sections| sections.get(*layer))
+                .map(|content| content.trim().to_string())
+                .unwrap_or_else(|| {
+                    if sections.is_none() && index == 0 {
+                        legacy_body.to_string()
+                    } else {
+                        String::new()
+                    }
+                });
+            ((*layer).to_string(), content)
+        })
+        .collect())
+}
+
 pub fn validate_and_normalize(scope: &str, title: &str, body: &str) -> Result<String, AgentError> {
     let layers = layers_for_scope(scope)?;
     let mut sections = parse_sections(body)?;
@@ -264,5 +294,38 @@ mod tests {
         assert!(selected.contains("## Summary\n先核对参数 ID。"));
         assert!(selected.contains("## Technique\n列出已有 ID 再新建。"));
         assert!(!selected.contains("## Caveats"));
+    }
+
+    #[test]
+    fn builds_ordered_display_layers_and_preserves_legacy_content() {
+        let project = layers_for_display(
+            "project",
+            "## Overview\n项目摘要\n\n## Stage\n已完成参数整理",
+        )
+        .unwrap();
+        assert_eq!(
+            project
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            PROJECT_LAYERS
+        );
+        assert_eq!(project[0].1, "项目摘要");
+        assert_eq!(project[1].1, "已完成参数整理");
+        assert!(project[2].1.is_empty());
+
+        let legacy = layers_for_display("global", "旧版纯文本经验").unwrap();
+        assert_eq!(legacy[0].1, "旧版纯文本经验");
+        assert!(legacy[1..].iter().all(|(_, content)| content.is_empty()));
+
+        let unknown = layers_for_display(
+            "global",
+            "## Summary\n摘要\n\n## Extra\n不可丢失的旧内容",
+        )
+        .unwrap();
+        assert_eq!(
+            unknown[0].1,
+            "## Summary\n摘要\n\n## Extra\n不可丢失的旧内容"
+        );
     }
 }

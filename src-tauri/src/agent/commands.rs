@@ -3,7 +3,7 @@ use crate::agent::llm::test_connection;
 use crate::agent::runtime::{continue_after_computer_approval, continue_after_question, run_turn};
 use crate::agent::store::{
     ChatMessage, ConversationPlan, ConversationSummary, LlmConfigInput, LlmConfigView,
-    MemoryRecord, ProjectRecord,
+    MemoryViewRecord, ProjectRecord,
 };
 use crate::agent::tools::tool_display_name;
 use crate::agent::{
@@ -304,9 +304,10 @@ pub async fn agent_list_projects(app: AppHandle) -> Result<Vec<ProjectRecord>, A
 #[tauri::command]
 pub async fn memory_list(
     app: AppHandle,
+    scope: String,
     project_id: Option<String>,
-) -> Result<Vec<MemoryRecord>, AgentError> {
-    runtime(&app)?.store.list_memories(project_id)
+) -> Result<Vec<MemoryViewRecord>, AgentError> {
+    runtime(&app)?.store.list_memory_views(&scope, project_id)
 }
 
 #[tauri::command]
