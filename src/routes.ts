@@ -1,4 +1,4 @@
-import { LiliaSettingsPage } from "@lilia/ui";
+import { LiliaSettingsPage } from "@lilia/ui/settings";
 import type { RouteRecordRaw } from "vue-router";
 
 const ChatHomePage = () => import("./features/agent/ChatHomePage.vue");

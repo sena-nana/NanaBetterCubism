@@ -1,29 +1,30 @@
-import { fireEvent, render, screen, within } from "@testing-library/vue";
-import {
-  LiliaAppRoot,
-  SETTINGS_CONFIG,
-  SETTINGS_TABS,
-  normalizeSettingsTab,
-  vContextMenu,
-} from "@lilia/ui";
+import { fireEvent, screen, within } from "@testing-library/vue";
+import { normalizeSettingsTab } from "@lilia/ui/settings";
+import { afterEach, describe, expect, it } from "vitest";
+import { nextTick, type App } from "vue";
 import { createMemoryHistory } from "vue-router";
-import { describe, expect, it } from "vitest";
 import appConfigJson from "../app.config.json";
-import { createNanaBetterCubismRouter } from "../src/app";
+import { createNanaBetterCubismApp } from "../src/app";
+import { settingsModel } from "../src/settings";
+
+const mountedApps: Array<{ app: App; root: HTMLElement }> = [];
+
+afterEach(() => {
+  for (const { app, root } of mountedApps.splice(0)) {
+    app.unmount();
+    root.remove();
+  }
+});
 
 async function renderAt(path: string) {
-  const router = createNanaBetterCubismRouter(createMemoryHistory());
+  const { app, router } = createNanaBetterCubismApp(createMemoryHistory());
   await router.push(path);
   await router.isReady();
-
-  render(LiliaAppRoot, {
-    global: {
-      directives: {
-        contextMenu: vContextMenu,
-      },
-      plugins: [router],
-    },
-  });
+  const root = document.createElement("div");
+  document.body.append(root);
+  app.mount(root);
+  mountedApps.push({ app, root });
+  await nextTick();
 }
 
 describe("Agent 壳层路由", () => {
@@ -63,8 +64,8 @@ describe("Agent 壳层路由", () => {
   it("设置页恢复外观、模型配置、Editor 与关于，并默认显示外观", async () => {
     await renderAt("/settings");
 
-    expect(SETTINGS_CONFIG.defaultTab).toBe("appearance");
-    expect(SETTINGS_TABS.map((tab) => tab.key)).toEqual([
+    expect(settingsModel.defaultTab).toBe("appearance");
+    expect(settingsModel.tabs.map((tab) => tab.key)).toEqual([
       "appearance",
       "model-config",
       "editor",
@@ -80,7 +81,7 @@ describe("Agent 壳层路由", () => {
   it("旧 llm tab 映射到模型配置", async () => {
     await renderAt("/settings?tab=llm");
 
-    expect(normalizeSettingsTab("llm")).toBe("model-config");
+    expect(normalizeSettingsTab(settingsModel, "llm")).toBe("model-config");
     expect(await screen.findByRole("heading", { level: 2, name: "模型配置" })).toBeTruthy();
   });
 

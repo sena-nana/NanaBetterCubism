@@ -251,7 +251,7 @@ describe("对话工作区", () => {
     const input = await screen.findByPlaceholderText("描述你想在 Cubism Editor 中完成的事…");
     await fireEvent.update(input, "A 请求");
     await fireEvent.keyDown(input, { key: "Enter" });
-    expect(bridge.sendMessage).toHaveBeenCalledWith("a", "A 请求");
+    expect(bridge.sendMessage).toHaveBeenCalledWith("a", "A 请求", false);
 
     await router.push("/chats/b");
     await waitForConversationLoad("b");
@@ -259,7 +259,7 @@ describe("对话工作区", () => {
     await fireEvent.update(inputB, "B 请求");
     await fireEvent.keyDown(inputB, { key: "Enter" });
 
-    expect(bridge.sendMessage).toHaveBeenNthCalledWith(2, "b", "B 请求");
+    expect(bridge.sendMessage).toHaveBeenNthCalledWith(2, "b", "B 请求", false);
     expect(bridge.cancelTurn).not.toHaveBeenCalled();
     expect(getConversationRuntime("a").phase).toBe("running");
     expect(getConversationRuntime("b").phase).toBe("running");

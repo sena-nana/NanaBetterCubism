@@ -48,9 +48,9 @@ describe("共享模型配置状态", () => {
 
 async function setupStore() {
   const { appConfig } = await import("../src/app.config");
-  const { setLiliaAppConfig, SIDEBAR_FOOTER_STATUSES } = await import("@lilia/ui");
+  const { setLiliaUiConfig, SIDEBAR_FOOTER_STATUSES } = await import("@lilia/ui/shell");
   const { useLlmConfigStore } = await import("../src/features/agent/llmConfigStore");
-  setLiliaAppConfig(appConfig);
+  setLiliaUiConfig(appConfig);
   return {
     store: useLlmConfigStore(),
     statuses: SIDEBAR_FOOTER_STATUSES,

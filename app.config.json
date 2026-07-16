@@ -3,15 +3,5 @@
   "productTitle": "NanaBetterCubism",
   "version": "0.1.0",
   "identifier": "com.senanana.nanabettercubism",
-  "storageKeyPrefix": "nanabettercubism",
-  "shell": {
-    "homeTitle": "Cubism Agent",
-    "homeDescription": "通过对话驱动 Cubism Editor 建模辅助。",
-    "workspaceSectionTitle": "工作区",
-    "workspaceName": "Agent 工作区",
-    "workspaceEmptyText": "创建对话后开始。",
-    "statusLabel": "未连接",
-    "statusTitle": "在设置中连接 Cubism Editor。",
-    "settingsDescription": "模型、Editor 与外观偏好会保存在本地。"
-  }
+  "storageKeyPrefix": "nanabettercubism"
 }
