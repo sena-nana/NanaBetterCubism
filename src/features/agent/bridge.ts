@@ -107,32 +107,9 @@ export async function listMemories(projectId?: string | null): Promise<MemoryRec
   return invoke<MemoryRecord[]>("memory_list", { projectId: projectId ?? null });
 }
 
-export async function upsertMemory(input: {
-  id?: string | null;
-  scope: "project" | "global";
-  kind: "stage" | "experience";
-  projectId?: string | null;
-  title: string;
-  body: string;
-  enabled?: boolean;
-  sourceConversationId?: string | null;
-}): Promise<MemoryRecord> {
-  if (!isTauriRuntime()) {
-    throw domainError("desktop_required", "请在桌面应用中管理记忆。");
-  }
-  return invoke<MemoryRecord>("memory_upsert", { input });
-}
-
 export async function setMemoryEnabled(id: string, enabled: boolean): Promise<void> {
   if (!isTauriRuntime()) return;
   await invoke("memory_set_enabled", { id, enabled });
-}
-
-export async function consolidateMemory(conversationId: string): Promise<void> {
-  if (!isTauriRuntime()) {
-    throw domainError("desktop_required", "请在桌面应用中整理记忆。");
-  }
-  await invoke("agent_consolidate_memory", { conversationId });
 }
 
 export async function getLlmConfig(): Promise<LlmConfigView> {

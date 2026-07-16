@@ -1,11 +1,9 @@
 use crate::agent::computer_control::ComputerOperationStatus;
 use crate::agent::llm::test_connection;
-use crate::agent::runtime::{
-    consolidate_memory, continue_after_computer_approval, continue_after_question, run_turn,
-};
+use crate::agent::runtime::{continue_after_computer_approval, continue_after_question, run_turn};
 use crate::agent::store::{
     ChatMessage, ConversationPlan, ConversationSummary, LlmConfigInput, LlmConfigView,
-    MemoryRecord, MemoryUpsertInput, ProjectRecord,
+    MemoryRecord, ProjectRecord,
 };
 use crate::agent::{
     emit_conversations_changed, AgentError, AgentRuntime, CancelTurnResult, PendingUserAction,
@@ -267,27 +265,10 @@ pub async fn memory_list(
 }
 
 #[tauri::command]
-pub async fn memory_upsert(
-    app: AppHandle,
-    input: MemoryUpsertInput,
-) -> Result<MemoryRecord, AgentError> {
-    runtime(&app)?.store.upsert_memory(input)
-}
-
-#[tauri::command]
 pub async fn memory_set_enabled(
     app: AppHandle,
     id: String,
     enabled: bool,
 ) -> Result<(), AgentError> {
     runtime(&app)?.store.set_memory_enabled(&id, enabled)
-}
-
-#[tauri::command]
-pub async fn agent_consolidate_memory(
-    app: AppHandle,
-    conversation_id: String,
-) -> Result<(), AgentError> {
-    let runtime = runtime(&app)?;
-    consolidate_memory(app, &runtime, &conversation_id).await
 }

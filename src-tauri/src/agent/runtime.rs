@@ -1,10 +1,8 @@
 use crate::agent::computer_control::ComputerOperationStatus;
 use crate::agent::llm::{
-    chat_completions, chat_completions_stream, content_to_text, image_file_to_data_url,
-    ToolCallPayload,
+    chat_completions_stream, content_to_text, image_file_to_data_url, ToolCallPayload,
 };
 use crate::agent::skills::{self, MAX_SKILL_LOAD_STEPS, READ_SKILL_TOOL_NAME};
-use crate::agent::store::MemoryUpsertInput;
 use crate::agent::tools::{
     advertised_tool_names, execute_tool, tool_definitions, ToolExecutionContext, ToolOutcome,
 };
@@ -285,10 +283,6 @@ async fn run_turn_inner(
     let mut state = if let Some(existing) = existing_state {
         existing
     } else {
-        let project_id = runtime.store.conversation_project_id(conversation_id)?;
-        let memories = runtime
-            .store
-            .memories_for_injection(project_id.as_deref())?;
         let mut seeded = vec![
             json!({
                 "role": "system",
@@ -299,22 +293,6 @@ async fn run_turn_inner(
                 "content": skills::catalog_prompt()?
             }),
         ];
-        if !memories.is_empty() {
-            let memory_text = memories
-                .iter()
-                .map(|item| {
-                    format!(
-                        "- [{} / {}] {}: {}",
-                        item.scope, item.kind, item.title, item.body
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            seeded.push(json!({
-                "role": "system",
-                "content": format!("相关记忆：\n{memory_text}")
-            }));
-        }
         for item in runtime.store.get_messages(conversation_id)? {
             if item.role == "tool" {
                 continue;
@@ -621,99 +599,6 @@ fn load_skills(
             (call.id.clone(), content)
         })
         .collect())
-}
-
-pub async fn consolidate_memory(
-    app: AppHandle,
-    runtime: &AgentRuntime,
-    conversation_id: &str,
-) -> Result<(), AgentError> {
-    let config = runtime.store.get_llm_config()?;
-    let project_id = runtime.store.conversation_project_id(conversation_id)?;
-    let history = runtime
-        .store
-        .get_messages(conversation_id)?
-        .into_iter()
-        .map(|item| format!("{}: {}", item.role, item.content))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let prompt = format!(
-        "请根据对话整理记忆，返回 JSON：{{\"stageTitle\":\"\",\"stageBody\":\"\",\"experienceTitle\":\"\",\"experienceBody\":\"\"}}。\n\
-         stage 是本项目阶段事实；experience 是可迁移 Live2D 经验。若某项无内容，对应字符串留空。\n\n对话：\n{history}"
-    );
-    let messages = vec![
-        json!({"role": "system", "content": "你只输出合法 JSON 对象。"}),
-        json!({"role": "user", "content": prompt}),
-    ];
-    let response = chat_completions(&config, &messages, &[]).await?;
-    let text = content_to_text(&response.content);
-    let cleaned = text
-        .trim()
-        .trim_start_matches("```json")
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim();
-    let parsed: Value = serde_json::from_str(cleaned).unwrap_or(json!({}));
-
-    if let Some(project_id) = project_id {
-        let stage_title = parsed
-            .get("stageTitle")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim();
-        let stage_body = parsed
-            .get("stageBody")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim();
-        if !stage_body.is_empty() {
-            runtime.store.upsert_memory(MemoryUpsertInput {
-                id: None,
-                scope: "project".into(),
-                kind: "stage".into(),
-                project_id: Some(project_id),
-                title: if stage_title.is_empty() {
-                    "阶段记录".into()
-                } else {
-                    stage_title.into()
-                },
-                body: stage_body.into(),
-                enabled: Some(true),
-                source_conversation_id: Some(conversation_id.into()),
-            })?;
-        }
-    }
-
-    let experience_title = parsed
-        .get("experienceTitle")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-    let experience_body = parsed
-        .get("experienceBody")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-    if !experience_body.is_empty() {
-        runtime.store.upsert_memory(MemoryUpsertInput {
-            id: None,
-            scope: "global".into(),
-            kind: "experience".into(),
-            project_id: None,
-            title: if experience_title.is_empty() {
-                "Live2D 经验".into()
-            } else {
-                experience_title.into()
-            },
-            body: experience_body.into(),
-            enabled: Some(true),
-            source_conversation_id: Some(conversation_id.into()),
-        })?;
-    }
-
-    emit_conversations_changed(&app);
-    Ok(())
 }
 
 #[cfg(test)]

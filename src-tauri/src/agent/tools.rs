@@ -4,7 +4,7 @@ use crate::agent::computer_control::{
     ComputerOperationStep, UnsupportedCapability,
 };
 use crate::agent::skills;
-use crate::agent::store::{truncate_summary, MemoryUpsertInput, PendingQuestion, PlanStep};
+use crate::agent::store::{truncate_summary, PendingQuestion, PlanStep};
 use crate::agent::{new_id, AgentError, AgentRuntime, PendingUserAction};
 use crate::domain::ParameterBatchInput;
 use crate::service::{CommandError, EditorService};
@@ -78,23 +78,26 @@ fn all_domain_tool_definitions() -> Vec<Value> {
         ),
         tool(
             "list_memories",
-            "列出当前对话所属项目的阶段记忆与全局经验。",
-            json!({"type": "object", "properties": {}}),
+            "读取已启用的当前项目阶段记忆与全局 Live2D 经验。",
+            json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
         ),
         tool(
             "upsert_memory",
-            "写入或更新一条记忆。scope=project|global，kind=stage|experience。",
+            "保存或更新一条记忆；project 自动保存为阶段记忆，global 自动保存为 Live2D 经验。",
             json!({
                 "type": "object",
                 "properties": {
-                    "id": { "type": "string" },
-                    "scope": { "type": "string" },
-                    "kind": { "type": "string" },
-                    "title": { "type": "string" },
-                    "body": { "type": "string" },
-                    "enabled": { "type": "boolean" }
+                    "id": { "type": "string", "minLength": 1 },
+                    "scope": { "type": "string", "enum": ["project", "global"] },
+                    "title": { "type": "string", "minLength": 1 },
+                    "body": { "type": "string", "minLength": 1 }
                 },
-                "required": ["scope", "kind", "title", "body"]
+                "required": ["scope", "title", "body"],
+                "additionalProperties": false
             }),
         ),
         tool(
@@ -102,8 +105,9 @@ fn all_domain_tool_definitions() -> Vec<Value> {
             "停用一条记忆（enabled=false）。",
             json!({
                 "type": "object",
-                "properties": { "id": { "type": "string" } },
-                "required": ["id"]
+                "properties": { "id": { "type": "string", "minLength": 1 } },
+                "required": ["id"],
+                "additionalProperties": false
             }),
         ),
         tool(
@@ -473,50 +477,28 @@ pub async fn execute_tool(
             })
         }
         "list_memories" => {
-            let project_id = runtime.store.conversation_project_id(conversation_id)?;
-            let memories = runtime.store.list_memories(project_id)?;
+            let memories = runtime.store.list_agent_memories(conversation_id)?;
             Ok(tool_result(serde_json::to_string_pretty(&memories)?))
         }
         "upsert_memory" => {
-            let scope = args
-                .get("scope")
-                .and_then(|v| v.as_str())
-                .unwrap_or("project");
-            let project_id = if scope == "project" {
-                runtime.store.conversation_project_id(conversation_id)?
-            } else {
-                None
-            };
-            let memory = runtime.store.upsert_memory(MemoryUpsertInput {
-                id: args.get("id").and_then(|v| v.as_str()).map(str::to_string),
-                scope: scope.into(),
-                kind: args
-                    .get("kind")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("stage")
-                    .into(),
-                project_id,
-                title: args
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("记忆")
-                    .into(),
-                body: args
-                    .get("body")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .into(),
-                enabled: args.get("enabled").and_then(|v| v.as_bool()),
-                source_conversation_id: Some(conversation_id.into()),
-            })?;
+            let id = args
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_string);
+            let memory = runtime.store.upsert_agent_memory(
+                conversation_id,
+                id,
+                required_string(&args, "scope")?,
+                required_string(&args, "title")?,
+                required_string(&args, "body")?,
+            )?;
             Ok(tool_result(serde_json::to_string_pretty(&memory)?))
         }
         "archive_memory" => {
-            let id = args
-                .get("id")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| AgentError::new("invalid_arguments", "缺少 id"))?;
-            runtime.store.set_memory_enabled(id, false)?;
+            runtime
+                .store
+                .archive_agent_memory(conversation_id, required_string(&args, "id")?)?;
             Ok(tool_result("已停用记忆。"))
         }
         "list_cubism_windows" => {
@@ -942,6 +924,39 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn project_memory_skill_exposes_a_strict_agent_contract() {
+        let definitions = tool_definitions(&BTreeSet::from(["project-memory".into()])).unwrap();
+        let memory_names = names(&definitions);
+        for name in ["list_memories", "upsert_memory", "archive_memory"] {
+            assert!(memory_names.contains(name));
+        }
+
+        let upsert = definitions
+            .iter()
+            .find(|definition| tool_name(definition) == Some("upsert_memory"))
+            .unwrap();
+        let parameters = &upsert["function"]["parameters"];
+        assert_eq!(parameters["additionalProperties"], false);
+        assert_eq!(
+            parameters["properties"]["scope"]["enum"],
+            json!(["project", "global"])
+        );
+        assert!(parameters["properties"].get("kind").is_none());
+        assert!(parameters["properties"].get("enabled").is_none());
+
+        for name in ["list_memories", "archive_memory"] {
+            let definition = definitions
+                .iter()
+                .find(|definition| tool_name(definition) == Some(name))
+                .unwrap();
+            assert_eq!(
+                definition["function"]["parameters"]["additionalProperties"],
+                false
+            );
+        }
     }
 
     #[test]
