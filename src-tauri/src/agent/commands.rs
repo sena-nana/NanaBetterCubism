@@ -148,6 +148,7 @@ pub async fn agent_send_message(
     app: AppHandle,
     conversation_id: String,
     content: String,
+    conversation_only: Option<bool>,
 ) -> Result<(), AgentError> {
     let text = content.trim().to_string();
     if text.is_empty() {
@@ -157,8 +158,17 @@ pub async fn agent_send_message(
     let cancel = runtime.begin_turn(&conversation_id).await?;
     let app_clone = app.clone();
     let runtime_clone = runtime.clone();
+    let conversation_only = conversation_only.unwrap_or(false);
     tauri::async_runtime::spawn(async move {
-        let _ = run_turn(app_clone, runtime_clone, conversation_id, text, cancel).await;
+        let _ = run_turn(
+            app_clone,
+            runtime_clone,
+            conversation_id,
+            text,
+            conversation_only,
+            cancel,
+        )
+        .await;
     });
     Ok(())
 }

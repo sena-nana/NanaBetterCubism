@@ -39,11 +39,15 @@ export async function getMessages(conversationId: string): Promise<ChatMessage[]
   return invoke<ChatMessage[]>("agent_get_messages", { conversationId });
 }
 
-export async function sendMessage(conversationId: string, content: string): Promise<void> {
+export async function sendMessage(
+  conversationId: string,
+  content: string,
+  conversationOnly = false,
+): Promise<void> {
   if (!isTauriRuntime()) {
     throw domainError("desktop_required", "请在桌面应用中发送消息。");
   }
-  await invoke("agent_send_message", { conversationId, content });
+  await invoke("agent_send_message", { conversationId, content, conversationOnly });
 }
 
 export async function cancelTurn(conversationId: string): Promise<CancelTurnResult> {

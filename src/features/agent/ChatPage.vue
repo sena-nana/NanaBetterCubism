@@ -16,6 +16,7 @@ import ConversationTranscript from "./components/ConversationTranscript.vue";
 import { useLlmConfigStore } from "./llmConfigStore";
 import {
   beginConversationTurn,
+  conversationOnly,
   failConversationTurn,
   getConversationRuntime,
   installConversationRuntimeStore,
@@ -112,7 +113,7 @@ async function onSend() {
   if (!id || !content || !canSend.value) return;
   const optimisticId = beginConversationTurn(id, content);
   try {
-    await sendMessage(id, content);
+    await sendMessage(id, content, conversationOnly.value);
   } catch (err) {
     failConversationTurn(
       id,
@@ -207,6 +208,7 @@ async function onDecideComputerOperation(approved: boolean) {
       <ConversationComposer
         v-model="draft"
         v-model:ask-answer="askAnswer"
+        v-model:conversation-only="conversationOnly"
         :pending-action="runtime.pendingAction"
         :computer-status="runtime.computerStatus"
         :disabled="!llm.state.config.hasApiKey"

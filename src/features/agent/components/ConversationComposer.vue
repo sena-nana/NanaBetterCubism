@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import { UiButton, UiTextarea } from "@lilia/ui";
+import { UiButton, UiSwitch, UiTextarea } from "@lilia/ui";
 import type { ComputerActionKind, ComputerOperationStatus, PendingUserAction } from "../types";
 
 type TextareaRef = { $el?: HTMLTextAreaElement } | HTMLTextAreaElement | null;
@@ -9,6 +9,7 @@ const props = withDefaults(
   defineProps<{
     modelValue: string;
     askAnswer?: string;
+    conversationOnly?: boolean;
     pendingAction?: PendingUserAction | null;
     computerStatus?: ComputerOperationStatus;
     disabled?: boolean;
@@ -21,6 +22,7 @@ const props = withDefaults(
   }>(),
   {
     askAnswer: "",
+    conversationOnly: false,
     pendingAction: null,
     computerStatus: "idle",
     disabled: false,
@@ -36,6 +38,7 @@ const props = withDefaults(
 const emit = defineEmits<{
   "update:modelValue": [value: string];
   "update:askAnswer": [value: string];
+  "update:conversationOnly": [value: boolean];
   send: [];
   cancel: [];
   answer: [answer?: string];
@@ -207,14 +210,22 @@ function onAskKeydown(event: KeyboardEvent) {
         ref="inputRef"
         :model-value="modelValue"
         rows="1"
-        :placeholder="placeholder"
+        :placeholder="conversationOnly ? '提问或讨论当前模型…' : placeholder"
         :disabled="disabled || running || cancelling"
         :agent-id="`${agentIdPrefix}.input`"
         @update:model-value="emit('update:modelValue', $event)"
         @keydown="onKeydown"
       />
       <div class="conversation-composer__actions">
-        <span class="conversation-composer__hint">Enter 发送 · Shift+Enter 换行</span>
+        <div class="conversation-composer__mode">
+          <UiSwitch
+            :model-value="conversationOnly"
+            label="仅对话"
+            :agent-id="`${agentIdPrefix}.conversation-only`"
+            @update:model-value="emit('update:conversationOnly', Boolean($event))"
+          />
+          <span class="conversation-composer__hint">Enter 发送 · Shift+Enter 换行</span>
+        </div>
         <UiButton
           v-if="running || cancelling"
           size="sm"
@@ -254,6 +265,7 @@ function onAskKeydown(event: KeyboardEvent) {
 
 .conversation-composer__toolbar,
 .conversation-composer__actions,
+.conversation-composer__mode,
 .conversation-composer__answer-actions,
 .conversation-composer__options,
 .conversation-composer__approval-actions,
@@ -262,7 +274,8 @@ function onAskKeydown(event: KeyboardEvent) {
 .conversation-composer :deep(.ui-textarea) { display: block; width: 100%; min-height: 48px; max-height: 180px; resize: none; overflow-y: auto; border: 0; background: transparent; box-shadow: none; line-height: 1.55; }
 .conversation-composer :deep(.ui-textarea:focus) { outline: none; }
 .conversation-composer__actions { justify-content: flex-end; min-height: 30px; padding: 6px 1px 0; }
-.conversation-composer__hint { margin-right: auto; color: var(--text-faint); font-size: 11px; }
+.conversation-composer__mode { margin-right: auto; min-width: 0; }
+.conversation-composer__hint { color: var(--text-faint); font-size: 11px; }
 .conversation-composer__pending { min-height: 108px; padding: 3px; }
 .conversation-composer__question { margin: 0 0 9px; font-size: 13px; line-height: 1.5; }
 .conversation-composer__options { flex-wrap: wrap; margin-bottom: 7px; }

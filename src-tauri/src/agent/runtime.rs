@@ -9,7 +9,7 @@ use crate::agent::tools::{
 };
 use crate::agent::{
     emit_conversations_changed, AgentError, AgentRuntime, AgentTurnState, PendingContinuation,
-    SYSTEM_PROMPT,
+    CONVERSATION_ONLY_PROMPT, SYSTEM_PROMPT,
 };
 use crate::service::EditorService;
 use serde_json::{json, Value};
@@ -26,6 +26,7 @@ pub async fn run_turn(
     runtime: Arc<AgentRuntime>,
     conversation_id: String,
     user_text: String,
+    conversation_only: bool,
     cancel: Arc<AtomicBool>,
 ) -> Result<(), AgentError> {
     let editor = app.state::<EditorService>();
@@ -36,6 +37,7 @@ pub async fn run_turn(
         &conversation_id,
         Some(user_text),
         None,
+        conversation_only,
         cancel.clone(),
     )
     .await;
@@ -87,6 +89,7 @@ pub async fn continue_after_question(
             &conversation_id,
             None,
             Some(state),
+            false,
             cancel.clone(),
         )
         .await
@@ -169,6 +172,7 @@ pub async fn continue_after_computer_approval(
             &conversation_id,
             None,
             Some(state),
+            false,
             cancel.clone(),
         )
         .await
@@ -273,11 +277,12 @@ fn emit_finished(app: &AppHandle, conversation_id: &str, result: &Result<TurnEnd
 
 async fn run_turn_inner(
     app: &AppHandle,
-    runtime: &AgentRuntime,
+    runtime: &Arc<AgentRuntime>,
     editor: &EditorService,
     conversation_id: &str,
     user_text: Option<String>,
     existing_state: Option<AgentTurnState>,
+    conversation_only: bool,
     cancel: Arc<AtomicBool>,
 ) -> Result<TurnEnd, AgentError> {
     let config = runtime.store.get_llm_config()?;
@@ -294,6 +299,12 @@ async fn run_turn_inner(
                 "content": skills::catalog_prompt()?
             }),
         ];
+        if conversation_only {
+            seeded.push(json!({
+                "role": "system",
+                "content": CONVERSATION_ONLY_PROMPT
+            }));
+        }
         for item in runtime.store.get_messages(conversation_id)? {
             if item.role == "tool" {
                 continue;
