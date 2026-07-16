@@ -5,6 +5,7 @@ mod llm;
 mod runtime;
 mod skills;
 pub(crate) mod store;
+mod title;
 pub(crate) mod tools;
 mod user_action;
 

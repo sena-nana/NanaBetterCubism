@@ -3,6 +3,7 @@ use crate::agent::llm::{
     chat_completions_stream, content_to_text, image_file_to_data_url, ToolCallPayload,
 };
 use crate::agent::skills::{self, MAX_SKILL_LOAD_STEPS, READ_SKILL_TOOL_NAME};
+use crate::agent::title::generate_conversation_title;
 use crate::agent::tools::{
     advertised_tool_names, emit_tool, execute_tool, tool_definitions, ToolExecutionContext,
     ToolOutcome,
@@ -319,10 +320,19 @@ async fn run_turn_inner(
                 .store
                 .append_message(conversation_id, "user", &text, None, None)?;
             let title: String = text.chars().take(24).collect();
-            let _ = runtime
+            let renamed = runtime
                 .store
-                .set_conversation_title_if_default(conversation_id, &title);
+                .set_conversation_title_if_default(conversation_id, &title)
+                .unwrap_or(false);
             emit_conversations_changed(app);
+            if renamed {
+                tauri::async_runtime::spawn(generate_conversation_title(
+                    app.clone(),
+                    runtime.clone(),
+                    conversation_id.to_string(),
+                    text.clone(),
+                ));
+            }
             seeded.push(json!({
                 "role": "user",
                 "content": text,
