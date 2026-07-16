@@ -80,6 +80,29 @@ pub struct MemoryRecord {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MemorySummary {
+    pub id: String,
+    pub scope: String,
+    pub kind: String,
+    pub title: String,
+    pub overview: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryLayerRead {
+    pub id: String,
+    pub scope: String,
+    pub kind: String,
+    pub title: String,
+    pub layers: Vec<String>,
+    pub body: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LlmConfigView {
     pub base_url: Option<String>,
     pub model: Option<String>,
@@ -720,9 +743,54 @@ impl AgentStore {
     pub fn list_agent_memories(
         &self,
         conversation_id: &str,
-    ) -> Result<Vec<MemoryRecord>, AgentError> {
+    ) -> Result<Vec<MemorySummary>, AgentError> {
         let project_id = self.conversation_project_id(conversation_id)?;
-        self.active_memories_for_project(project_id.as_deref())
+        self.active_memories_for_project(project_id.as_deref())?
+            .into_iter()
+            .map(|memory| {
+                let overview =
+                    crate::agent::memory_markdown::extract_overview(&memory.scope, &memory.body)
+                        .unwrap_or_default();
+                Ok(MemorySummary {
+                    id: memory.id,
+                    scope: memory.scope,
+                    kind: memory.kind,
+                    title: memory.title,
+                    overview,
+                    updated_at: memory.updated_at,
+                })
+            })
+            .collect()
+    }
+
+    pub fn read_agent_memory(
+        &self,
+        conversation_id: &str,
+        id: &str,
+        layers: Option<Vec<String>>,
+    ) -> Result<MemoryLayerRead, AgentError> {
+        let project_id = self.conversation_project_id(conversation_id)?;
+        let memory = self.require_agent_memory(project_id.as_deref(), id)?;
+        let selected = crate::agent::memory_markdown::select_layers(
+            &memory.scope,
+            &memory.body,
+            layers.as_deref(),
+        )?;
+        let resolved_layers = match layers.as_deref() {
+            None | Some([]) => {
+                vec![crate::agent::memory_markdown::index_layer_name(&memory.scope)?.into()]
+            }
+            Some(names) => names.to_vec(),
+        };
+        Ok(MemoryLayerRead {
+            id: memory.id,
+            scope: memory.scope,
+            kind: memory.kind,
+            title: memory.title,
+            layers: resolved_layers,
+            body: selected,
+            updated_at: memory.updated_at,
+        })
     }
 
     pub fn upsert_agent_memory(
@@ -731,7 +799,9 @@ impl AgentStore {
         id: Option<String>,
         scope: &str,
         title: &str,
-        body: &str,
+        body: Option<&str>,
+        layer: Option<&str>,
+        content: Option<&str>,
     ) -> Result<MemoryRecord, AgentError> {
         let project_id = self.conversation_project_id(conversation_id)?;
         let (kind, memory_project_id) = match scope {
@@ -739,13 +809,10 @@ impl AgentStore {
             "global" => ("experience", None),
             _ => return Err(AgentError::new("invalid_memory", "记忆范围无效。")),
         };
-        if title.trim().is_empty() || body.trim().is_empty() {
-            return Err(AgentError::new(
-                "invalid_memory",
-                "记忆标题和内容不能为空。",
-            ));
+        if title.trim().is_empty() {
+            return Err(AgentError::new("invalid_memory", "记忆标题不能为空。"));
         }
-        if let Some(id) = id.as_deref() {
+        let existing = if let Some(id) = id.as_deref() {
             let existing = self.require_agent_memory(project_id.as_deref(), id)?;
             if existing.scope != scope {
                 return Err(AgentError::new(
@@ -753,14 +820,37 @@ impl AgentStore {
                     "不能更改现有记忆的范围。",
                 ));
             }
-        }
+            Some(existing)
+        } else {
+            None
+        };
+
+        let normalized_body = match (body, layer, content) {
+            (Some(body), None, None) => {
+                crate::agent::memory_markdown::validate_and_normalize(scope, title, body)?
+            }
+            (None, Some(layer), Some(content)) => crate::agent::memory_markdown::patch_layer(
+                scope,
+                title,
+                existing.as_ref().map(|memory| memory.body.as_str()),
+                layer,
+                content,
+            )?,
+            _ => {
+                return Err(AgentError::new(
+                    "invalid_memory",
+                    "保存记忆时请提供完整 body，或同时提供 layer 与 content。",
+                ));
+            }
+        };
+
         self.upsert_memory(MemoryUpsertInput {
             id,
             scope: scope.into(),
             kind: kind.into(),
             project_id: memory_project_id,
             title: title.trim().into(),
-            body: body.trim().into(),
+            body: normalized_body,
             enabled: Some(true),
             source_conversation_id: Some(conversation_id.into()),
         })
@@ -1089,6 +1179,14 @@ pub(crate) fn truncate_summary(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
+    fn project_body(overview: &str) -> String {
+        format!("## Overview\n{overview}\n")
+    }
+
+    fn global_body(summary: &str) -> String {
+        format!("## Summary\n{summary}\n")
+    }
+
     #[test]
     fn store_roundtrip_conversation_and_memory() {
         let dir = std::env::temp_dir().join(format!("nbc-agent-{}", new_id()));
@@ -1112,13 +1210,14 @@ mod tests {
                 kind: "stage".into(),
                 project_id: Some(project_id.clone()),
                 title: "阶段".into(),
-                body: "已创建眼睛参数".into(),
+                body: project_body("已创建眼睛参数"),
                 enabled: Some(true),
                 source_conversation_id: Some(conversation.id.clone()),
             })
             .unwrap();
         let memories = store.list_agent_memories(&conversation.id).unwrap();
         assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0].overview, "已创建眼睛参数");
         store
             .append_tool_trace(
                 &conversation.id,
@@ -1163,16 +1262,48 @@ mod tests {
             .unwrap();
 
         let stage_a = store
-            .upsert_agent_memory(&project_a.id, None, "project", "A 阶段", "A 已完成")
+            .upsert_agent_memory(
+                &project_a.id,
+                None,
+                "project",
+                "A 阶段",
+                Some(&project_body("A 已完成")),
+                None,
+                None,
+            )
             .unwrap();
         let stage_b = store
-            .upsert_agent_memory(&project_b.id, None, "project", "B 阶段", "B 已完成")
+            .upsert_agent_memory(
+                &project_b.id,
+                None,
+                "project",
+                "B 阶段",
+                Some(&project_body("B 已完成")),
+                None,
+                None,
+            )
             .unwrap();
         let experience = store
-            .upsert_agent_memory(&project_a.id, None, "global", "通用经验", "可跨项目复用")
+            .upsert_agent_memory(
+                &project_a.id,
+                None,
+                "global",
+                "通用经验",
+                Some(&global_body("可跨项目复用")),
+                None,
+                None,
+            )
             .unwrap();
         let archived = store
-            .upsert_agent_memory(&project_a.id, None, "project", "旧阶段", "已过期")
+            .upsert_agent_memory(
+                &project_a.id,
+                None,
+                "project",
+                "旧阶段",
+                Some(&project_body("已过期")),
+                None,
+                None,
+            )
             .unwrap();
         store
             .archive_agent_memory(&project_a.id, &archived.id)
@@ -1184,10 +1315,13 @@ mod tests {
             memory.id == stage_a.id
                 && memory.scope == "project"
                 && memory.kind == "stage"
-                && memory.source_conversation_id.as_deref() == Some(project_a.id.as_str())
+                && memory.overview == "A 已完成"
         }));
         assert!(project_memories.iter().any(|memory| {
-            memory.id == experience.id && memory.scope == "global" && memory.kind == "experience"
+            memory.id == experience.id
+                && memory.scope == "global"
+                && memory.kind == "experience"
+                && memory.overview == "可跨项目复用"
         }));
         assert!(!project_memories
             .iter()
@@ -1199,11 +1333,53 @@ mod tests {
                 Some(stage_a.id.clone()),
                 "project",
                 "A 阶段",
-                "A 已完成并验证",
+                Some(&project_body("A 已完成并验证")),
+                None,
+                None,
             )
             .unwrap();
         assert_eq!(updated_stage.id, stage_a.id);
-        assert_eq!(updated_stage.body, "A 已完成并验证");
+        assert!(updated_stage.body.contains("A 已完成并验证"));
+
+        let layered = store
+            .read_agent_memory(
+                &project_a.id,
+                &stage_a.id,
+                Some(vec!["Overview".into(), "Stage".into()]),
+            )
+            .unwrap();
+        assert!(layered.body.contains("## Overview\nA 已完成并验证"));
+        assert!(layered.body.contains("## Stage"));
+
+        let patched = store
+            .upsert_agent_memory(
+                &project_a.id,
+                Some(stage_a.id.clone()),
+                "project",
+                "A 阶段",
+                None,
+                Some("Stage"),
+                Some("ParamAngleX 已对齐。"),
+            )
+            .unwrap();
+        assert!(patched.body.contains("## Stage\nParamAngleX 已对齐。"));
+        assert!(patched.body.contains("## Overview\nA 已完成并验证"));
+
+        assert_eq!(
+            store
+                .upsert_agent_memory(
+                    &project_a.id,
+                    None,
+                    "project",
+                    "非法",
+                    Some("纯文本无分层"),
+                    None,
+                    None,
+                )
+                .unwrap_err()
+                .code,
+            "invalid_memory_body"
+        );
 
         let inbox_memories = store.list_agent_memories(&inbox.id).unwrap();
         assert_eq!(
@@ -1220,7 +1396,9 @@ mod tests {
                 Some(stage_a.id.clone()),
                 "project",
                 "越权更新",
-                "不应成功",
+                Some(&project_body("不应成功")),
+                None,
+                None,
             ),
             Err(error) if error.code == "memory_not_found"
         ));
@@ -1234,12 +1412,22 @@ mod tests {
                 Some(experience.id),
                 "project",
                 "错误改类",
-                "不应成功",
+                Some(&project_body("不应成功")),
+                None,
+                None,
             ),
             Err(error) if error.code == "memory_scope_mismatch"
         ));
         assert!(matches!(
-            store.upsert_agent_memory(&inbox.id, None, "project", "无项目", "不应成功"),
+            store.upsert_agent_memory(
+                &inbox.id,
+                None,
+                "project",
+                "无项目",
+                Some(&project_body("不应成功")),
+                None,
+                None,
+            ),
             Err(error) if error.code == "project_required"
         ));
     }

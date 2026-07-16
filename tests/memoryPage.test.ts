@@ -12,7 +12,7 @@ const bridge = vi.hoisted(() => ({
       projectId: "project-a",
       projectName: "角色 A",
       title: "眼睛参数",
-      body: "已完成眼睛参数结构。",
+      body: "# 眼睛参数\n\n## Overview\n已完成眼睛参数结构。\n\n## Stage\nParamAngleX 已对齐。\n\n## Structure\n\n## Decisions\n",
       enabled: true,
       sourceConversationId: "conversation-a",
       updatedAt: "2026-07-16T00:00:00Z",
@@ -24,7 +24,7 @@ const bridge = vi.hoisted(() => ({
       projectId: null,
       projectName: null,
       title: "参数命名经验",
-      body: "先核对已有参数 ID。",
+      body: "# 参数命名经验\n\n## Summary\n先核对已有参数 ID。\n\n## Technique\n\n## Caveats\n",
       enabled: true,
       sourceConversationId: null,
       updatedAt: "2026-07-16T00:00:00Z",
@@ -40,7 +40,7 @@ const bridge = vi.hoisted(() => ({
 vi.mock("../src/features/agent/bridge", () => bridge);
 
 describe("记忆管理页", () => {
-  it("展示 Agent 保存的记忆并允许用户停用", async () => {
+  it("优先展示 Overview/Summary，并允许停用", async () => {
     const router = createRouter({
       history: createMemoryHistory(),
       routes: [{ path: "/memory", component: MemoryPage }],
@@ -49,8 +49,10 @@ describe("记忆管理页", () => {
     await router.isReady();
     render({ template: "<RouterView />" }, { global: { plugins: [router] } });
 
-    expect(await screen.findByText("眼睛参数")).toBeTruthy();
-    expect(screen.getByText("参数命名经验")).toBeTruthy();
+    expect(await screen.findAllByText("眼睛参数")).toHaveLength(2);
+    expect(screen.getAllByText("已完成眼睛参数结构。").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("先核对已有参数 ID。").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("分层正文")).toHaveLength(2);
     expect(bridge.listMemories).toHaveBeenCalledWith(null);
 
     await fireEvent.click(screen.getAllByRole("switch", { name: "启用" })[0]);

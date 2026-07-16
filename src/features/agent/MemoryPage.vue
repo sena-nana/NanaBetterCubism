@@ -8,6 +8,8 @@ import {
   normalizeCommandError,
   setMemoryEnabled,
 } from "./bridge";
+import { extractMemoryOverview } from "./memoryMarkdown";
+import MarkdownBlock from "./markdown/MarkdownBlock.vue";
 import type { MemoryRecord, ProjectRecord } from "./types";
 
 const route = useRoute();
@@ -56,6 +58,10 @@ async function toggle(memory: MemoryRecord, enabled: boolean) {
   } catch (err) {
     error.value = normalizeCommandError(err).message;
   }
+}
+
+function overviewOf(memory: MemoryRecord): string {
+  return extractMemoryOverview(memory.scope, memory.body);
 }
 </script>
 
@@ -118,7 +124,11 @@ async function toggle(memory: MemoryRecord, enabled: boolean) {
               <RouterLink :to="`/chats/${memory.sourceConversationId}`">来源对话</RouterLink>
             </template>
           </p>
-          <p class="memory-item__body">{{ memory.body }}</p>
+          <p class="memory-item__overview">{{ overviewOf(memory) }}</p>
+          <details class="memory-item__details">
+            <summary :data-agent-id="`agent.memory.expand.${memory.id}`">分层正文</summary>
+            <MarkdownBlock :content="memory.body" />
+          </details>
         </article>
       </UiCard>
 
@@ -145,7 +155,11 @@ async function toggle(memory: MemoryRecord, enabled: boolean) {
             />
           </div>
           <p class="memory-item__meta">{{ memory.updatedAt }}</p>
-          <p class="memory-item__body">{{ memory.body }}</p>
+          <p class="memory-item__overview">{{ overviewOf(memory) }}</p>
+          <details class="memory-item__details">
+            <summary :data-agent-id="`agent.memory.expand.${memory.id}`">分层正文</summary>
+            <MarkdownBlock :content="memory.body" />
+          </details>
         </article>
       </UiCard>
     </template>
@@ -178,23 +192,32 @@ async function toggle(memory: MemoryRecord, enabled: boolean) {
 }
 .memory-item__head {
   display: flex;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
-  align-items: center;
 }
 .memory-item__meta {
-  margin: 4px 0 8px;
-  color: var(--text-faint);
-  font-size: 11px;
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
 }
-.memory-item__body {
-  margin: 0;
-  white-space: pre-wrap;
+.memory-item__overview {
+  margin: 8px 0 0;
+  color: var(--text);
   font-size: 13px;
   line-height: 1.5;
+  white-space: pre-wrap;
+}
+.memory-item__details {
+  margin-top: 8px;
+}
+.memory-item__details summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 .error {
+  margin-top: 12px;
   color: var(--err);
-  font-size: 12px;
 }
 </style>

@@ -91,8 +91,8 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
         ),
         tool(
             "list_memories",
-            "读取记忆",
-            "读取已启用的当前项目阶段记忆与全局 Live2D 经验。",
+            "列出记忆索引",
+            "列出已启用的当前项目阶段记忆与全局 Live2D 经验的索引（含 Overview/Summary，不含深层正文）。",
             json!({
                 "type": "object",
                 "properties": {},
@@ -100,18 +100,49 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
             }),
         ),
         tool(
+            "read_memory",
+            "读取记忆分层",
+            "按层读取一条记忆。默认只返回 Overview/Summary；可请求 Stage/Structure/Decisions 或 Technique/Caveats。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "minLength": 1 },
+                    "layers": {
+                        "type": "array",
+                        "items": { "type": "string", "minLength": 1 },
+                        "description": "可选层名；省略时仅返回索引层"
+                    }
+                },
+                "required": ["id"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
             "upsert_memory",
             "保存记忆",
-            "保存或更新一条记忆；project 自动保存为阶段记忆，global 自动保存为 Live2D 经验。",
+            "保存或更新一条 Markdown 分层记忆；project 为阶段记忆，global 为 Live2D 经验。提供完整 body，或用 layer+content 单层补丁。",
             json!({
                 "type": "object",
                 "properties": {
                     "id": { "type": "string", "minLength": 1 },
                     "scope": { "type": "string", "enum": ["project", "global"] },
                     "title": { "type": "string", "minLength": 1 },
-                    "body": { "type": "string", "minLength": 1 }
+                    "body": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "完整多层 Markdown；与 layer/content 二选一"
+                    },
+                    "layer": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "单层补丁的层名；须与 content 同用"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "单层补丁正文；须与 layer 同用"
+                    }
                 },
-                "required": ["scope", "title", "body"],
+                "required": ["scope", "title"],
                 "additionalProperties": false
             }),
         ),
@@ -645,18 +676,47 @@ async fn execute_tool_inner(
             let memories = runtime.store.list_agent_memories(conversation_id)?;
             Ok(tool_result(serde_json::to_string_pretty(&memories)?))
         }
+        "read_memory" => {
+            let layers = args
+                .get("layers")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                });
+            let memory = runtime.store.read_agent_memory(
+                conversation_id,
+                required_string(&args, "id")?,
+                layers,
+            )?;
+            Ok(tool_result(serde_json::to_string_pretty(&memory)?))
+        }
         "upsert_memory" => {
             let id = args
                 .get("id")
                 .and_then(Value::as_str)
                 .filter(|id| !id.trim().is_empty())
                 .map(str::to_string);
+            let body = args
+                .get("body")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty());
+            let layer = args
+                .get("layer")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty());
+            let content = args.get("content").and_then(Value::as_str);
             let memory = runtime.store.upsert_agent_memory(
                 conversation_id,
                 id,
                 required_string(&args, "scope")?,
                 required_string(&args, "title")?,
-                required_string(&args, "body")?,
+                body,
+                layer,
+                content,
             )?;
             Ok(tool_result(serde_json::to_string_pretty(&memory)?))
         }
@@ -1029,7 +1089,7 @@ mod tests {
     fn project_memory_skill_exposes_a_strict_agent_contract() {
         let definitions = tool_definitions(&BTreeSet::from(["project-memory".into()])).unwrap();
         let memory_names = names(&definitions);
-        for name in ["list_memories", "upsert_memory", "archive_memory"] {
+        for name in ["list_memories", "read_memory", "upsert_memory", "archive_memory"] {
             assert!(memory_names.contains(name));
         }
 
@@ -1043,8 +1103,21 @@ mod tests {
             parameters["properties"]["scope"]["enum"],
             json!(["project", "global"])
         );
+        assert_eq!(parameters["required"], json!(["scope", "title"]));
+        assert!(parameters["properties"].get("body").is_some());
+        assert!(parameters["properties"].get("layer").is_some());
+        assert!(parameters["properties"].get("content").is_some());
         assert!(parameters["properties"].get("kind").is_none());
         assert!(parameters["properties"].get("enabled").is_none());
+
+        let read = definitions
+            .iter()
+            .find(|definition| tool_name(definition) == Some("read_memory"))
+            .unwrap();
+        assert_eq!(read["function"]["parameters"]["required"], json!(["id"]));
+        assert!(read["function"]["parameters"]["properties"]
+            .get("layers")
+            .is_some());
 
         for name in ["list_memories", "archive_memory"] {
             let definition = definitions
