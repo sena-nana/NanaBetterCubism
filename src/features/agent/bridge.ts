@@ -16,6 +16,7 @@ import type {
   LlmConfigView,
   LlmTestResult,
   MemoryRecord,
+  MemoryScope,
   PendingUserAction,
   ProjectRecord,
 } from "./types";
@@ -106,9 +107,12 @@ export async function listProjects(): Promise<ProjectRecord[]> {
   return invoke<ProjectRecord[]>("agent_list_projects");
 }
 
-export async function listMemories(projectId?: string | null): Promise<MemoryRecord[]> {
+export async function listMemories(
+  scope: MemoryScope,
+  projectId?: string | null,
+): Promise<MemoryRecord[]> {
   if (!isTauriRuntime()) return [];
-  return invoke<MemoryRecord[]>("memory_list", { projectId: projectId ?? null });
+  return invoke<MemoryRecord[]>("memory_list", { scope, projectId: projectId ?? null });
 }
 
 export async function setMemoryEnabled(id: string, enabled: boolean): Promise<void> {

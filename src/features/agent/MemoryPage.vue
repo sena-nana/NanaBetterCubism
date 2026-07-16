@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { UiButton, UiCard, UiEmptyState, UiSwitch } from "@lilia/ui";
+import { UiSegmentedControl } from "@lilia/ui";
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
@@ -8,216 +8,222 @@ import {
   normalizeCommandError,
   setMemoryEnabled,
 } from "./bridge";
-import { extractMemoryOverview } from "./memoryMarkdown";
-import MarkdownBlock from "./markdown/MarkdownBlock.vue";
-import type { MemoryRecord, ProjectRecord } from "./types";
+import MemoryDetailPane from "./components/MemoryDetailPane.vue";
+import MemoryListPane from "./components/MemoryListPane.vue";
+import { matchesMemory } from "./memoryPresentation";
+import type { MemoryRecord, MemoryScope, ProjectRecord } from "./types";
 
 const route = useRoute();
 const router = useRouter();
+const scope = ref<MemoryScope>("project");
+const projectId = ref("");
+const search = ref("");
 const memories = ref<MemoryRecord[]>([]);
 const projects = ref<ProjectRecord[]>([]);
-const projectFilter = ref<string>("");
-const error = ref<string | null>(null);
+const selectedId = ref<string | null>(null);
 const loading = ref(true);
+const refreshing = ref(false);
+const loadError = ref<string | null>(null);
+const actionError = ref<string | null>(null);
+const togglingId = ref<string | null>(null);
+let loadGeneration = 0;
 
-const projectMemories = computed(() =>
-  memories.value.filter((item) => item.scope === "project" && item.kind === "stage"),
+const scopeOptions = [
+  { value: "project", label: "项目记忆", agentId: "agent.memory.scope.project" },
+  { value: "global", label: "全局记忆", agentId: "agent.memory.scope.global" },
+] as const;
+
+const filteredMemories = computed(() =>
+  memories.value.filter((memory) => matchesMemory(memory, search.value)),
 );
-const globalMemories = computed(() =>
-  memories.value.filter((item) => item.scope === "global" && item.kind === "experience"),
+const selectedMemory = computed(
+  () => filteredMemories.value.find((memory) => memory.id === selectedId.value) ?? null,
 );
 
-onMounted(async () => {
-  projects.value = await listProjects();
-  const fromQuery = typeof route.query.project === "string" ? route.query.project : "";
-  projectFilter.value = fromQuery;
-  await reload();
-});
+watch(
+  filteredMemories,
+  (items) => {
+    if (!items.some((memory) => memory.id === selectedId.value)) {
+      selectedId.value = items[0]?.id ?? null;
+    }
+  },
+  { immediate: true },
+);
 
-watch(projectFilter, async (value) => {
-  await router.replace({ query: value ? { project: value } : {} });
-  await reload();
-});
+onMounted(() => void initialize());
 
-async function reload() {
+async function initialize() {
   loading.value = true;
-  error.value = null;
+  loadError.value = null;
   try {
-    memories.value = await listMemories(projectFilter.value || null);
-  } catch (err) {
-    error.value = normalizeCommandError(err).message;
-  } finally {
+    projects.value = await listProjects();
+    scope.value = route.query.scope === "global" ? "global" : "project";
+    const queryProject = typeof route.query.project === "string" ? route.query.project : "";
+    projectId.value = projects.value.some((project) => project.id === queryProject)
+      ? queryProject
+      : "";
+    await syncRoute();
+    await loadCurrentScope(false);
+  } catch (error) {
+    loadError.value = normalizeCommandError(error).message;
     loading.value = false;
   }
 }
 
-async function toggle(memory: MemoryRecord, enabled: boolean) {
+async function syncRoute() {
+  await router.replace({
+    query: {
+      scope: scope.value,
+      ...(projectId.value ? { project: projectId.value } : {}),
+    },
+  });
+}
+
+async function loadCurrentScope(silent = true, preserveId = selectedId.value) {
+  const generation = ++loadGeneration;
+  if (silent) refreshing.value = true;
+  else loading.value = true;
+  loadError.value = null;
+  const requestedScope = scope.value;
+  const requestedProject = requestedScope === "project" ? projectId.value || null : null;
   try {
-    await setMemoryEnabled(memory.id, enabled);
-    memory.enabled = enabled;
-  } catch (err) {
-    error.value = normalizeCommandError(err).message;
+    const next = await listMemories(requestedScope, requestedProject);
+    if (generation !== loadGeneration) return;
+    memories.value = next;
+    selectedId.value = next.some((memory) => memory.id === preserveId)
+      ? preserveId
+      : next[0]?.id ?? null;
+  } catch (error) {
+    if (generation === loadGeneration) {
+      loadError.value = normalizeCommandError(error).message;
+    }
+  } finally {
+    if (generation === loadGeneration) {
+      loading.value = false;
+      refreshing.value = false;
+    }
   }
 }
 
-function overviewOf(memory: MemoryRecord): string {
-  return extractMemoryOverview(memory.scope, memory.body);
+async function changeScope(value: string | number) {
+  const next = value === "global" ? "global" : "project";
+  if (scope.value === next) return;
+  scope.value = next;
+  search.value = "";
+  selectedId.value = null;
+  actionError.value = null;
+  await syncRoute();
+  await loadCurrentScope(false, null);
+}
+
+async function changeProject(value: string) {
+  if (projectId.value === value) return;
+  projectId.value = value;
+  search.value = "";
+  selectedId.value = null;
+  actionError.value = null;
+  await syncRoute();
+  await loadCurrentScope(false, null);
+}
+
+async function toggleMemory(memory: MemoryRecord, enabled: boolean) {
+  if (togglingId.value) return;
+  togglingId.value = memory.id;
+  actionError.value = null;
+  try {
+    await setMemoryEnabled(memory.id, enabled);
+    await loadCurrentScope(true, memory.id);
+  } catch (error) {
+    actionError.value = normalizeCommandError(error).message;
+  } finally {
+    togglingId.value = null;
+  }
 }
 </script>
 
 <template>
   <section class="page agent-memory" data-agent-id="agent.memory">
-    <header class="page-header">
-      <h1>记忆</h1>
-      <p>查看项目阶段记忆与全局 Live2D 经验。</p>
+    <header class="page-header agent-memory__header">
+      <div>
+        <h1>记忆</h1>
+        <p>按项目查看当前进展，或浏览可跨项目复用的经验。</p>
+      </div>
+      <UiSegmentedControl
+        :model-value="scope"
+        :options="scopeOptions"
+        aria-label="记忆范围"
+        agent-id="agent.memory.scope"
+        @update:model-value="changeScope"
+      />
     </header>
 
-    <div class="filter-row">
-      <label for="memory-project-filter">项目</label>
-      <select
-        id="memory-project-filter"
-        v-model="projectFilter"
-        data-agent-id="agent.memory.project-filter"
-      >
-        <option value="">全部项目</option>
-        <option v-for="project in projects" :key="project.id" :value="project.id">
-          {{ project.name }}
-        </option>
-      </select>
-      <UiButton agent-id="agent.memory.reload" @click="reload">刷新</UiButton>
+    <div class="memory-workspace">
+      <MemoryListPane
+        :scope="scope"
+        :projects="projects"
+        :project-id="projectId"
+        :search="search"
+        :memories="filteredMemories"
+        :selected-id="selectedId"
+        :loading="loading"
+        :refreshing="refreshing"
+        :error="loadError"
+        @update:project-id="changeProject"
+        @update:search="search = $event"
+        @select="selectedId = $event"
+        @refresh="loadCurrentScope(true)"
+        @retry="initialize"
+      />
+
+      <MemoryDetailPane
+        :memory="selectedMemory"
+        :busy="togglingId === selectedMemory?.id"
+        :error="actionError"
+        @toggle="toggleMemory"
+      />
     </div>
-
-    <UiEmptyState
-      v-if="loading"
-      title="正在加载记忆"
-      description="读取本地记忆库。"
-      agent-id="agent.memory.loading"
-    />
-
-    <template v-else>
-      <UiCard title="项目阶段记忆" agent-id="agent.memory.project-section">
-        <UiEmptyState
-          v-if="!projectMemories.length"
-          title="暂无项目阶段记忆"
-          description="Agent 在相关任务中保存的项目进展会出现在这里。"
-          agent-id="agent.memory.project-empty"
-        />
-        <article
-          v-for="memory in projectMemories"
-          :key="memory.id"
-          class="memory-item"
-          :data-agent-id="`agent.memory.item.${memory.id}`"
-        >
-          <div class="memory-item__head">
-            <strong>{{ memory.title }}</strong>
-            <UiSwitch
-              :model-value="memory.enabled"
-              label="启用"
-              :agent-id="`agent.memory.enable.${memory.id}`"
-              @update:model-value="(v) => toggle(memory, Boolean(v))"
-            />
-          </div>
-          <p class="memory-item__meta">
-            {{ memory.projectName ?? "未命名项目" }} · {{ memory.updatedAt }}
-            <template v-if="memory.sourceConversationId">
-              ·
-              <RouterLink :to="`/chats/${memory.sourceConversationId}`">来源对话</RouterLink>
-            </template>
-          </p>
-          <p class="memory-item__overview">{{ overviewOf(memory) }}</p>
-          <details class="memory-item__details">
-            <summary :data-agent-id="`agent.memory.expand.${memory.id}`">分层正文</summary>
-            <MarkdownBlock :content="memory.body" />
-          </details>
-        </article>
-      </UiCard>
-
-      <UiCard title="全局 Live2D 经验" agent-id="agent.memory.global-section">
-        <UiEmptyState
-          v-if="!globalMemories.length"
-          title="暂无全局经验"
-          description="Agent 保存的可迁移 Live2D 经验会显示在这里。"
-          agent-id="agent.memory.global-empty"
-        />
-        <article
-          v-for="memory in globalMemories"
-          :key="memory.id"
-          class="memory-item"
-          :data-agent-id="`agent.memory.item.${memory.id}`"
-        >
-          <div class="memory-item__head">
-            <strong>{{ memory.title }}</strong>
-            <UiSwitch
-              :model-value="memory.enabled"
-              label="启用"
-              :agent-id="`agent.memory.enable.${memory.id}`"
-              @update:model-value="(v) => toggle(memory, Boolean(v))"
-            />
-          </div>
-          <p class="memory-item__meta">{{ memory.updatedAt }}</p>
-          <p class="memory-item__overview">{{ overviewOf(memory) }}</p>
-          <details class="memory-item__details">
-            <summary :data-agent-id="`agent.memory.expand.${memory.id}`">分层正文</summary>
-            <MarkdownBlock :content="memory.body" />
-          </details>
-        </article>
-      </UiCard>
-    </template>
-
-    <p v-if="error" class="error" role="alert">{{ error }}</p>
   </section>
 </template>
 
 <style scoped>
-.filter-row {
+.agent-memory {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.agent-memory__header {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-.filter-row label {
-  color: var(--text-muted);
-  font-size: 12px;
-}
-.filter-row select {
-  min-width: 180px;
-}
-.memory-item {
-  padding: 10px 0;
-  border-top: 1px solid var(--border-soft);
-}
-.memory-item:first-of-type {
-  border-top: 0;
-  padding-top: 0;
-}
-.memory-item__head {
-  display: flex;
-  align-items: center;
+  align-items: flex-end;
   justify-content: space-between;
+  gap: 16px;
+}
+
+.agent-memory__header > div {
+  min-width: 0;
+}
+
+.memory-workspace {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
   gap: 12px;
+  min-height: 0;
 }
-.memory-item__meta {
-  margin: 4px 0 0;
-  color: var(--text-muted);
-  font-size: 12px;
-}
-.memory-item__overview {
-  margin: 8px 0 0;
-  color: var(--text);
-  font-size: 13px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-}
-.memory-item__details {
-  margin-top: 8px;
-}
-.memory-item__details summary {
-  cursor: pointer;
-  color: var(--text-muted);
-  font-size: 12px;
-}
-.error {
-  margin-top: 12px;
-  color: var(--err);
+
+@media (max-width: 760px) {
+  .agent-memory {
+    overflow: auto;
+  }
+
+  .agent-memory__header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .memory-workspace {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(260px, 42vh) auto;
+  }
 }
 </style>

@@ -55,8 +55,9 @@ describe("Agent 壳层路由", () => {
     await renderAt("/memory");
 
     expect(await screen.findByRole("heading", { level: 1, name: "记忆" })).toBeTruthy();
-    expect(await screen.findByText("暂无项目阶段记忆")).toBeTruthy();
-    expect(await screen.findByText("暂无全局经验")).toBeTruthy();
+    expect(await screen.findByText("暂无记忆")).toBeTruthy();
+    await fireEvent.click(screen.getByRole("radio", { name: "全局记忆" }));
+    expect(await screen.findByText("Agent 保存的跨项目经验会显示在这里。")).toBeTruthy();
   });
 
   it("设置页恢复外观、模型配置、Editor 与关于，并默认显示外观", async () => {

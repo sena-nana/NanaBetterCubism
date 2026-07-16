@@ -78,6 +78,27 @@ pub struct MemoryRecord {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryViewLayer {
+    pub name: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryViewRecord {
+    pub id: String,
+    pub scope: String,
+    pub project_id: Option<String>,
+    pub project_name: Option<String>,
+    pub title: String,
+    pub layers: Vec<MemoryViewLayer>,
+    pub enabled: bool,
+    pub source_conversation_id: Option<String>,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemorySummary {
@@ -709,6 +730,19 @@ impl AgentStore {
         })
     }
 
+    pub fn list_memory_views(
+        &self,
+        scope: &str,
+        project_id: Option<String>,
+    ) -> Result<Vec<MemoryViewRecord>, AgentError> {
+        crate::agent::memory_markdown::layers_for_scope(scope)?;
+        self.list_memories(project_id)?
+            .into_iter()
+            .filter(|memory| memory.scope == scope)
+            .map(memory_view)
+            .collect()
+    }
+
     fn active_memories_for_project(
         &self,
         project_id: Option<&str>,
@@ -928,10 +962,13 @@ impl AgentStore {
 
     pub fn set_memory_enabled(&self, id: &str, enabled: bool) -> Result<(), AgentError> {
         self.with_conn(|conn| {
-            conn.execute(
+            let changed = conn.execute(
                 "UPDATE memories SET enabled = ?1, updated_at = ?2 WHERE id = ?3",
                 params![enabled as i64, Utc::now().to_rfc3339(), id],
             )?;
+            if changed == 0 {
+                return Err(AgentError::new("memory_not_found", "记忆不存在。"));
+            }
             Ok(())
         })
     }
@@ -1107,6 +1144,24 @@ fn map_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> {
     })
 }
 
+fn memory_view(memory: MemoryRecord) -> Result<MemoryViewRecord, AgentError> {
+    let layers = crate::agent::memory_markdown::layers_for_display(&memory.scope, &memory.body)?
+        .into_iter()
+        .map(|(name, content)| MemoryViewLayer { name, content })
+        .collect();
+    Ok(MemoryViewRecord {
+        id: memory.id,
+        scope: memory.scope,
+        project_id: memory.project_id,
+        project_name: memory.project_name,
+        title: memory.title,
+        layers,
+        enabled: memory.enabled,
+        source_conversation_id: memory.source_conversation_id,
+        updated_at: memory.updated_at,
+    })
+}
+
 fn migrate_pending_asks(conn: &Connection) -> Result<(), AgentError> {
     let exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pending_asks')",
@@ -1239,6 +1294,96 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn memory_views_filter_scope_and_project_with_ordered_layers() {
+        let store = AgentStore::default();
+        store.open(":memory:".into()).unwrap();
+        let project_a = store
+            .create_conversation(
+                Some("项目 A".into()),
+                Some(("c:/models/a.cmo3", "C:/models/A.cmo3")),
+            )
+            .unwrap();
+        let project_b = store
+            .create_conversation(
+                Some("项目 B".into()),
+                Some(("c:/models/b.cmo3", "C:/models/B.cmo3")),
+            )
+            .unwrap();
+
+        store
+            .upsert_memory(MemoryUpsertInput {
+                id: None,
+                scope: "project".into(),
+                kind: "stage".into(),
+                project_id: project_a.project_id.clone(),
+                title: "A 阶段".into(),
+                body: "## Overview\nA 摘要\n## Stage\nA 阶段内容".into(),
+                enabled: Some(true),
+                source_conversation_id: Some(project_a.id.clone()),
+            })
+            .unwrap();
+        store
+            .upsert_memory(MemoryUpsertInput {
+                id: None,
+                scope: "project".into(),
+                kind: "stage".into(),
+                project_id: project_b.project_id,
+                title: "B 阶段".into(),
+                body: "## Overview\nB 摘要".into(),
+                enabled: Some(true),
+                source_conversation_id: Some(project_b.id),
+            })
+            .unwrap();
+        let legacy = store
+            .upsert_memory(MemoryUpsertInput {
+                id: None,
+                scope: "global".into(),
+                kind: "experience".into(),
+                project_id: None,
+                title: "旧经验".into(),
+                body: "旧版纯文本经验".into(),
+                enabled: Some(false),
+                source_conversation_id: None,
+            })
+            .unwrap();
+
+        let project_views = store
+            .list_memory_views("project", project_a.project_id)
+            .unwrap();
+        assert_eq!(project_views.len(), 1);
+        assert_eq!(project_views[0].title, "A 阶段");
+        assert_eq!(
+            project_views[0]
+                .layers
+                .iter()
+                .map(|layer| layer.name.as_str())
+                .collect::<Vec<_>>(),
+            crate::agent::memory_markdown::PROJECT_LAYERS
+        );
+        assert_eq!(project_views[0].layers[1].content, "A 阶段内容");
+        assert!(project_views[0].layers[2].content.is_empty());
+
+        let global_views = store.list_memory_views("global", None).unwrap();
+        assert_eq!(global_views.len(), 1);
+        assert_eq!(global_views[0].id, legacy.id);
+        assert!(!global_views[0].enabled);
+        assert_eq!(global_views[0].layers[0].content, "旧版纯文本经验");
+        assert!(global_views[0]
+            .layers
+            .iter()
+            .skip(1)
+            .all(|layer| layer.content.is_empty()));
+
+        assert_eq!(
+            store
+                .set_memory_enabled("missing-memory", true)
+                .unwrap_err()
+                .code,
+            "memory_not_found"
+        );
     }
 
     #[test]

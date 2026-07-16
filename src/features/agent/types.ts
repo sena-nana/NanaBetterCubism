@@ -38,16 +38,19 @@ export interface ProjectRecord {
 }
 
 export type MemoryScope = "project" | "global";
-export type MemoryKind = "stage" | "experience";
+
+export interface MemoryLayer {
+  name: string;
+  content: string;
+}
 
 export interface MemoryRecord {
   id: string;
   scope: MemoryScope;
-  kind: MemoryKind;
   projectId: string | null;
   projectName: string | null;
   title: string;
-  body: string;
+  layers: MemoryLayer[];
   enabled: boolean;
   sourceConversationId: string | null;
   updatedAt: string;
