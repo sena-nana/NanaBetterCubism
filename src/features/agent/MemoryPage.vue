@@ -93,7 +93,7 @@ async function toggle(memory: MemoryRecord, enabled: boolean) {
         <UiEmptyState
           v-if="!projectMemories.length"
           title="暂无项目阶段记忆"
-          description="在对话中绑定项目并整理记忆后会出现在这里。"
+          description="Agent 在相关任务中保存的项目进展会出现在这里。"
           agent-id="agent.memory.project-empty"
         />
         <article
@@ -126,7 +126,7 @@ async function toggle(memory: MemoryRecord, enabled: boolean) {
         <UiEmptyState
           v-if="!globalMemories.length"
           title="暂无全局经验"
-          description="整理记忆时提炼的可迁移经验会显示在这里。"
+          description="Agent 保存的可迁移 Live2D 经验会显示在这里。"
           agent-id="agent.memory.global-empty"
         />
         <article

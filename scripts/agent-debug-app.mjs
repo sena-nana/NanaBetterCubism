@@ -27,7 +27,6 @@ const APP_TARGETS = [
   ["agent.chat.input", CHAT_COMPOSER, "`${agentIdPrefix}.input`"],
   ["agent.chat.ask", CHAT_COMPOSER, "`${agentIdPrefix}.ask`"],
   ["agent.chat.plan", CHAT_PAGE, "agent.chat.plan"],
-  ["agent.chat.consolidate", CHAT_PAGE, "agent.chat.consolidate"],
   ["agent.memory", MEMORY_PAGE, "agent.memory"],
   ["settings.llm", LLM_SETTINGS, "settings.llm"],
   ["settings.llm.save", LLM_SETTINGS, "settings.llm.save"],

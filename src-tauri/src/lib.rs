@@ -4,11 +4,11 @@ mod protocol;
 mod service;
 
 use agent::{
-    agent_answer_question, agent_cancel_turn, agent_consolidate_memory, agent_create_conversation,
+    agent_answer_question, agent_cancel_turn, agent_create_conversation,
     agent_decide_computer_operation, agent_delete_conversation, agent_get_messages,
     agent_get_pending_user_action, agent_get_plan, agent_list_conversations, agent_list_projects,
     agent_send_message, agent_set_conversation_pinned, llm_get_config, llm_set_config,
-    llm_test_connection, memory_list, memory_set_enabled, memory_upsert, AgentRuntime, AgentStore,
+    llm_test_connection, memory_list, memory_set_enabled, AgentRuntime, AgentStore,
 };
 use service::{
     cancel_parameter_batch, connect_editor, disconnect_editor, execute_parameter_batch,
@@ -71,9 +71,7 @@ pub fn run() {
             agent_get_pending_user_action,
             agent_list_projects,
             memory_list,
-            memory_upsert,
             memory_set_enabled,
-            agent_consolidate_memory,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
