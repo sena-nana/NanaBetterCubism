@@ -381,34 +381,34 @@ async fn run_turn_inner(
         }
 
         let batch = validate_tool_call_batch(&tool_calls, &advertised)?;
-        match batch {
-            ToolCallBatch::SkillLoad => {
-                if state.skill_load_steps >= MAX_SKILL_LOAD_STEPS {
-                    return Err(AgentError::new(
-                        "step_limit",
-                        "达到 SKILL 读取步数上限，已停止。",
-                    ));
-                }
-                state.skill_load_steps += 1;
-            }
-            ToolCallBatch::Action => {
-                if state.action_steps >= MAX_ACTION_STEPS {
-                    return Err(AgentError::new(
-                        "step_limit",
-                        "达到工具调用步数上限，已停止。",
-                    ));
-                }
-                state.action_steps += 1;
-            }
-            ToolCallBatch::ComputerAction => {
-                if state.computer_action_steps >= MAX_COMPUTER_ACTION_STEPS {
-                    return Err(AgentError::new(
-                        "step_limit",
-                        "达到电脑代理操作步数上限，已停止。",
-                    ));
-                }
-                state.computer_action_steps += 1;
-            }
+        if batch.includes_skill_load && state.skill_load_steps >= MAX_SKILL_LOAD_STEPS {
+            return Err(AgentError::new(
+                "step_limit",
+                "达到 SKILL 读取步数上限，已停止。",
+            ));
+        }
+        if batch.action_kind == Some(ActionKind::Domain) && state.action_steps >= MAX_ACTION_STEPS {
+            return Err(AgentError::new(
+                "step_limit",
+                "达到工具调用步数上限，已停止。",
+            ));
+        }
+        if batch.action_kind == Some(ActionKind::Computer)
+            && state.computer_action_steps >= MAX_COMPUTER_ACTION_STEPS
+        {
+            return Err(AgentError::new(
+                "step_limit",
+                "达到电脑代理操作步数上限，已停止。",
+            ));
+        }
+
+        if batch.includes_skill_load {
+            state.skill_load_steps += 1;
+        }
+        match batch.action_kind {
+            Some(ActionKind::Domain) => state.action_steps += 1,
+            Some(ActionKind::Computer) => state.computer_action_steps += 1,
+            None => {}
         }
 
         state.messages.push(json!({
@@ -424,18 +424,24 @@ async fn run_turn_inner(
             })).collect::<Vec<_>>(),
         }));
 
-        if batch == ToolCallBatch::SkillLoad {
-            for (tool_call_id, content) in load_skills(&mut state.active_skills, &tool_calls)? {
+        if batch.includes_skill_load {
+            let skill_calls = skill_load_calls(&tool_calls);
+            for (tool_call_id, content) in load_skills(&mut state.active_skills, &skill_calls)? {
                 state.messages.push(json!({
                     "role": "tool",
                     "tool_call_id": tool_call_id,
                     "content": content,
                 }));
             }
+        }
+        if batch.action_kind.is_none() {
             continue;
         }
 
         for call in tool_calls {
+            if call.function.name == READ_SKILL_TOOL_NAME {
+                continue;
+            }
             if cancel.load(Ordering::SeqCst) {
                 return Err(AgentError::new("cancelled", "已取消。"));
             }
@@ -536,10 +542,15 @@ fn tool_error_content(error: &AgentError) -> String {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ToolCallBatch {
-    SkillLoad,
-    Action,
-    ComputerAction,
+enum ActionKind {
+    Domain,
+    Computer,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ToolCallBatch {
+    includes_skill_load: bool,
+    action_kind: Option<ActionKind>,
 }
 
 fn validate_tool_call_batch(
@@ -564,28 +575,35 @@ fn validate_tool_call_batch(
         .iter()
         .filter(|call| crate::agent::tools::is_computer_tool(&call.function.name))
         .count();
-    if skill_calls == 0 && computer_calls == 0 {
-        Ok(ToolCallBatch::Action)
-    } else if skill_calls == 0 && computer_calls == 1 && calls.len() == 1 {
-        Ok(ToolCallBatch::ComputerAction)
-    } else if skill_calls == 0 {
+    if computer_calls > 0 && (skill_calls > 0 || computer_calls != 1 || calls.len() != 1) {
         Err(AgentError::new(
             "mixed_computer_action",
             "电脑代理工具每次只能调用一个，且不能与其他工具混用。",
         ))
-    } else if skill_calls == calls.len() {
-        Ok(ToolCallBatch::SkillLoad)
     } else {
-        Err(AgentError::new(
-            "mixed_skill_load",
-            "read_skill 不能与业务工具在同一响应中调用。",
-        ))
+        Ok(ToolCallBatch {
+            includes_skill_load: skill_calls > 0,
+            action_kind: if computer_calls == 1 {
+                Some(ActionKind::Computer)
+            } else if skill_calls < calls.len() {
+                Some(ActionKind::Domain)
+            } else {
+                None
+            },
+        })
     }
+}
+
+fn skill_load_calls(calls: &[ToolCallPayload]) -> Vec<&ToolCallPayload> {
+    calls
+        .iter()
+        .filter(|call| call.function.name == READ_SKILL_TOOL_NAME)
+        .collect()
 }
 
 fn load_skills(
     active_skills: &mut BTreeSet<String>,
-    calls: &[ToolCallPayload],
+    calls: &[&ToolCallPayload],
 ) -> Result<Vec<(String, String)>, AgentError> {
     let requested = calls
         .iter()
@@ -715,7 +733,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_batches_reject_hidden_and_mixed_calls_before_execution() {
+    fn tool_batches_allow_skill_loads_with_disclosed_domain_calls() {
         let advertised = BTreeSet::from(["read_skill", "get_editor_snapshot"]);
         assert!(matches!(
             validate_tool_call_batch(
@@ -724,31 +742,52 @@ mod tests {
             ),
             Err(error) if error.code == "tool_not_available"
         ));
-        assert!(matches!(
+        assert_eq!(
             validate_tool_call_batch(
                 &[
                     call("1", "read_skill", r#"{"name":"parameter-editing"}"#),
                     call("2", "get_editor_snapshot", "{}"),
                 ],
                 &advertised,
-            ),
-            Err(error) if error.code == "mixed_skill_load"
-        ));
+            )
+            .unwrap(),
+            ToolCallBatch {
+                includes_skill_load: true,
+                action_kind: Some(ActionKind::Domain),
+            }
+        );
         assert_eq!(
             validate_tool_call_batch(
                 &[call("1", "read_skill", r#"{"name":"parameter-editing"}"#)],
                 &advertised,
             )
             .unwrap(),
-            ToolCallBatch::SkillLoad
+            ToolCallBatch {
+                includes_skill_load: true,
+                action_kind: None,
+            }
         );
 
         let computer = BTreeSet::from(["perform_computer_action"]);
         assert_eq!(
             validate_tool_call_batch(&[call("1", "perform_computer_action", "{}")], &computer,)
                 .unwrap(),
-            ToolCallBatch::ComputerAction
+            ToolCallBatch {
+                includes_skill_load: false,
+                action_kind: Some(ActionKind::Computer),
+            }
         );
+        let mixed_computer = BTreeSet::from(["read_skill", "perform_computer_action"]);
+        assert!(matches!(
+            validate_tool_call_batch(
+                &[
+                    call("1", "read_skill", r#"{"name":"computer-operation"}"#),
+                    call("2", "perform_computer_action", "{}"),
+                ],
+                &mixed_computer,
+            ),
+            Err(error) if error.code == "mixed_computer_action"
+        ));
         assert!(matches!(
             validate_tool_call_batch(
                 &[
@@ -765,18 +804,33 @@ mod tests {
     fn skill_loads_are_atomic_and_idempotent() {
         let valid = call("1", "read_skill", r#"{"name":"parameter-editing"}"#);
         let mut active = BTreeSet::new();
-        let first = load_skills(&mut active, std::slice::from_ref(&valid)).unwrap();
+        let first = load_skills(&mut active, &[&valid]).unwrap();
         assert!(first[0].1.contains("# Parameter Editing"));
         assert_eq!(active, BTreeSet::from(["parameter-editing".into()]));
 
-        let repeated = load_skills(&mut active, std::slice::from_ref(&valid)).unwrap();
+        let repeated = load_skills(&mut active, &[&valid]).unwrap();
         assert!(repeated[0].1.contains("无需重复读取"));
         assert_eq!(active.len(), 1);
 
         let invalid = call("2", "read_skill", r#"{"name":"missing"}"#);
         let mut empty = BTreeSet::new();
-        assert!(load_skills(&mut empty, &[valid, invalid]).is_err());
+        assert!(load_skills(&mut empty, &[&valid, &invalid]).is_err());
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn mixed_batches_only_parse_skill_calls_as_skill_loads() {
+        let calls = [
+            call("1", "read_skill", r#"{"name":"parameter-editing"}"#),
+            call("2", "get_editor_snapshot", "{}"),
+        ];
+        let skill_calls = skill_load_calls(&calls);
+        let mut active = BTreeSet::new();
+        let results = load_skills(&mut active, &skill_calls).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, "1");
+        assert_eq!(active, BTreeSet::from(["parameter-editing".into()]));
     }
 
     #[test]
