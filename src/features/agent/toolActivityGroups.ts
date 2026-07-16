@@ -23,6 +23,16 @@ export interface ToolActivityGroupPresentation extends ToolActivityPresentation 
   mode: "current" | "single" | "multiple" | "failed";
 }
 
+function summarizeToolLabels(items: ToolActivityPresentation[]) {
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    counts.set(item.label, (counts.get(item.label) ?? 0) + 1);
+  }
+  return [...counts]
+    .map(([label, count]) => count > 1 ? `${label} ×${count}` : label)
+    .join("、");
+}
+
 export function buildConversationTimeline(messages: ChatMessage[]): ConversationTimelineEntry[] {
   const timeline: ConversationTimelineEntry[] = [];
   for (const message of messages) {
@@ -55,13 +65,8 @@ export function toolActivityGroupPresentation(
 
   const failed = items.filter((item) => item.status === "failed");
   if (failed.length) {
-    const onlyItem = items.length === 1;
     return {
-      label: onlyItem
-        ? failed[0].label
-        : failed.length === items.length
-          ? "操作失败"
-          : "部分操作失败",
+      label: summarizeToolLabels(items),
       detail: null,
       status: "failed",
       count: items.length,
@@ -71,7 +76,7 @@ export function toolActivityGroupPresentation(
 
   if (items.length > 1 && items.every((item) => item.status === "finished")) {
     return {
-      label: "进行了多个操作",
+      label: summarizeToolLabels(items),
       detail: null,
       status: "finished",
       count: items.length,
@@ -80,7 +85,7 @@ export function toolActivityGroupPresentation(
   }
 
   const item = items[items.length - 1] ?? {
-    label: "执行操作",
+    label: "未知工具",
     detail: null,
     status: "unknown" as const,
   };

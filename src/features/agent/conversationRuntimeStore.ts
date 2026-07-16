@@ -155,6 +155,7 @@ export function beginConversationTurn(conversationId: string, content: string) {
     role: "user",
     content,
     toolName: null,
+    toolDisplayName: null,
     toolStatus: null,
     createdAt: new Date().toISOString(),
   });
@@ -236,6 +237,7 @@ function appendDelta(conversationId: string, text: string) {
       role: "assistant",
       content: text,
       toolName: null,
+      toolDisplayName: null,
       toolStatus: null,
       createdAt: new Date().toISOString(),
     });
@@ -245,23 +247,19 @@ function appendDelta(conversationId: string, text: string) {
 
 function upsertToolEvent(conversationId: string, payload: AgentToolEvent) {
   const state = runtimeState(conversationId);
-  const active = [...state.messages]
-    .reverse()
-    .find(
-      (message) =>
-        message.role === "tool" &&
-        message.toolName === payload.toolName &&
-        message.toolStatus === "started",
-    );
-  if (active && payload.status !== "started") {
+  const messageId = `tool-${payload.toolCallId}`;
+  const active = state.messages.find((message) => message.id === messageId);
+  if (active) {
     active.toolStatus = payload.status;
     active.content = payload.summary;
+    active.toolDisplayName = payload.toolDisplayName;
   } else {
     state.messages.push({
-      id: nextLocalId("tool"),
+      id: messageId,
       role: "tool",
       content: payload.summary,
       toolName: payload.toolName,
+      toolDisplayName: payload.toolDisplayName,
       toolStatus: payload.status,
       createdAt: new Date().toISOString(),
     });

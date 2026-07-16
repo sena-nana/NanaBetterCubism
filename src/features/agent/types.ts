@@ -14,6 +14,7 @@ export interface ChatMessage {
   role: MessageRole;
   content: string;
   toolName: string | null;
+  toolDisplayName: string | null;
   toolStatus: string | null;
   createdAt: string;
 }
@@ -78,7 +79,9 @@ export interface AgentTurnDelta {
 
 export interface AgentToolEvent {
   conversationId: string;
+  toolCallId: string;
   toolName: string;
+  toolDisplayName: string;
   status: "started" | "finished" | "failed";
   summary: string;
 }

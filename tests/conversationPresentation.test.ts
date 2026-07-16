@@ -15,6 +15,7 @@ function message(overrides: Partial<ChatMessage>): ChatMessage {
     role: "assistant",
     content: "content",
     toolName: null,
+    toolDisplayName: null,
     toolStatus: null,
     createdAt: "2026-07-15T00:00:00Z",
     ...overrides,
@@ -119,19 +120,34 @@ describe("成熟对话展示", () => {
     const finished = toolActivityPresentation(message({
       role: "tool",
       toolName: "get_editor_snapshot",
+      toolDisplayName: "检查 Editor 状态",
       toolStatus: "finished",
       content: "{\"state\":\"ready\"}",
     }));
     const failed = toolActivityPresentation(message({
       role: "tool",
       toolName: "execute_parameter_batch",
+      toolDisplayName: "应用参数修改",
       toolStatus: "failed",
       content: "操作未提交",
     }));
 
     expect(finished.status).toBe("finished");
+    expect(finished.label).toBe("检查 Editor 状态");
     expect(finished.detail).toBeNull();
     expect(failed.status).toBe("failed");
     expect(failed.detail).toBe("操作未提交");
   });
+
+  it("未识别的历史工具保持真实未知状态", () => {
+    const unknown = toolActivityPresentation(message({
+      role: "tool",
+      toolName: "retired_tool",
+      toolDisplayName: null,
+      toolStatus: "finished",
+    }));
+
+    expect(unknown.label).toBe("未知工具");
+  });
+
 });

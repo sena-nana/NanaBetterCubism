@@ -61,7 +61,10 @@ describe("工具调用折叠展示", () => {
     ]);
     expect(timeline[1]?.kind === "tool-group" && timeline[1].messages).toEqual([first, second]);
     expect(timeline[3]?.kind === "tool-group" && timeline[3].messages).toEqual([third]);
-    expect(toolActivityGroupPresentation([first, second]).mode).toBe("multiple");
+    expect(toolActivityGroupPresentation([first, second])).toMatchObject({
+      label: "检查 Editor 状态、预览参数修改",
+      mode: "multiple",
+    });
     expect(toolActivityGroupPresentation([third]).mode).toBe("single");
   });
 
@@ -146,6 +149,8 @@ describe("工具调用折叠展示", () => {
 
     const group = view.container.querySelector<HTMLElement>("[data-summary-mode='failed']")!;
     expect(group.dataset.status).toBe("failed");
+    expect(screen.getByRole("button", { expanded: false }).textContent)
+      .toContain("检查 Editor 状态、应用参数修改");
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.queryByText(successfulPayload)).toBeNull();
 

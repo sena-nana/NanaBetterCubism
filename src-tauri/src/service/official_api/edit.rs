@@ -16,6 +16,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
     let mut specs = vec![
         preview(
             "preview_add_parameter_key",
+            "预览添加参数关键点",
             "AddParameterKey",
             "预览给对象添加参数关键点。",
             false,
@@ -27,6 +28,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         preview(
             "preview_delete_parameter_key",
+            "预览删除参数关键点",
             "DeleteParameterKey",
             "预览删除参数关键点。",
             true,
@@ -39,6 +41,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         preview(
             "preview_move_parameter_key",
+            "预览移动参数关键点",
             "MoveParameterKey",
             "预览移动参数关键点。",
             true,
@@ -53,6 +56,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         preview(
             "preview_add_parameter",
+            "预览添加参数",
             "AddParameter",
             "预览添加参数。",
             false,
@@ -68,6 +72,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         preview(
             "preview_add_parameter_group",
+            "预览添加参数组",
             "AddParameterGroup",
             "预览添加参数组。",
             false,
@@ -75,6 +80,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         preview(
             "preview_edit_parameter",
+            "预览编辑参数",
             "EditParameter",
             "预览编辑参数定义。",
             false,
@@ -90,6 +96,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         preview(
             "preview_edit_parameter_group",
+            "预览编辑参数组",
             "EditParameterGroup",
             "预览编辑参数组。",
             false,
@@ -103,6 +110,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         preview(
             "preview_delete_parameter",
+            "预览删除参数",
             "DeleteParameter",
             "预览删除参数。",
             true,
@@ -110,6 +118,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         preview(
             "preview_delete_parameter_group",
+            "预览删除参数组",
             "DeleteParameterGroup",
             "预览删除参数组。",
             true,
@@ -117,6 +126,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         preview(
             "preview_move_parameter",
+            "预览移动参数",
             "MoveParameter",
             "预览移动参数到参数组及指定位置。",
             true,
@@ -128,6 +138,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         preview(
             "preview_move_parameter_group",
+            "预览移动参数组",
             "MoveParameterGroup",
             "预览移动参数组顺序。",
             true,
@@ -138,6 +149,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         preview(
             "preview_add_selected_objects",
+            "预览添加对象选择",
             "AddSelectedObjects",
             "预览把对象加入当前选择。",
             false,
@@ -145,6 +157,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         preview(
             "preview_clear_selected_objects",
+            "预览清空对象选择",
             "ClearSelectedObjects",
             "预览清空当前对象选择。",
             false,
@@ -152,6 +165,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         preview(
             "preview_delete_object",
+            "预览删除对象",
             "DeleteObject",
             "预览从 Part 面板删除对象。",
             true,
@@ -159,6 +173,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         preview(
             "preview_move_object_on_parts_palette",
+            "预览移动 Part 对象",
             "MoveObjectOnPartsPalette",
             "预览移动 Part 面板中的对象。",
             true,
@@ -171,6 +186,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         preview(
             "preview_add_part",
+            "预览添加 Part",
             "AddPart",
             "预览添加 Part。",
             false,
@@ -201,6 +217,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
     ]);
     specs.push(preview(
         "preview_edit_part",
+        "预览编辑 Part",
         "EditPart",
         "预览编辑 Part 属性。",
         false,
@@ -224,6 +241,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
     ]);
     specs.push(preview(
         "preview_edit_art_mesh",
+        "预览编辑 ArtMesh",
         "EditArtMesh",
         "预览编辑 ArtMesh 的已公开属性；不编辑网格几何。",
         false,
@@ -238,6 +256,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
     ]);
     specs.push(preview(
         "preview_edit_glue",
+        "预览编辑 Glue",
         "EditGlue",
         "预览编辑已有 Glue 属性；不创建 Glue。",
         false,
@@ -253,6 +272,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
     ];
     specs.push(preview(
         "preview_add_rotation_deformer",
+        "预览添加 Rotation Deformer",
         "AddRotationDeformer",
         "预览添加 Rotation Deformer。",
         false,
@@ -269,6 +289,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
     ]);
     specs.push(preview(
         "preview_add_warp_deformer",
+        "预览添加 Warp Deformer",
         "AddWarpDeformer",
         "预览添加 Warp Deformer。",
         false,
@@ -289,6 +310,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
     ]);
     specs.push(preview(
         "preview_edit_rotation_deformer",
+        "预览编辑 Rotation Deformer",
         "EditRotationDeformer",
         "预览编辑 Rotation Deformer。",
         false,
@@ -310,6 +332,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
     ]);
     specs.push(preview(
         "preview_edit_warp_deformer",
+        "预览编辑 Warp Deformer",
         "EditWarpDeformer",
         "预览编辑 Warp Deformer。",
         false,

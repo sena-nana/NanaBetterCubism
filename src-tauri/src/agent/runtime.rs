@@ -4,7 +4,8 @@ use crate::agent::llm::{
 };
 use crate::agent::skills::{self, MAX_SKILL_LOAD_STEPS, READ_SKILL_TOOL_NAME};
 use crate::agent::tools::{
-    advertised_tool_names, execute_tool, tool_definitions, ToolExecutionContext, ToolOutcome,
+    advertised_tool_names, emit_tool, execute_tool, tool_definitions, ToolExecutionContext,
+    ToolOutcome,
 };
 use crate::agent::{
     emit_conversations_changed, AgentError, AgentRuntime, AgentTurnState, PendingContinuation,
@@ -404,7 +405,71 @@ async fn run_turn_inner(
 
         if batch.includes_skill_load {
             let skill_calls = skill_load_calls(&tool_calls);
-            for (tool_call_id, content) in load_skills(&mut state.active_skills, &skill_calls)? {
+            for call in &skill_calls {
+                emit_tool(
+                    app,
+                    conversation_id,
+                    &call.id,
+                    READ_SKILL_TOOL_NAME,
+                    "started",
+                    "",
+                );
+            }
+            let loaded = match load_skills(&mut state.active_skills, &skill_calls) {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    for call in &skill_calls {
+                        emit_tool(
+                            app,
+                            conversation_id,
+                            &call.id,
+                            READ_SKILL_TOOL_NAME,
+                            "failed",
+                            &error.message,
+                        );
+                        let _ = runtime.store.append_message(
+                            conversation_id,
+                            "tool",
+                            &error.message,
+                            Some(READ_SKILL_TOOL_NAME),
+                            Some("failed"),
+                        );
+                        let _ = runtime.store.append_tool_trace(
+                            conversation_id,
+                            &call.id,
+                            READ_SKILL_TOOL_NAME,
+                            &call.function.arguments,
+                            &error.code,
+                            "failed",
+                        );
+                    }
+                    return Err(error);
+                }
+            };
+            for (call, (tool_call_id, content)) in skill_calls.iter().zip(loaded) {
+                emit_tool(
+                    app,
+                    conversation_id,
+                    &tool_call_id,
+                    READ_SKILL_TOOL_NAME,
+                    "finished",
+                    "已读取任务技能",
+                );
+                let _ = runtime.store.append_message(
+                    conversation_id,
+                    "tool",
+                    "已读取任务技能",
+                    Some(READ_SKILL_TOOL_NAME),
+                    Some("finished"),
+                );
+                let _ = runtime.store.append_tool_trace(
+                    conversation_id,
+                    &tool_call_id,
+                    READ_SKILL_TOOL_NAME,
+                    &call.function.arguments,
+                    "skill_loaded",
+                    "finished",
+                );
                 state.messages.push(json!({
                     "role": "tool",
                     "tool_call_id": tool_call_id,

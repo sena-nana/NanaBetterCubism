@@ -33,6 +33,7 @@ pub(super) struct ToolSpec {
     pub(super) tool_name: &'static str,
     pub(super) method: &'static str,
     pub(super) description: &'static str,
+    pub(super) display_name: &'static str,
     pub(super) mode: ToolMode,
     pub(super) fields: Vec<FieldSpec>,
     pub(super) uses_model: bool,
@@ -164,6 +165,7 @@ pub(super) fn choice(
 
 pub(super) fn direct(
     tool_name: &'static str,
+    display_name: &'static str,
     method: &'static str,
     description: &'static str,
     uses_model: bool,
@@ -173,6 +175,7 @@ pub(super) fn direct(
         tool_name,
         method,
         description,
+        display_name,
         mode: ToolMode::Direct,
         fields,
         uses_model,
@@ -182,6 +185,7 @@ pub(super) fn direct(
 
 pub(super) fn preview(
     tool_name: &'static str,
+    display_name: &'static str,
     method: &'static str,
     description: &'static str,
     destructive: bool,
@@ -191,6 +195,7 @@ pub(super) fn preview(
         tool_name,
         method,
         description,
+        display_name,
         mode: ToolMode::Preview,
         fields,
         uses_model: true,

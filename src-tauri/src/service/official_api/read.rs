@@ -67,6 +67,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
     vec![
         direct(
             "get_parameter_values",
+            "读取参数值",
             "GetParameterValues",
             "读取当前模型的参数值；不包含动画信息。",
             true,
@@ -74,6 +75,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         direct(
             "set_parameter_values",
+            "设置临时参数值",
             "SetParameterValues",
             "向当前模型的 Editor 临时参数缓冲区写入参数值。",
             true,
@@ -81,6 +83,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         direct(
             "get_parameters",
+            "读取参数定义",
             "GetParameters",
             "读取当前模型参数及关键点定义。",
             true,
@@ -88,6 +91,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         direct(
             "get_parameter_groups",
+            "读取参数组",
             "GetParameterGroups",
             "读取当前模型的参数组。",
             true,
@@ -95,6 +99,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         direct(
             "list_editor_documents",
+            "列出 Editor 文档",
             "GetDocuments",
             "列出 Editor 当前打开的建模、物理和动画文档。",
             false,
@@ -102,6 +107,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         direct(
             "get_editor_document",
+            "读取 Editor 文档",
             "GetDocument",
             "按 list_editor_documents 返回的 documentRef 读取文档。",
             false,
@@ -109,6 +115,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         direct(
             "get_current_document",
+            "读取当前文档",
             "GetCurrentDocumentUID",
             "读取 Editor 当前文档信息。",
             false,
@@ -116,6 +123,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         direct(
             "get_current_model",
+            "检查当前模型",
             "GetCurrentModelUID",
             "确认 Editor 当前是否有模型。",
             false,
@@ -123,6 +131,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         direct(
             "get_current_edit_mode",
+            "读取编辑模式",
             "GetCurrentEditMode",
             "读取 Editor 当前编辑模式。",
             false,
@@ -130,6 +139,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         direct(
             "clear_parameter_values",
+            "清除临时参数值",
             "ClearParameterValues",
             "清除当前模型由外部应用写入的临时参数值。",
             true,
@@ -137,6 +147,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         direct(
             "get_physics_info",
+            "读取物理设置",
             "GetPhysicsInfo",
             "访问物理设置编辑器的计算 FPS 接口。",
             true,
@@ -144,6 +155,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         direct(
             "send_cubism_log",
+            "发送 Cubism 日志",
             "SendCubismLog",
             "向 Cubism Editor 日志面板发送一条日志。",
             false,
@@ -155,6 +167,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         direct(
             "notify_physics_file_exported",
+            "监听物理文件导出",
             "NotifyPhysicsFileExported",
             "启用或停用物理设置文件导出通知。",
             false,
@@ -162,6 +175,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         direct(
             "notify_moc_file_exported",
+            "监听 MOC3 文件导出",
             "NotifyMocFileExported",
             "启用或停用 MOC3 及相关文件导出通知。",
             false,
@@ -169,6 +183,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         direct(
             "notify_motion_file_exported",
+            "监听 Motion 文件导出",
             "NotifyMotionFileExported",
             "启用或停用 motion 文件导出通知。",
             false,
@@ -176,6 +191,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         direct(
             "notify_motion_sync_file_exported",
+            "监听 MotionSync 文件导出",
             "NotifyMotionSyncFileExported",
             "启用或停用 motion-sync 文件导出通知。",
             false,
@@ -183,6 +199,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         direct(
             "notify_change_edit_mode",
+            "监听编辑模式变化",
             "NotifyChangeEditMode",
             "启用或停用 Editor 模式切换通知。",
             false,
@@ -190,6 +207,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         direct(
             "get_parameter_keys",
+            "读取参数关键点",
             "GetParameterKeys",
             "读取对象关联参数的关键点值。",
             true,
@@ -197,6 +215,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         direct(
             "get_objects_by_parameter_key",
+            "读取关键点关联对象",
             "GetObjectsByParameterKeys",
             "读取与指定参数关键点关联的对象。",
             true,
@@ -207,6 +226,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         direct(
             "get_parameter_structure",
+            "读取参数结构",
             "GetParameterStructure",
             "读取当前模型的完整参数与参数组结构。",
             true,
@@ -214,6 +234,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         direct(
             "get_selected_objects",
+            "读取已选对象",
             "GetSelectedObjecs",
             "读取当前模型已选择的对象 ID。",
             true,
@@ -221,6 +242,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         direct(
             "get_part_structure",
+            "读取 Part 结构",
             "GetPartStructure",
             "读取当前模型的 Part 与对象层级。",
             true,
@@ -228,6 +250,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         direct(
             "get_object",
+            "读取对象属性",
             "GetObject",
             "读取 Part、ArtMesh、Glue 或 Deformer 属性。",
             true,
@@ -238,6 +261,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         ),
         direct(
             "get_deformer_structure",
+            "读取 Deformer 结构",
             "GetDeformerStructure",
             "读取当前模型的 Deformer 层级。",
             true,

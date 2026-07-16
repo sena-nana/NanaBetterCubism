@@ -5,6 +5,7 @@ use crate::agent::store::{
     ChatMessage, ConversationPlan, ConversationSummary, LlmConfigInput, LlmConfigView,
     MemoryRecord, ProjectRecord,
 };
+use crate::agent::tools::tool_display_name;
 use crate::agent::{
     emit_conversations_changed, AgentError, AgentRuntime, CancelTurnResult, PendingUserAction,
 };
@@ -19,6 +20,37 @@ pub struct LlmTestResult {
     pub ok: bool,
     pub message: String,
     pub models: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatMessageView {
+    id: String,
+    role: String,
+    content: String,
+    tool_name: Option<String>,
+    tool_display_name: Option<String>,
+    tool_status: Option<String>,
+    created_at: String,
+}
+
+impl From<ChatMessage> for ChatMessageView {
+    fn from(message: ChatMessage) -> Self {
+        let tool_display_name = message
+            .tool_name
+            .as_deref()
+            .and_then(tool_display_name)
+            .map(str::to_string);
+        Self {
+            id: message.id,
+            role: message.role,
+            content: message.content,
+            tool_name: message.tool_name,
+            tool_display_name,
+            tool_status: message.tool_status,
+            created_at: message.created_at,
+        }
+    }
 }
 
 fn runtime(app: &AppHandle) -> Result<Arc<AgentRuntime>, AgentError> {
@@ -102,10 +134,13 @@ pub async fn agent_delete_conversation(
 pub async fn agent_get_messages(
     app: AppHandle,
     conversation_id: String,
-) -> Result<Vec<ChatMessage>, AgentError> {
+) -> Result<Vec<ChatMessageView>, AgentError> {
     let runtime = runtime(&app)?;
     runtime.store.ensure_active_conversation(&conversation_id)?;
-    runtime.store.get_messages(&conversation_id)
+    runtime
+        .store
+        .get_messages(&conversation_id)
+        .map(|messages| messages.into_iter().map(ChatMessageView::from).collect())
 }
 
 #[tauri::command]

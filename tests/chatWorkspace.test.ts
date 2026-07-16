@@ -98,6 +98,7 @@ function message(id: string, content: string): ChatMessage {
     role: "assistant",
     content,
     toolName: null,
+    toolDisplayName: null,
     toolStatus: null,
     createdAt: "2026-07-15T00:00:00Z",
   };
@@ -275,6 +276,53 @@ describe("对话工作区", () => {
 
     await router.push("/chats/a");
     expect(await screen.findByText("A 后台输出")).toBeTruthy();
+  });
+
+  it("按调用标识合并工具状态并展示后端可读名称", async () => {
+    await renderChat("a");
+
+    listeners.tool?.({
+      conversationId: "a",
+      toolCallId: "call-parameter-1",
+      toolName: "get_parameter_values",
+      toolDisplayName: "读取参数值",
+      status: "started",
+      summary: "",
+    });
+    expect(await screen.findByText("读取参数值")).toBeTruthy();
+    expect(screen.getByText("进行中")).toBeTruthy();
+
+    listeners.tool?.({
+      conversationId: "a",
+      toolCallId: "call-parameter-1",
+      toolName: "get_parameter_values",
+      toolDisplayName: "读取参数值",
+      status: "finished",
+      summary: "{}",
+    });
+    expect(await screen.findByText("完成")).toBeTruthy();
+    expect(screen.getAllByText("读取参数值")).toHaveLength(1);
+
+    listeners.tool?.({
+      conversationId: "a",
+      toolCallId: "call-parameter-2",
+      toolName: "get_parameter_values",
+      toolDisplayName: "读取参数值",
+      status: "finished",
+      summary: "{}",
+    });
+    listeners.tool?.({
+      conversationId: "a",
+      toolCallId: "call-skill",
+      toolName: "read_skill",
+      toolDisplayName: "读取任务技能",
+      status: "finished",
+      summary: "已读取任务技能",
+    });
+    expect(await screen.findByText("读取参数值 ×2、读取任务技能")).toBeTruthy();
+    await fireEvent.click(screen.getByRole("button", { expanded: false }));
+    expect(screen.getAllByText("读取参数值")).toHaveLength(2);
+    expect(screen.getByText("读取任务技能")).toBeTruthy();
   });
 
   it("分别保留各对话草稿，并在后台完成后以持久化消息收口", async () => {

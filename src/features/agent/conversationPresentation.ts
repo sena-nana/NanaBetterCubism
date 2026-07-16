@@ -28,26 +28,6 @@ export function modelStatusLabel(config: LlmConfigView) {
   return config.model || "模型已配置";
 }
 
-const TOOL_LABELS: Record<string, string> = {
-  get_editor_snapshot: "检查 Editor 状态",
-  connect_editor: "连接 Cubism Editor",
-  disconnect_editor: "断开 Editor 连接",
-  find_selected_part_parameters: "读取选中 Part 参数",
-  preview_parameter_batch: "预览参数修改",
-  execute_parameter_batch: "应用参数修改",
-  cancel_parameter_batch: "取消参数修改",
-  capture_cubism_editor_window: "查看 Editor 窗口",
-  list_cubism_windows: "查找 Cubism 窗口",
-  request_computer_operation: "请求电脑操作授权",
-  capture_computer_operation_frame: "查看最新 Cubism 画面",
-  perform_computer_action: "操作 Cubism 窗口",
-  finish_computer_operation: "结束电脑操作",
-  list_memories: "读取记忆",
-  upsert_memory: "更新记忆",
-  archive_memory: "停用记忆",
-  ask_user: "等待确认",
-  update_plan: "更新计划",
-};
 
 export interface ToolActivityPresentation {
   label: string;
@@ -62,7 +42,7 @@ export function toolActivityPresentation(message: ChatMessage): ToolActivityPres
     ? message.toolStatus
     : "unknown";
   return {
-    label: TOOL_LABELS[message.toolName ?? ""] ?? "执行操作",
+    label: message.toolDisplayName ?? "未知工具",
     detail: status === "failed" ? message.content : null,
     status,
   };

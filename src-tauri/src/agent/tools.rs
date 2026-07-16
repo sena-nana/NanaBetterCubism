@@ -9,19 +9,26 @@ use crate::agent::{new_id, AgentError, AgentRuntime, PendingUserAction};
 use crate::domain::ParameterBatchInput;
 use crate::service::{CommandError, EditorService};
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{atomic::AtomicBool, Arc, LazyLock};
 use tauri::{AppHandle, Emitter};
 
-fn all_domain_tool_definitions() -> Vec<Value> {
+struct RegisteredTool {
+    schema: Value,
+    display_name: String,
+}
+
+fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
     let mut tools = vec![
         tool(
             "get_editor_snapshot",
+            "检查 Editor 状态",
             "获取 Cubism Editor 连接状态、能力门控与参数组摘要。",
             json!({"type": "object", "properties": {}}),
         ),
         tool(
             "connect_editor",
+            "连接 Cubism Editor",
             "连接本机 Cubism Editor External API。",
             json!({
                 "type": "object",
@@ -31,16 +38,19 @@ fn all_domain_tool_definitions() -> Vec<Value> {
         ),
         tool(
             "disconnect_editor",
+            "断开 Editor 连接",
             "断开 Cubism Editor 连接。",
             json!({"type": "object", "properties": {}}),
         ),
         tool(
             "find_selected_part_parameters",
+            "读取选中 Part 参数",
             "查询 Editor 当前选中 Part 子树关联的参数。",
             json!({"type": "object", "properties": {}}),
         ),
         tool(
             "preview_parameter_batch",
+            "预览参数修改",
             "校验并预览批量创建参数，返回 previewId。写操作必须先 preview。",
             json!({
                 "type": "object",
@@ -50,6 +60,7 @@ fn all_domain_tool_definitions() -> Vec<Value> {
         ),
         tool(
             "execute_parameter_batch",
+            "应用参数修改",
             "执行已通过预览的参数批量创建。",
             json!({
                 "type": "object",
@@ -59,6 +70,7 @@ fn all_domain_tool_definitions() -> Vec<Value> {
         ),
         tool(
             "cancel_parameter_batch",
+            "取消参数修改",
             "取消进行中的参数批量创建事务。",
             json!({
                 "type": "object",
@@ -68,6 +80,7 @@ fn all_domain_tool_definitions() -> Vec<Value> {
         ),
         tool(
             "capture_cubism_editor_window",
+            "查看 Editor 窗口",
             "按窗口标题匹配截取 Cubism Editor 窗口。",
             json!({
                 "type": "object",
@@ -78,6 +91,7 @@ fn all_domain_tool_definitions() -> Vec<Value> {
         ),
         tool(
             "list_memories",
+            "读取记忆",
             "读取已启用的当前项目阶段记忆与全局 Live2D 经验。",
             json!({
                 "type": "object",
@@ -87,6 +101,7 @@ fn all_domain_tool_definitions() -> Vec<Value> {
         ),
         tool(
             "upsert_memory",
+            "保存记忆",
             "保存或更新一条记忆；project 自动保存为阶段记忆，global 自动保存为 Live2D 经验。",
             json!({
                 "type": "object",
@@ -102,6 +117,7 @@ fn all_domain_tool_definitions() -> Vec<Value> {
         ),
         tool(
             "archive_memory",
+            "停用记忆",
             "停用一条记忆（enabled=false）。",
             json!({
                 "type": "object",
@@ -112,6 +128,7 @@ fn all_domain_tool_definitions() -> Vec<Value> {
         ),
         tool(
             "ask_user",
+            "等待确认",
             "向用户提问并暂停，等待回答后继续。",
             json!({
                 "type": "object",
@@ -124,6 +141,7 @@ fn all_domain_tool_definitions() -> Vec<Value> {
         ),
         tool(
             "update_plan",
+            "更新计划",
             "更新当前对话的计划步骤。",
             json!({
                 "type": "object",
@@ -146,6 +164,7 @@ fn all_domain_tool_definitions() -> Vec<Value> {
         ),
         tool(
             "list_cubism_windows",
+            "查找 Cubism 窗口",
             "列出可供电脑代理操作选择的 Cubism 窗口；授权后可列出同进程随后打开的窗口。",
             json!({
                 "type": "object",
@@ -155,6 +174,7 @@ fn all_domain_tool_definitions() -> Vec<Value> {
         ),
         tool(
             "request_computer_operation",
+            "请求电脑操作授权",
             "仅当能力矩阵确认官方 API 缺失时，提交完整计划并请求用户授权。",
             json!({
                 "type": "object",
@@ -196,6 +216,7 @@ fn all_domain_tool_definitions() -> Vec<Value> {
         ),
         tool(
             "capture_computer_operation_frame",
+            "查看最新 Cubism 画面",
             "获取当前授权窗口的最新画面；每个手势前都必须调用。",
             json!({
                 "type": "object",
@@ -209,6 +230,7 @@ fn all_domain_tool_definitions() -> Vec<Value> {
         ),
         tool(
             "perform_computer_action",
+            "操作 Cubism 窗口",
             "基于最新 frameId 执行一个已授权手势，并立即返回新画面。",
             json!({
                 "type": "object",
@@ -225,6 +247,7 @@ fn all_domain_tool_definitions() -> Vec<Value> {
         ),
         tool(
             "finish_computer_operation",
+            "结束电脑操作",
             "以真实结果结束电脑代理操作并立即销毁授权。",
             json!({
                 "type": "object",
@@ -240,8 +263,36 @@ fn all_domain_tool_definitions() -> Vec<Value> {
             }),
         ),
     ];
-    tools.extend(crate::service::official_api::tool_definitions());
+    tools.extend(
+        crate::service::official_api::tool_definitions()
+            .into_iter()
+            .map(|schema| {
+                let display_name = tool_name(&schema)
+                    .and_then(crate::service::official_api::tool_display_name)
+                    .expect("官方 Editor 工具必须具有可读名称")
+                    .to_string();
+                RegisteredTool {
+                    schema,
+                    display_name,
+                }
+            }),
+    );
     tools
+}
+
+static TOOL_DISPLAY_NAMES: LazyLock<BTreeMap<String, String>> = LazyLock::new(|| {
+    let mut names = all_domain_tool_definitions()
+        .into_iter()
+        .filter_map(|tool| {
+            tool_name(&tool.schema).map(|name| (name.to_string(), tool.display_name))
+        })
+        .collect::<BTreeMap<_, _>>();
+    names.insert(skills::READ_SKILL_TOOL_NAME.into(), "读取任务技能".into());
+    names
+});
+
+pub fn tool_display_name(name: &str) -> Option<&'static str> {
+    TOOL_DISPLAY_NAMES.get(name).map(String::as_str)
 }
 
 pub fn tool_definitions(active_skills: &BTreeSet<String>) -> Result<Vec<Value>, AgentError> {
@@ -249,7 +300,7 @@ pub fn tool_definitions(active_skills: &BTreeSet<String>) -> Result<Vec<Value>, 
     let domain_tools = all_domain_tool_definitions();
     let available = domain_tools
         .iter()
-        .filter_map(tool_name)
+        .filter_map(|tool| tool_name(&tool.schema))
         .collect::<BTreeSet<_>>();
     let missing = allowed.difference(&available).copied().collect::<Vec<_>>();
     if !missing.is_empty() {
@@ -263,7 +314,8 @@ pub fn tool_definitions(active_skills: &BTreeSet<String>) -> Result<Vec<Value>, 
     tools.extend(
         domain_tools
             .into_iter()
-            .filter(|definition| tool_name(definition).is_some_and(|name| allowed.contains(name))),
+            .filter(|tool| tool_name(&tool.schema).is_some_and(|name| allowed.contains(name)))
+            .map(|tool| tool.schema),
     );
     Ok(tools)
 }
@@ -273,7 +325,7 @@ pub fn all_tool_definitions() -> Result<Vec<Value>, AgentError> {
     let domain_tools = all_domain_tool_definitions();
     let available = domain_tools
         .iter()
-        .filter_map(tool_name)
+        .filter_map(|tool| tool_name(&tool.schema))
         .collect::<BTreeSet<_>>();
     let declared = skills::all_declared_domain_tools()?;
     if available != declared {
@@ -289,7 +341,7 @@ pub fn all_tool_definitions() -> Result<Vec<Value>, AgentError> {
         ));
     }
     let mut tools = vec![skills::read_skill_tool_definition()?];
-    tools.extend(domain_tools);
+    tools.extend(domain_tools.into_iter().map(|tool| tool.schema));
     Ok(tools)
 }
 
@@ -304,15 +356,18 @@ fn tool_name(definition: &Value) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
-fn tool(name: &str, description: &str, parameters: Value) -> Value {
-    json!({
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": description,
-            "parameters": parameters
-        }
-    })
+fn tool(name: &str, display_name: &str, description: &str, parameters: Value) -> RegisteredTool {
+    RegisteredTool {
+        schema: json!({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": description,
+                "parameters": parameters
+            }
+        }),
+        display_name: display_name.into(),
+    }
 }
 
 pub enum ToolOutcome {
@@ -343,6 +398,116 @@ fn tool_result(content: impl Into<String>) -> ToolOutcome {
 }
 
 pub async fn execute_tool(
+    context: ToolExecutionContext<'_>,
+    name: &str,
+    arguments: &str,
+) -> Result<ToolOutcome, AgentError> {
+    let app = context.app;
+    let runtime = context.runtime;
+    let conversation_id = context.conversation_id;
+    let tool_call_id = context.tool_call_id;
+    emit_tool(app, conversation_id, tool_call_id, name, "started", "");
+
+    let outcome = execute_tool_inner(context, name, arguments).await;
+    match &outcome {
+        Ok(ToolOutcome::Result { content, .. }) => {
+            let summary = if is_computer_tool(name) {
+                computer_tool_summary(name, content)
+            } else {
+                truncate_summary(content, 180)
+            };
+            emit_tool(
+                app,
+                conversation_id,
+                tool_call_id,
+                name,
+                "finished",
+                &summary,
+            );
+            let _ = runtime.store.append_message(
+                conversation_id,
+                "tool",
+                &summary,
+                Some(name),
+                Some("finished"),
+            );
+            let (trace_arguments, trace_result) = safe_tool_trace(name, arguments, content);
+            let _ = runtime.store.append_tool_trace(
+                conversation_id,
+                tool_call_id,
+                name,
+                &trace_arguments,
+                &trace_result,
+                "finished",
+            );
+        }
+        Ok(ToolOutcome::AwaitUser { .. }) => {
+            emit_tool(
+                app,
+                conversation_id,
+                tool_call_id,
+                name,
+                "finished",
+                "等待用户回答",
+            );
+            let _ = runtime.store.append_message(
+                conversation_id,
+                "tool",
+                "等待用户处理",
+                Some(name),
+                Some("finished"),
+            );
+            let (trace_arguments, trace_result) = safe_tool_trace(name, arguments, "waiting_user");
+            let _ = runtime.store.append_tool_trace(
+                conversation_id,
+                tool_call_id,
+                name,
+                &trace_arguments,
+                &trace_result,
+                "waiting_user",
+            );
+        }
+        Err(error) => {
+            if is_computer_tool(name) {
+                if error.code == "input_outcome_unknown" {
+                    runtime
+                        .computer_control
+                        .revoke_grant_for_conversation(conversation_id);
+                    emit_computer_status(app, conversation_id, ComputerOperationStatus::Unknown);
+                } else if is_terminal_computer_error(&error.code) {
+                    emit_computer_status(app, conversation_id, ComputerOperationStatus::Failed);
+                }
+            }
+            emit_tool(
+                app,
+                conversation_id,
+                tool_call_id,
+                name,
+                "failed",
+                &error.message,
+            );
+            let _ = runtime.store.append_message(
+                conversation_id,
+                "tool",
+                &error.message,
+                Some(name),
+                Some("failed"),
+            );
+            let (trace_arguments, trace_result) = safe_tool_trace(name, arguments, &error.code);
+            let _ = runtime.store.append_tool_trace(
+                conversation_id,
+                tool_call_id,
+                name,
+                &trace_arguments,
+                &trace_result,
+                "failed",
+            );
+        }
+    }
+    outcome
+}
+
+async fn execute_tool_inner(
     context: ToolExecutionContext<'_>,
     name: &str,
     arguments: &str,
@@ -689,81 +854,6 @@ pub async fn execute_tool(
         )),
     };
 
-    match &outcome {
-        Ok(ToolOutcome::Result { content, .. }) => {
-            let summary = if is_computer_tool(name) {
-                computer_tool_summary(name, content)
-            } else {
-                truncate_summary(content, 180)
-            };
-            emit_tool(app, conversation_id, name, "finished", &summary);
-            let _ = runtime.store.append_message(
-                conversation_id,
-                "tool",
-                &summary,
-                Some(name),
-                Some("finished"),
-            );
-            let (trace_arguments, trace_result) = safe_tool_trace(name, arguments, content);
-            let _ = runtime.store.append_tool_trace(
-                conversation_id,
-                tool_call_id,
-                name,
-                &trace_arguments,
-                &trace_result,
-                "finished",
-            );
-        }
-        Ok(ToolOutcome::AwaitUser { .. }) => {
-            emit_tool(app, conversation_id, name, "finished", "等待用户回答");
-            let _ = runtime.store.append_message(
-                conversation_id,
-                "tool",
-                "等待用户处理",
-                Some(name),
-                Some("finished"),
-            );
-            let (trace_arguments, trace_result) = safe_tool_trace(name, arguments, "waiting_user");
-            let _ = runtime.store.append_tool_trace(
-                conversation_id,
-                tool_call_id,
-                name,
-                &trace_arguments,
-                &trace_result,
-                "waiting_user",
-            );
-        }
-        Err(error) => {
-            if is_computer_tool(name) {
-                if error.code == "input_outcome_unknown" {
-                    runtime
-                        .computer_control
-                        .revoke_grant_for_conversation(conversation_id);
-                    emit_computer_status(app, conversation_id, ComputerOperationStatus::Unknown);
-                } else if is_terminal_computer_error(&error.code) {
-                    emit_computer_status(app, conversation_id, ComputerOperationStatus::Failed);
-                }
-            }
-            emit_tool(app, conversation_id, name, "failed", &error.message);
-            let _ = runtime.store.append_message(
-                conversation_id,
-                "tool",
-                &error.message,
-                Some(name),
-                Some("failed"),
-            );
-            let (trace_arguments, trace_result) = safe_tool_trace(name, arguments, &error.code);
-            let _ = runtime.store.append_tool_trace(
-                conversation_id,
-                tool_call_id,
-                name,
-                &trace_arguments,
-                &trace_result,
-                "failed",
-            );
-        }
-    }
-
     outcome
 }
 
@@ -860,12 +950,21 @@ fn emit_computer_status(app: &AppHandle, conversation_id: &str, status: Computer
     );
 }
 
-fn emit_tool(app: &AppHandle, conversation_id: &str, tool_name: &str, status: &str, summary: &str) {
+pub(crate) fn emit_tool(
+    app: &AppHandle,
+    conversation_id: &str,
+    tool_call_id: &str,
+    tool_name: &str,
+    status: &str,
+    summary: &str,
+) {
     let _ = app.emit(
         "agent://tool",
         json!({
             "conversationId": conversation_id,
+            "toolCallId": tool_call_id,
             "toolName": tool_name,
+            "toolDisplayName": tool_display_name(tool_name).unwrap_or("未知工具"),
             "status": status,
             "summary": summary,
         }),
@@ -962,10 +1061,15 @@ mod tests {
     #[test]
     fn every_domain_tool_is_core_or_assigned_to_a_skill() {
         let definitions = all_tool_definitions().unwrap();
-        assert_eq!(names(&definitions).len(), definitions.len());
-        assert!(names(&definitions).contains("read_skill"));
+        let registered_names = names(&definitions);
+        assert_eq!(registered_names.len(), definitions.len());
+        assert!(registered_names.contains("read_skill"));
+        assert_eq!(tool_display_name("read_skill"), Some("读取任务技能"));
+        assert!(registered_names.iter().all(|name| {
+            tool_display_name(name).is_some_and(|display_name| !display_name.trim().is_empty())
+        }));
         for forbidden in ["read_file", "write_file", "apply_patch", "run_terminal"] {
-            assert!(!names(&definitions).contains(forbidden));
+            assert!(!registered_names.contains(forbidden));
         }
     }
 
