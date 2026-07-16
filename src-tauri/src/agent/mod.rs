@@ -334,7 +334,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_one_turn_can_own_a_conversation() {
+    async fn turns_run_concurrently_across_conversations_and_cancel_independently() {
         let runtime = AgentRuntime::default();
         runtime.store.open(":memory:".into()).unwrap();
         let conversation_a = runtime.store.create_conversation(None, None).unwrap();
@@ -345,10 +345,24 @@ mod tests {
             runtime.begin_turn(&conversation_a.id).await,
             Err(error) if error.code == "turn_in_progress"
         ));
-        assert!(runtime.begin_turn(&conversation_b.id).await.is_ok());
+        let second = runtime.begin_turn(&conversation_b.id).await.unwrap();
+        assert_eq!(runtime.cancel_flags.lock().await.len(), 2);
+
+        assert_eq!(
+            runtime.request_cancel(&conversation_a.id).await.unwrap(),
+            CancelTurnResult {
+                state: CancelTurnState::CancelRequested,
+            }
+        );
+        assert!(first.load(Ordering::SeqCst));
+        assert!(!second.load(Ordering::SeqCst));
 
         runtime.finish_turn(&conversation_a.id, &first).await;
-        assert!(runtime.begin_turn(&conversation_a.id).await.is_ok());
+        assert!(runtime.cancel_flags.lock().await.contains_key(&conversation_b.id));
+        let restarted = runtime.begin_turn(&conversation_a.id).await.unwrap();
+        runtime.finish_turn(&conversation_b.id, &second).await;
+        runtime.finish_turn(&conversation_a.id, &restarted).await;
+        assert!(runtime.cancel_flags.lock().await.is_empty());
     }
 
     #[tokio::test]

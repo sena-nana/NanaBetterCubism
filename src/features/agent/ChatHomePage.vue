@@ -13,7 +13,11 @@ import ConversationComposer from "./components/ConversationComposer.vue";
 import ConversationSurface from "./components/ConversationSurface.vue";
 import ConversationTranscript from "./components/ConversationTranscript.vue";
 import { editorStatusLabel, modelStatusLabel } from "./conversationPresentation";
-import { setConversationTurnPhase } from "./conversationRuntimeStore";
+import {
+  beginConversationTurn,
+  failConversationTurn,
+  installConversationRuntimeStore,
+} from "./conversationRuntimeStore";
 import { ensureSidebarConversationsLoaded } from "./sidebarConversations";
 import type { LlmConfigView } from "./types";
 
@@ -32,6 +36,7 @@ const canSend = computed(
 onMounted(async () => {
   void editor.initialize();
   try {
+    await installConversationRuntimeStore();
     llm.value = await getLlmConfig();
   } catch (err) {
     error.value = normalizeCommandError(err).message;
@@ -47,11 +52,16 @@ async function startConversation() {
   error.value = null;
   try {
     const created = await createConversation();
-    setConversationTurnPhase(created.id, "running");
+    const optimisticId = beginConversationTurn(created.id, content);
     try {
       await sendMessage(created.id, content);
     } catch (err) {
-      setConversationTurnPhase(created.id, "idle");
+      failConversationTurn(
+        created.id,
+        optimisticId,
+        content,
+        normalizeCommandError(err).message,
+      );
       throw err;
     }
     draft.value = "";

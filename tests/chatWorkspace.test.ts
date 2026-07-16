@@ -1,17 +1,29 @@
 import { fireEvent, render, screen } from "@testing-library/vue";
 import { createMemoryHistory, createRouter } from "vue-router";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, ref } from "vue";
 import ChatPage from "../src/features/agent/ChatPage.vue";
 import ConversationComposer from "../src/features/agent/components/ConversationComposer.vue";
+import {
+  clearConversationTurnPhase,
+  getConversationRuntime,
+} from "../src/features/agent/conversationRuntimeStore";
 import type {
+  AgentComputerOperationEvent,
   AgentPlanEvent,
+  AgentToolEvent,
+  AgentTurnDelta,
+  AgentTurnFinished,
   AgentUserActionEvent,
   ChatMessage,
 } from "../src/features/agent/types";
 
 const listeners = vi.hoisted(() => ({
+  computerOperation: null as null | ((payload: AgentComputerOperationEvent) => void),
+  delta: null as null | ((payload: AgentTurnDelta) => void),
   plan: null as null | ((payload: AgentPlanEvent) => void),
+  tool: null as null | ((payload: AgentToolEvent) => void),
+  turnFinished: null as null | ((payload: AgentTurnFinished) => void),
   userAction: null as null | ((payload: AgentUserActionEvent) => void),
 }));
 
@@ -19,7 +31,6 @@ const bridge = vi.hoisted(() => ({
   answerQuestion: vi.fn(async () => undefined),
   deleteConversation: vi.fn(async () => undefined),
   cancelTurn: vi.fn(async () => ({ state: "idle" as const })),
-  consolidateMemory: vi.fn(async () => undefined),
   decideComputerOperation: vi.fn(async () => undefined),
   getLlmConfig: vi.fn(async () => ({ baseUrl: null, model: "test-model", hasApiKey: true })),
   getMessages: vi.fn(),
@@ -30,14 +41,26 @@ const bridge = vi.hoisted(() => ({
     { id: "b", title: "会话 B", projectId: null, projectName: null, updatedAt: "", pinned: false },
   ]),
   listProjects: vi.fn(async () => []),
-  listenComputerOperation: vi.fn(async () => () => undefined),
+  listenComputerOperation: vi.fn(async (handler) => {
+    listeners.computerOperation = handler;
+    return () => undefined;
+  }),
   listenPlan: vi.fn(async (handler) => {
     listeners.plan = handler;
     return () => undefined;
   }),
-  listenToolEvent: vi.fn(async () => () => undefined),
-  listenTurnDelta: vi.fn(async () => () => undefined),
-  listenTurnFinished: vi.fn(async () => () => undefined),
+  listenToolEvent: vi.fn(async (handler) => {
+    listeners.tool = handler;
+    return () => undefined;
+  }),
+  listenTurnDelta: vi.fn(async (handler) => {
+    listeners.delta = handler;
+    return () => undefined;
+  }),
+  listenTurnFinished: vi.fn(async (handler) => {
+    listeners.turnFinished = handler;
+    return () => undefined;
+  }),
   listenUserAction: vi.fn(async (handler) => {
     listeners.userAction = handler;
     return () => undefined;
@@ -48,6 +71,18 @@ const bridge = vi.hoisted(() => ({
 }));
 
 vi.mock("../src/features/agent/bridge", () => bridge);
+
+beforeEach(() => {
+  clearConversationTurnPhase("a");
+  clearConversationTurnPhase("b");
+  bridge.answerQuestion.mockClear();
+  bridge.cancelTurn.mockClear();
+  bridge.decideComputerOperation.mockClear();
+  bridge.getMessages.mockReset().mockResolvedValue([]);
+  bridge.getPendingUserAction.mockReset().mockResolvedValue(null);
+  bridge.getPlan.mockReset().mockResolvedValue(null);
+  bridge.sendMessage.mockClear();
+});
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -168,6 +203,10 @@ describe("对话工作区", () => {
     });
     expect(screen.queryByRole("button", { name: "授权本次操作" })).toBeNull();
 
+    await router.push("/chats/b");
+    expect(await screen.findByRole("button", { name: "授权本次操作" })).toBeTruthy();
+    await router.push("/chats/a");
+
     listeners.userAction?.({ conversationId: "a", action: approval });
     await fireEvent.click(await screen.findByRole("button", { name: "授权本次操作" }));
     expect(bridge.decideComputerOperation).toHaveBeenCalledWith("approval-a", true);
@@ -196,6 +235,74 @@ describe("对话工作区", () => {
     await Promise.resolve();
     expect(screen.queryByText("A 的迟到内容")).toBeNull();
     expect(screen.getByText("B 的内容")).toBeTruthy();
+  });
+
+  it("切换后保持原对话运行，并允许另一对话同时发送", async () => {
+    const router = await renderChat("a");
+    const input = await screen.findByPlaceholderText("描述你想在 Cubism Editor 中完成的事…");
+    await fireEvent.update(input, "A 请求");
+    await fireEvent.keyDown(input, { key: "Enter" });
+    expect(bridge.sendMessage).toHaveBeenCalledWith("a", "A 请求");
+
+    await router.push("/chats/b");
+    await screen.findByRole("heading", { name: "会话 B" });
+    const inputB = screen.getByPlaceholderText("描述你想在 Cubism Editor 中完成的事…");
+    await fireEvent.update(inputB, "B 请求");
+    await fireEvent.keyDown(inputB, { key: "Enter" });
+
+    expect(bridge.sendMessage).toHaveBeenNthCalledWith(2, "b", "B 请求");
+    expect(bridge.cancelTurn).not.toHaveBeenCalled();
+    expect(getConversationRuntime("a").phase).toBe("running");
+    expect(getConversationRuntime("b").phase).toBe("running");
+    expect(getConversationRuntime("a").messages.map((item) => item.content)).toEqual(["A 请求"]);
+    expect(getConversationRuntime("b").messages.map((item) => item.content)).toEqual(["B 请求"]);
+
+    listeners.delta?.({ conversationId: "a", text: "A 后台输出" });
+    listeners.delta?.({ conversationId: "b", text: "B 前台输出" });
+    expect(await screen.findByText("B 前台输出")).toBeTruthy();
+    expect(screen.queryByText("A 后台输出")).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "停止" }));
+    expect(bridge.cancelTurn).toHaveBeenCalledWith("b");
+    expect(getConversationRuntime("a").phase).toBe("running");
+
+    await router.push("/chats/a");
+    expect(await screen.findByText("A 后台输出")).toBeTruthy();
+  });
+
+  it("分别保留各对话草稿，并在后台完成后以持久化消息收口", async () => {
+    const router = await renderChat("a");
+    const inputA = await screen.findByPlaceholderText("描述你想在 Cubism Editor 中完成的事…");
+    await fireEvent.update(inputA, "A 草稿");
+
+    await router.push("/chats/b");
+    await screen.findByRole("heading", { name: "会话 B" });
+    const inputB = screen.getByPlaceholderText("描述你想在 Cubism Editor 中完成的事…");
+    await fireEvent.update(inputB, "B 草稿");
+
+    await router.push("/chats/a");
+    expect(screen.getByPlaceholderText("描述你想在 Cubism Editor 中完成的事…")).toHaveValue(
+      "A 草稿",
+    );
+
+    await fireEvent.keyDown(
+      screen.getByPlaceholderText("描述你想在 Cubism Editor 中完成的事…"),
+      { key: "Enter" },
+    );
+    await router.push("/chats/b");
+    listeners.delta?.({ conversationId: "a", text: "A 实时片段" });
+    bridge.getMessages.mockImplementation(async (conversationId: string) =>
+      conversationId === "a" ? [message("a-final", "A 完整结果")] : [],
+    );
+    listeners.turnFinished?.({ conversationId: "a", ok: true, message: "完成" });
+    await vi.waitFor(() => expect(getConversationRuntime("a").loading).toBe(false));
+
+    expect(screen.getByPlaceholderText("描述你想在 Cubism Editor 中完成的事…")).toHaveValue(
+      "B 草稿",
+    );
+    await router.push("/chats/a");
+    expect(await screen.findByText("A 完整结果")).toBeTruthy();
+    expect(screen.queryByText("A 实时片段")).toBeNull();
+    expect(getConversationRuntime("a").phase).toBe("idle");
   });
 
   it("使用同一计划面板呈现重载状态与实时更新", async () => {
@@ -227,3 +334,15 @@ describe("对话工作区", () => {
     expect(screen.queryByText("已加载步骤")).toBeNull();
   });
 });
+
+async function renderChat(conversationId: string) {
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [{ path: "/chats/:id", component: ChatPage }],
+  });
+  await router.push(`/chats/${conversationId}`);
+  await router.isReady();
+  render({ template: "<RouterView />" }, { global: { plugins: [router] } });
+  await vi.waitFor(() => expect(bridge.getMessages).toHaveBeenCalledWith(conversationId));
+  return router;
+}
