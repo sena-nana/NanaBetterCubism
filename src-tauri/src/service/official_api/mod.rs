@@ -32,6 +32,18 @@ fn spec(name: &str) -> Option<&'static ToolSpec> {
     tool_specs().iter().find(|spec| spec.tool_name == name)
 }
 
+pub(crate) fn tool_display_name(name: &str) -> Option<&'static str> {
+    spec(name)
+        .map(|spec| spec.display_name)
+        .or_else(|| match name {
+            "list_editor_notifications" => Some("读取 Editor 通知"),
+            "execute_editor_edit" => Some("执行 Editor 修改"),
+            "get_editor_edit_result" => Some("查询 Editor 修改结果"),
+            "cancel_editor_edit" => Some("取消 Editor 修改"),
+            _ => None,
+        })
+}
+
 pub(crate) fn tool_definitions() -> Vec<Value> {
     let mut tools = tool_specs()
         .iter()
