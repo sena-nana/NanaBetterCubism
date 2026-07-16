@@ -343,12 +343,29 @@ impl AgentStore {
         &self,
         conversation_id: &str,
         title: &str,
-    ) -> Result<(), AgentError> {
+    ) -> Result<bool, AgentError> {
         self.with_conn(|conn| {
-            conn.execute(
+            let updated = conn.execute(
                 "UPDATE conversations SET title = ?1 WHERE id = ?2 AND title = '新对话'",
                 params![title, conversation_id],
             )?;
+            Ok(updated > 0)
+        })
+    }
+
+    pub fn set_conversation_title(
+        &self,
+        conversation_id: &str,
+        title: &str,
+    ) -> Result<(), AgentError> {
+        self.with_conn(|conn| {
+            let updated = conn.execute(
+                "UPDATE conversations SET title = ?1 WHERE id = ?2",
+                params![title, conversation_id],
+            )?;
+            if updated == 0 {
+                return Err(AgentError::new("not_found", "对话不存在。"));
+            }
             Ok(())
         })
     }
@@ -1488,5 +1505,22 @@ mod tests {
             Err(error) if error.code == "not_found"
         ));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn set_conversation_title_overrides_non_default_title() {
+        let store = AgentStore::default();
+        store.open(":memory:".into()).unwrap();
+        let conversation = store.create_conversation(None, None).unwrap();
+        assert!(store
+            .set_conversation_title_if_default(&conversation.id, "临时标题")
+            .unwrap());
+        assert!(!store
+            .set_conversation_title_if_default(&conversation.id, "不会生效")
+            .unwrap());
+        store
+            .set_conversation_title(&conversation.id, "AI短标题")
+            .unwrap();
+        assert_eq!(store.list_conversations().unwrap()[0].title, "AI短标题");
     }
 }
