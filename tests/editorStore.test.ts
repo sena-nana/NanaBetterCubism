@@ -31,9 +31,9 @@ describe("Editor 侧栏状态", () => {
   it("Editor 快照更新不会覆盖模型状态", async () => {
     bridge.getEditorSnapshot.mockResolvedValue(snapshot("ready", "Editor 已连接。"));
     const { appConfig } = await import("../src/app.config");
-    const { setLiliaAppConfig, SIDEBAR_FOOTER_STATUSES } = await import("@lilia/ui");
+    const { setLiliaUiConfig, SIDEBAR_FOOTER_STATUSES } = await import("@lilia/ui/shell");
     const { useEditorStore } = await import("../src/features/editor/editorStore");
-    setLiliaAppConfig(appConfig);
+    setLiliaUiConfig(appConfig);
 
     await useEditorStore().initialize();
 
@@ -58,9 +58,9 @@ describe("Editor 侧栏状态", () => {
   it("初始化失败后重复进入设置仍保留异常状态", async () => {
     bridge.getEditorSnapshot.mockRejectedValue(new Error("unavailable"));
     const { appConfig } = await import("../src/app.config");
-    const { setLiliaAppConfig, SIDEBAR_FOOTER_STATUSES } = await import("@lilia/ui");
+    const { setLiliaUiConfig, SIDEBAR_FOOTER_STATUSES } = await import("@lilia/ui/shell");
     const { useEditorStore } = await import("../src/features/editor/editorStore");
-    setLiliaAppConfig(appConfig);
+    setLiliaUiConfig(appConfig);
     const store = useEditorStore();
 
     await store.initialize();

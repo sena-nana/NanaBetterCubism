@@ -1,8 +1,7 @@
 import {
-  SIDEBAR_FOOTER_STATUS,
   SIDEBAR_FOOTER_STATUSES,
   type SidebarFooterStatus,
-} from "@lilia/ui";
+} from "@lilia/ui/shell";
 import { reactive } from "vue";
 import { getLlmConfig } from "./bridge";
 import type { LlmConfigView } from "./types";
@@ -90,8 +89,7 @@ function updateModelFooter(presentation: FooterPresentation) {
 }
 
 function footerStatus(key: string): SidebarFooterStatus | undefined {
-  return SIDEBAR_FOOTER_STATUSES.find((status) => status.key === key)
-    ?? (SIDEBAR_FOOTER_STATUSES.length === 1 ? SIDEBAR_FOOTER_STATUS : undefined);
+  return SIDEBAR_FOOTER_STATUSES.find((status) => status.key === key);
 }
 
 interface FooterPresentation {

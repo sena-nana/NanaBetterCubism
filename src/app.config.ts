@@ -1,5 +1,5 @@
 import appConfigJson from "../app.config.json";
-import type { LiliaAppConfig } from "@lilia/ui";
+import type { LiliaUiConfig } from "@lilia/ui/shell";
 import ConversationSidebarTop from "./features/agent/components/ConversationSidebarTop.vue";
 
 export const appConfig = {
@@ -10,7 +10,6 @@ export const appConfig = {
   appearance: {
     backdropTarget: "sidebar",
   },
-  shell: appConfigJson.shell,
   sidebar: {
     topContent: ConversationSidebarTop,
     nav: [
@@ -43,29 +42,10 @@ export const appConfig = {
         key: "editor",
         to: "/settings?tab=editor",
         label: "Editor 未连接",
-        title: appConfigJson.shell.statusTitle,
+        title: "在设置中连接 Cubism Editor。",
         tone: "warn",
         icon: "server",
       },
     ],
   },
-  settings: {
-    aliases: {
-      llm: "model-config",
-    },
-    defaultTab: "appearance",
-    hideHeader: true,
-    tabs: [
-      { key: "appearance", label: "外观", icon: "palette" },
-      { key: "model-config", label: "模型配置", icon: "brain" },
-      { key: "editor", label: "Editor", icon: "server" },
-      { key: "about", label: "关于", icon: "info" },
-    ],
-    sections: {
-      appearance: () => import("@lilia/ui/pages/settings/AppearanceSection"),
-      "model-config": () => import("./features/agent/settings/LlmSettingsSection.vue"),
-      editor: () => import("./features/agent/settings/EditorSettingsSection.vue"),
-      about: () => import("@lilia/ui/pages/settings/AboutSection"),
-    },
-  },
-} satisfies LiliaAppConfig;
+} satisfies LiliaUiConfig;

@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/vue";
-import { SIDEBAR_FOOTER_STATUSES, setLiliaAppConfig } from "@lilia/ui";
+import { SIDEBAR_FOOTER_STATUSES, setLiliaUiConfig } from "@lilia/ui/shell";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { appConfig } from "../src/app.config";
 import LlmSettingsSection from "../src/features/agent/settings/LlmSettingsSection.vue";
@@ -26,7 +26,7 @@ describe("模型配置", () => {
       model: "example-model",
       hasApiKey: true,
     });
-    setLiliaAppConfig(appConfig);
+    setLiliaUiConfig(appConfig);
   });
 
   it("保存配置失败时不会继续测试旧配置", async () => {

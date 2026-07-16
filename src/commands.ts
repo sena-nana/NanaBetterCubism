@@ -1,3 +1,3 @@
-import type { LiliaCommandMap } from "@lilia/ui";
+import type { LiliaCommandMap } from "@lilia/ui/commands";
 
 export const commands = {} satisfies LiliaCommandMap;
