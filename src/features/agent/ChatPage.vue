@@ -6,19 +6,9 @@ import { useEditorStore } from "../editor/editorStore";
 import {
   answerQuestion,
   cancelTurn,
-  consolidateMemory,
   decideComputerOperation,
   getLlmConfig,
-  getMessages,
-  getPendingUserAction,
-  getPlan,
   listConversations,
-  listenComputerOperation,
-  listenPlan,
-  listenToolEvent,
-  listenTurnDelta,
-  listenTurnFinished,
-  listenUserAction,
   normalizeCommandError,
   sendMessage,
 } from "./bridge";
@@ -28,51 +18,54 @@ import ConversationSurface from "./components/ConversationSurface.vue";
 import ConversationTranscript from "./components/ConversationTranscript.vue";
 import { editorStatusLabel, modelStatusLabel } from "./conversationPresentation";
 import {
+  beginConversationTurn,
+  failConversationTurn,
+  getConversationRuntime,
+  installConversationRuntimeStore,
+  loadConversationRuntime,
   setConversationTurnPhase,
-  useConversationTurn,
+  useConversationRuntime,
 } from "./conversationRuntimeStore";
 import {
   applyConversationGroup,
 } from "./sidebarConversations";
 import type {
-  AgentToolEvent,
-  ChatMessage,
-  ConversationPlan,
   ConversationSummary,
   LlmConfigView,
-  ComputerOperationStatus,
-  PendingUserAction,
 } from "./types";
 
 const route = useRoute();
 const router = useRouter();
 const editor = useEditorStore();
 const conversationId = computed(() => String(route.params.id ?? ""));
-const turn = useConversationTurn(() => conversationId.value);
+const turn = useConversationRuntime(() => conversationId.value);
+const runtime = turn.state;
 
-const messages = ref<ChatMessage[]>([]);
 const conversation = ref<ConversationSummary | null>(null);
-const plan = ref<ConversationPlan | null>(null);
-const pendingAction = ref<PendingUserAction | null>(null);
-const computerStatus = ref<ComputerOperationStatus>("idle");
-const draft = ref("");
-const askAnswer = ref("");
-const loading = ref(true);
-const consolidating = ref(false);
-const error = ref<string | null>(null);
 const llm = ref<LlmConfigView>({ baseUrl: null, model: null, hasApiKey: false });
 
-const unlisteners: Array<() => void> = [];
 let loadEpoch = 0;
-let localSequence = 0;
 let disposed = false;
+
+const draft = computed({
+  get: () => runtime.value.draft,
+  set: (value: string) => {
+    runtime.value.draft = value;
+  },
+});
+const askAnswer = computed({
+  get: () => runtime.value.askAnswer,
+  set: (value: string) => {
+    runtime.value.askAnswer = value;
+  },
+});
 
 const canSend = computed(
   () =>
     Boolean(draft.value.trim()) &&
     llm.value.hasApiKey &&
     !turn.blocked.value &&
-    !pendingAction.value,
+    !runtime.value.pendingAction,
 );
 
 const currentProjectName = computed(() => conversation.value?.projectName?.trim() || "收集箱");
@@ -80,84 +73,36 @@ const currentProjectName = computed(() => conversation.value?.projectName?.trim(
 onMounted(async () => {
   disposed = false;
   void editor.initialize();
-  await installListeners();
+  await installConversationRuntimeStore();
   await reloadConversation();
 });
 
 onUnmounted(() => {
   disposed = true;
   loadEpoch += 1;
-  for (const stop of unlisteners) stop();
 });
 
 watch(conversationId, () => {
-  computerStatus.value = "idle";
   void reloadConversation();
 });
 
-async function installListeners() {
-  const listeners = await Promise.all([
-    listenTurnDelta((payload) => {
-      if (payload.conversationId !== conversationId.value) return;
-      appendDelta(payload.text);
-    }),
-    listenToolEvent((payload) => {
-      if (payload.conversationId !== conversationId.value) return;
-      upsertToolEvent(payload);
-    }),
-    listenTurnFinished(async (payload) => {
-      if (payload.conversationId !== conversationId.value) return;
-      if (!payload.ok) error.value = payload.message;
-      await reloadConversation({ preserveError: !payload.ok });
-    }),
-    listenUserAction((payload) => {
-      if (payload.conversationId !== conversationId.value) return;
-      pendingAction.value = payload.action;
-      askAnswer.value = "";
-      setConversationTurnPhase(payload.conversationId, "awaiting_input");
-    }),
-    listenComputerOperation((payload) => {
-      if (payload.conversationId !== conversationId.value) return;
-      computerStatus.value = payload.status;
-    }),
-    listenPlan((payload) => {
-      if (payload.conversationId !== conversationId.value) return;
-      plan.value = payload.plan;
-    }),
-  ]);
-  if (disposed) {
-    for (const stop of listeners) stop();
-    return;
-  }
-  unlisteners.push(...listeners);
-}
-
-async function reloadConversation(options: { preserveError?: boolean } = {}) {
+async function reloadConversation() {
   const id = conversationId.value;
   const epoch = ++loadEpoch;
   if (!id) return;
-  loading.value = true;
-  if (!options.preserveError) error.value = null;
+  const state = getConversationRuntime(id);
+  state.error = null;
   try {
-    const [nextMessages, nextPlan, nextAction, conversations, nextLlm] =
+    const [, conversations, nextLlm] =
       await Promise.all([
-        getMessages(id),
-        getPlan(id),
-        getPendingUserAction(id),
+        loadConversationRuntime(id),
         listConversations(),
         getLlmConfig(),
       ]);
     if (disposed || epoch !== loadEpoch || id !== conversationId.value) return;
-    messages.value = nextMessages;
-    plan.value = nextPlan;
-    pendingAction.value = nextAction;
     llm.value = nextLlm;
     applyConversationGroup(conversations);
     conversation.value = conversations.find((item) => item.id === id) ?? null;
-    if (nextAction) {
-      setConversationTurnPhase(id, "awaiting_input");
-      if (nextAction.kind === "computer_approval") computerStatus.value = "awaiting_approval";
-    }
   } catch (err) {
     if (!disposed && epoch === loadEpoch && id === conversationId.value) {
       const normalized = normalizeCommandError(err);
@@ -165,147 +110,85 @@ async function reloadConversation(options: { preserveError?: boolean } = {}) {
         await router.replace("/");
         return;
       }
-      error.value = normalized.message;
-    }
-  } finally {
-    if (!disposed && epoch === loadEpoch && id === conversationId.value) {
-      loading.value = false;
+      state.error = normalized.message;
     }
   }
-}
-
-function appendDelta(text: string) {
-  const last = messages.value[messages.value.length - 1];
-  if (last?.role === "assistant" && last.id.startsWith("stream-")) {
-    last.content += text;
-    return;
-  }
-  messages.value.push({
-    id: `stream-${Date.now()}-${localSequence++}`,
-    role: "assistant",
-    content: text,
-    toolName: null,
-    toolStatus: null,
-    createdAt: new Date().toISOString(),
-  });
-}
-
-function upsertToolEvent(payload: AgentToolEvent) {
-  const active = [...messages.value]
-    .reverse()
-    .find(
-      (message) =>
-        message.role === "tool" &&
-        message.toolName === payload.toolName &&
-        message.toolStatus === "started",
-    );
-  if (active && payload.status !== "started") {
-    active.toolStatus = payload.status;
-    active.content = payload.summary;
-    return;
-  }
-  messages.value.push({
-    id: `tool-${Date.now()}-${localSequence++}`,
-    role: "tool",
-    content: payload.summary,
-    toolName: payload.toolName,
-    toolStatus: payload.status,
-    createdAt: new Date().toISOString(),
-  });
 }
 
 async function onSend() {
   const id = conversationId.value;
   const content = draft.value.trim();
   if (!id || !content || !canSend.value) return;
-  const optimisticId = `local-${Date.now()}-${localSequence++}`;
-  draft.value = "";
-  error.value = null;
-  computerStatus.value = "idle";
-  messages.value.push({
-    id: optimisticId,
-    role: "user",
-    content,
-    toolName: null,
-    toolStatus: null,
-    createdAt: new Date().toISOString(),
-  });
-  setConversationTurnPhase(id, "running");
+  const optimisticId = beginConversationTurn(id, content);
   try {
     await sendMessage(id, content);
   } catch (err) {
-    setConversationTurnPhase(id, "idle");
-    messages.value = messages.value.filter((message) => message.id !== optimisticId);
-    draft.value = content;
-    error.value = normalizeCommandError(err).message;
+    failConversationTurn(
+      id,
+      optimisticId,
+      content,
+      normalizeCommandError(err).message,
+    );
   }
 }
 
 async function onCancel() {
   const id = conversationId.value;
   if (!id) return;
+  const state = getConversationRuntime(id);
   const wasComputerOperation =
-    pendingAction.value?.kind === "computer_approval" ||
-    !["idle", "completed", "cancelled", "failed"].includes(computerStatus.value);
-  error.value = null;
+    state.pendingAction?.kind === "computer_approval" ||
+    !["idle", "completed", "cancelled", "failed"].includes(state.computerStatus);
+  state.error = null;
   try {
     const result = await cancelTurn(id);
     if (result.state === "cancel_requested") {
       setConversationTurnPhase(id, "cancelling");
       return;
     }
-    pendingAction.value = null;
-    askAnswer.value = "";
-    if (wasComputerOperation) computerStatus.value = "cancelled";
+    state.pendingAction = null;
+    state.askAnswer = "";
+    if (wasComputerOperation) state.computerStatus = "cancelled";
     setConversationTurnPhase(id, "idle");
   } catch (err) {
-    error.value = normalizeCommandError(err).message;
+    state.error = normalizeCommandError(err).message;
   }
 }
 
 async function onAnswerAsk(answer?: string) {
-  const currentAsk = pendingAction.value?.kind === "question" ? pendingAction.value : null;
+  const currentAsk = runtime.value.pendingAction?.kind === "question"
+    ? runtime.value.pendingAction
+    : null;
   const value = (answer ?? askAnswer.value).trim();
   if (!currentAsk || !value) return;
-  error.value = null;
+  const state = getConversationRuntime(currentAsk.conversationId);
+  state.error = null;
   try {
     await answerQuestion(currentAsk.actionId, value);
-    pendingAction.value = null;
-    askAnswer.value = "";
+    state.pendingAction = null;
+    state.askAnswer = "";
     setConversationTurnPhase(currentAsk.conversationId, "running");
   } catch (err) {
     setConversationTurnPhase(currentAsk.conversationId, "awaiting_input");
-    error.value = normalizeCommandError(err).message;
+    state.error = normalizeCommandError(err).message;
   }
 }
 
 async function onDecideComputerOperation(approved: boolean) {
-  const approval =
-    pendingAction.value?.kind === "computer_approval" ? pendingAction.value : null;
+  const approval = runtime.value.pendingAction?.kind === "computer_approval"
+    ? runtime.value.pendingAction
+    : null;
   if (!approval) return;
-  error.value = null;
+  const state = getConversationRuntime(approval.conversationId);
+  state.error = null;
   try {
     await decideComputerOperation(approval.actionId, approved);
-    pendingAction.value = null;
-    computerStatus.value = approved ? "authorized" : "cancelled";
+    state.pendingAction = null;
+    state.computerStatus = approved ? "authorized" : "cancelled";
     setConversationTurnPhase(approval.conversationId, "running");
   } catch (err) {
     setConversationTurnPhase(approval.conversationId, "awaiting_input");
-    error.value = normalizeCommandError(err).message;
-  }
-}
-
-async function onConsolidate() {
-  const id = conversationId.value;
-  if (!id) return;
-  consolidating.value = true;
-  error.value = null;
-  try {
-    await consolidateMemory(id);
-  } catch (err) {
-    error.value = normalizeCommandError(err).message;
-  } finally {
-    consolidating.value = false;
+    state.error = normalizeCommandError(err).message;
   }
 }
 
@@ -323,42 +206,36 @@ function goSettings(tab: string) {
           <h1>{{ conversation?.title || "对话" }}</h1>
           <p>{{ currentProjectName }}</p>
         </div>
-        <div class="conversation-header__actions">
-          <UiButton
-            size="sm"
-            :busy="consolidating"
-            agent-id="agent.chat.consolidate"
-            @click="onConsolidate"
-          >
-            整理记忆
-          </UiButton>
-        </div>
       </div>
     </template>
 
     <ConversationTranscript
-      :messages="messages"
-      :loading="loading"
+      :messages="runtime.messages"
+      :loading="runtime.loading"
       :running="turn.running.value"
       :cancelling="turn.cancelling.value"
       :empty-title="`要在${currentProjectName === '收集箱' ? '' : ` ${currentProjectName} `}完成什么？`"
     />
 
     <template #context>
-      <PlanTodoPanel v-if="plan?.steps.length" :plan="plan" data-agent-id="agent.chat.plan" />
+      <PlanTodoPanel
+        v-if="runtime.plan?.steps.length"
+        :plan="runtime.plan"
+        data-agent-id="agent.chat.plan"
+      />
     </template>
 
     <template #composer>
       <ConversationComposer
         v-model="draft"
         v-model:ask-answer="askAnswer"
-        :pending-action="pendingAction"
-        :computer-status="computerStatus"
+        :pending-action="runtime.pendingAction"
+        :computer-status="runtime.computerStatus"
         :disabled="!llm.hasApiKey"
         :running="turn.running.value"
         :cancelling="turn.cancelling.value"
         :can-send="canSend"
-        :error="error"
+        :error="runtime.error"
         @send="onSend"
         @cancel="onCancel"
         @answer="onAnswerAsk"
@@ -390,8 +267,6 @@ function goSettings(tab: string) {
 .conversation-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
   min-height: 52px;
   padding: 8px clamp(16px, 5vw, 64px);
 }
@@ -417,12 +292,6 @@ function goSettings(tab: string) {
   margin-top: 2px;
   color: var(--text-faint);
   font-size: 11px;
-}
-
-.conversation-header__actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
 }
 
 .composer-toolbar__spacer {
