@@ -1,9 +1,5 @@
 <template>
   <section class="conversation-surface">
-    <header v-if="$slots.header" class="conversation-surface__header">
-      <slot name="header" />
-    </header>
-
     <main class="conversation-surface__main">
       <slot />
     </main>
@@ -21,17 +17,15 @@
 .conversation-surface {
   display: grid;
   grid-template-areas:
-    "header"
     "main"
     "controls";
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr) auto;
   width: 100%;
   height: 100%;
   min-height: 0;
   background: var(--bg);
 }
 
-.conversation-surface__header { grid-area: header; min-width: 0; border-bottom: 1px solid var(--border-soft); }
 .conversation-surface__main { grid-area: main; min-width: 0; min-height: 0; }
 .conversation-surface__controls { grid-area: controls; position: relative; z-index: 3; min-width: 0; padding: 10px clamp(16px, 5vw, 64px) 14px; background: var(--bg); }
 .conversation-surface__controls-inner { display: flex; flex-direction: column; width: min(860px, 100%); margin: 0 auto; }
