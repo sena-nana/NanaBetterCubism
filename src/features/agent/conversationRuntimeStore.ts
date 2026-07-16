@@ -1,4 +1,4 @@
-import { computed, reactive } from "vue";
+import { computed, reactive, ref } from "vue";
 import {
   getMessages,
   getPendingUserAction,
@@ -44,6 +44,9 @@ const states = reactive<Record<string, InternalConversationRuntimeState>>({});
 const phaseListeners = new Set<() => void>();
 let installPromise: Promise<void> | null = null;
 let localSequence = 0;
+
+/** Shared composer preference; not persisted. */
+export const conversationOnly = ref(false);
 
 export function installConversationRuntimeStore() {
   if (installPromise) return installPromise;

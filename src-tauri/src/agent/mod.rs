@@ -279,6 +279,10 @@ pub fn new_id() -> String {
 
 pub const SYSTEM_PROMPT: &str = include_str!("prompt.txt");
 
+pub const CONVERSATION_ONLY_PROMPT: &str = "\
+## Conversation-only mode
+Read-only: do not edit the model, run previews/executes, or use computer-operation tools. You may inspect Editor/model state and answer questions. Do not read editing or computer-operation SKILLs. If the user asks for edits, tell them to turn off conversation-only mode.";
+
 #[cfg(test)]
 mod tests {
     use super::*;

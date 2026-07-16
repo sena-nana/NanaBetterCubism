@@ -12,6 +12,7 @@ import ConversationTranscript from "./components/ConversationTranscript.vue";
 import { useLlmConfigStore } from "./llmConfigStore";
 import {
   beginConversationTurn,
+  conversationOnly,
   failConversationTurn,
   installConversationRuntimeStore,
 } from "./conversationRuntimeStore";
@@ -50,7 +51,7 @@ async function startConversation() {
     const created = await createConversation();
     const optimisticId = beginConversationTurn(created.id, content);
     try {
-      await sendMessage(created.id, content);
+      await sendMessage(created.id, content, conversationOnly.value);
     } catch (err) {
       failConversationTurn(
         created.id,
@@ -86,6 +87,7 @@ async function startConversation() {
     <template #composer>
       <ConversationComposer
         v-model="draft"
+        v-model:conversation-only="conversationOnly"
         agent-id-prefix="agent.home"
         :disabled="!llm.state.config.hasApiKey"
         :running="sending"
