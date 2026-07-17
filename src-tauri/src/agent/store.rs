@@ -1,4 +1,4 @@
-use crate::agent::{new_id, AgentError};
+﻿use crate::agent::{new_id, AgentError};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -76,6 +76,7 @@ pub struct MemoryRecord {
     pub enabled: bool,
     pub source_conversation_id: Option<String>,
     pub updated_at: String,
+    pub revision: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -97,29 +98,7 @@ pub struct MemoryViewRecord {
     pub enabled: bool,
     pub source_conversation_id: Option<String>,
     pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MemorySummary {
-    pub id: String,
-    pub scope: String,
-    pub kind: String,
-    pub title: String,
-    pub overview: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MemoryLayerRead {
-    pub id: String,
-    pub scope: String,
-    pub kind: String,
-    pub title: String,
-    pub layers: Vec<String>,
-    pub body: String,
-    pub updated_at: String,
+    pub revision: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,6 +127,7 @@ pub struct LlmConfigInternal {
     pub api_key: Option<String>,
 }
 
+#[cfg(test)]
 struct MemoryUpsertInput {
     id: Option<String>,
     scope: String,
@@ -223,7 +203,8 @@ impl AgentStore {
               body TEXT NOT NULL,
               enabled INTEGER NOT NULL DEFAULT 1,
               source_conversation_id TEXT,
-              updated_at TEXT NOT NULL
+              updated_at TEXT NOT NULL,
+              revision INTEGER NOT NULL DEFAULT 1
             );
             CREATE TABLE IF NOT EXISTS llm_config (
               id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -251,6 +232,7 @@ impl AgentStore {
         ensure_column(&conn, "projects", "document_key", "TEXT")?;
         ensure_column(&conn, "projects", "document_path", "TEXT")?;
         migrate_pending_asks(&conn)?;
+        migrate_memory_bodies(&conn)?;
         conn.execute_batch(
             "CREATE UNIQUE INDEX IF NOT EXISTS projects_document_key_unique ON projects(document_key) WHERE document_key IS NOT NULL",
         )?;
@@ -706,7 +688,7 @@ impl AgentStore {
             let mut sql = String::from(
                 r#"
                 SELECT m.id, m.scope, m.kind, m.project_id, p.name, m.title, m.body, m.enabled,
-                       m.source_conversation_id, m.updated_at
+                       m.source_conversation_id, m.updated_at, m.revision
                 FROM memories m
                 LEFT JOIN projects p ON p.id = m.project_id
                 WHERE 1 = 1
@@ -751,7 +733,7 @@ impl AgentStore {
             let mut stmt = conn.prepare(
                 r#"
                 SELECT m.id, m.scope, m.kind, m.project_id, p.name, m.title, m.body, m.enabled,
-                       m.source_conversation_id, m.updated_at
+                       m.source_conversation_id, m.updated_at, m.revision
                 FROM memories m
                 LEFT JOIN projects p ON p.id = m.project_id
                 WHERE m.enabled = 1 AND (
@@ -774,119 +756,151 @@ impl AgentStore {
         })
     }
 
-    pub fn list_agent_memories(
+    pub fn recall_agent_memories(
         &self,
         conversation_id: &str,
-    ) -> Result<Vec<MemorySummary>, AgentError> {
+        request: crate::agent::memory_recall::MemoryRecallRequest,
+    ) -> Result<crate::agent::memory_recall::MemoryRecallResult, AgentError> {
         let project_id = self.conversation_project_id(conversation_id)?;
-        self.active_memories_for_project(project_id.as_deref())?
-            .into_iter()
-            .map(|memory| {
-                let overview =
-                    crate::agent::memory_markdown::extract_overview(&memory.scope, &memory.body)
-                        .unwrap_or_default();
-                Ok(MemorySummary {
-                    id: memory.id,
-                    scope: memory.scope,
-                    kind: memory.kind,
-                    title: memory.title,
-                    overview,
-                    updated_at: memory.updated_at,
-                })
-            })
-            .collect()
-    }
-
-    pub fn read_agent_memory(
-        &self,
-        conversation_id: &str,
-        id: &str,
-        layers: Option<Vec<String>>,
-    ) -> Result<MemoryLayerRead, AgentError> {
-        let project_id = self.conversation_project_id(conversation_id)?;
-        let memory = self.require_agent_memory(project_id.as_deref(), id)?;
-        let selected = crate::agent::memory_markdown::select_layers(
-            &memory.scope,
-            &memory.body,
-            layers.as_deref(),
-        )?;
-        let resolved_layers = match layers.as_deref() {
-            None | Some([]) => {
-                vec![crate::agent::memory_markdown::index_layer_name(&memory.scope)?.into()]
-            }
-            Some(names) => names.to_vec(),
-        };
-        Ok(MemoryLayerRead {
-            id: memory.id,
-            scope: memory.scope,
-            kind: memory.kind,
-            title: memory.title,
-            layers: resolved_layers,
-            body: selected,
-            updated_at: memory.updated_at,
-        })
+        crate::agent::memory_recall::recall_memories(
+            self.active_memories_for_project(project_id.as_deref())?
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            request,
+        )
     }
 
     pub fn upsert_agent_memory(
         &self,
         conversation_id: &str,
         id: Option<String>,
+        expected_revision: Option<i64>,
         scope: &str,
         title: &str,
         body: Option<&str>,
         layer: Option<&str>,
         content: Option<&str>,
     ) -> Result<MemoryRecord, AgentError> {
-        let project_id = self.conversation_project_id(conversation_id)?;
-        let (kind, memory_project_id) = match scope {
-            "project" => ("stage", project_id.clone()),
-            "global" => ("experience", None),
-            _ => return Err(AgentError::new("invalid_memory", "记忆范围无效。")),
-        };
         if title.trim().is_empty() {
             return Err(AgentError::new("invalid_memory", "记忆标题不能为空。"));
         }
-        let existing = if let Some(id) = id.as_deref() {
-            let existing = self.require_agent_memory(project_id.as_deref(), id)?;
-            if existing.scope != scope {
+        match (&id, expected_revision) {
+            (_, Some(revision)) if revision < 1 => {
                 return Err(AgentError::new(
-                    "memory_scope_mismatch",
-                    "不能更改现有记忆的范围。",
+                    "invalid_arguments",
+                    "expectedRevision 必须是正整数。",
                 ));
             }
-            Some(existing)
-        } else {
-            None
-        };
-
-        let normalized_body = match (body, layer, content) {
-            (Some(body), None, None) => {
-                crate::agent::memory_markdown::validate_and_normalize(scope, title, body)?
-            }
-            (None, Some(layer), Some(content)) => crate::agent::memory_markdown::patch_layer(
-                scope,
-                title,
-                existing.as_ref().map(|memory| memory.body.as_str()),
-                layer,
-                content,
-            )?,
-            _ => {
+            (Some(_), None) => {
                 return Err(AgentError::new(
-                    "invalid_memory",
-                    "保存记忆时请提供完整 body，或同时提供 layer 与 content。",
+                    "invalid_arguments",
+                    "更新已有记忆时必须提供 expectedRevision。",
                 ));
             }
-        };
+            (None, Some(_)) => {
+                return Err(AgentError::new(
+                    "invalid_arguments",
+                    "创建记忆时不能提供 expectedRevision。",
+                ));
+            }
+            _ => {}
+        }
 
-        self.upsert_memory(MemoryUpsertInput {
-            id,
-            scope: scope.into(),
-            kind: kind.into(),
-            project_id: memory_project_id,
-            title: title.trim().into(),
-            body: normalized_body,
-            enabled: Some(true),
-            source_conversation_id: Some(conversation_id.into()),
+        self.with_conn(|conn| {
+            let transaction = conn.unchecked_transaction()?;
+            let project_id = conversation_project_id_from(&transaction, conversation_id)?;
+            let (kind, memory_project_id) = match scope {
+                "project" if project_id.is_none() => {
+                    return Err(AgentError::new(
+                        "project_required",
+                        "当前对话未归入已保存的 Cubism 项目。",
+                    ));
+                }
+                "project" => ("stage", project_id.clone()),
+                "global" => ("experience", None),
+                _ => return Err(AgentError::new("invalid_memory", "记忆范围无效。")),
+            };
+            let existing = if let Some(id) = id.as_deref() {
+                let memory = active_memory_by_id(&transaction, project_id.as_deref(), id)?;
+                if memory.scope != scope {
+                    return Err(AgentError::new(
+                        "memory_scope_mismatch",
+                        "不能更改现有记忆的范围。",
+                    ));
+                }
+                if Some(memory.revision) != expected_revision {
+                    return Err(memory_conflict());
+                }
+                Some(memory)
+            } else {
+                None
+            };
+            let normalized_body = match (body, layer, content) {
+                (Some(body), None, None) => {
+                    crate::agent::memory_markdown::validate_and_normalize(scope, title, body)?
+                }
+                (None, Some(layer), Some(content)) => crate::agent::memory_markdown::patch_layer(
+                    scope,
+                    title,
+                    existing.as_ref().map(|memory| memory.body.as_str()),
+                    layer,
+                    content,
+                )?,
+                _ => {
+                    return Err(AgentError::new(
+                        "invalid_memory",
+                        "保存记忆时请提供完整 body，或同时提供 layer 与 content。",
+                    ));
+                }
+            };
+            let memory_id = id.unwrap_or_else(new_id);
+            let updated_at = Utc::now().to_rfc3339();
+            if let Some(existing) = existing {
+                let changed = transaction.execute(
+                    r#"
+                    UPDATE memories
+                    SET kind = ?1, project_id = ?2, title = ?3, body = ?4, enabled = 1,
+                        source_conversation_id = ?5, updated_at = ?6, revision = revision + 1
+                    WHERE id = ?7 AND revision = ?8
+                    "#,
+                    params![
+                        kind,
+                        memory_project_id,
+                        title.trim(),
+                        normalized_body,
+                        conversation_id,
+                        updated_at,
+                        memory_id,
+                        existing.revision,
+                    ],
+                )?;
+                if changed != 1 {
+                    return Err(memory_conflict());
+                }
+            } else {
+                transaction.execute(
+                    r#"
+                    INSERT INTO memories (
+                      id, scope, kind, project_id, title, body, enabled,
+                      source_conversation_id, updated_at, revision
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8, 1)
+                    "#,
+                    params![
+                        memory_id,
+                        scope,
+                        kind,
+                        memory_project_id,
+                        title.trim(),
+                        normalized_body,
+                        conversation_id,
+                        updated_at,
+                    ],
+                )?;
+            }
+            let memory = memory_by_id(&transaction, &memory_id)?;
+            transaction.commit()?;
+            Ok(memory)
         })
     }
 
@@ -909,6 +923,7 @@ impl AgentStore {
             })
     }
 
+    #[cfg(test)]
     fn upsert_memory(&self, mut input: MemoryUpsertInput) -> Result<MemoryRecord, AgentError> {
         match input.scope.as_str() {
             "project" if input.project_id.is_none() => {
@@ -938,7 +953,8 @@ impl AgentStore {
                   body = excluded.body,
                   enabled = excluded.enabled,
                   source_conversation_id = excluded.source_conversation_id,
-                  updated_at = excluded.updated_at
+                  updated_at = excluded.updated_at,
+                  revision = memories.revision + 1
                 "#,
                 params![
                     id,
@@ -963,7 +979,7 @@ impl AgentStore {
     pub fn set_memory_enabled(&self, id: &str, enabled: bool) -> Result<(), AgentError> {
         self.with_conn(|conn| {
             let changed = conn.execute(
-                "UPDATE memories SET enabled = ?1, updated_at = ?2 WHERE id = ?3",
+                "UPDATE memories SET enabled = ?1, updated_at = ?2, revision = revision + 1 WHERE id = ?3",
                 params![enabled as i64, Utc::now().to_rfc3339(), id],
             )?;
             if changed == 0 {
@@ -1129,6 +1145,66 @@ fn same_document_stem(left: &str, right: &str) -> bool {
     }
 }
 
+fn conversation_project_id_from(
+    conn: &Connection,
+    conversation_id: &str,
+) -> Result<Option<String>, AgentError> {
+    conn.query_row(
+        "SELECT project_id FROM conversations WHERE id = ?1 AND archived = 0",
+        params![conversation_id],
+        |row| row.get(0),
+    )
+    .map_err(|_| AgentError::new("not_found", "对话不存在。"))
+}
+
+fn active_memory_by_id(
+    conn: &Connection,
+    project_id: Option<&str>,
+    id: &str,
+) -> Result<MemoryRecord, AgentError> {
+    conn.query_row(
+        r#"
+        SELECT m.id, m.scope, m.kind, m.project_id, p.name, m.title, m.body, m.enabled,
+               m.source_conversation_id, m.updated_at, m.revision
+        FROM memories m
+        LEFT JOIN projects p ON p.id = m.project_id
+        WHERE m.id = ?2 AND m.enabled = 1 AND (
+          (m.scope = 'global' AND m.kind = 'experience')
+          OR (
+            ?1 IS NOT NULL AND m.scope = 'project' AND m.kind = 'stage' AND m.project_id = ?1
+          )
+        )
+        "#,
+        params![project_id, id],
+        map_memory,
+    )
+    .optional()?
+    .ok_or_else(|| AgentError::new("memory_not_found", "记忆不存在、已停用或不属于当前项目。"))
+}
+
+fn memory_by_id(conn: &Connection, id: &str) -> Result<MemoryRecord, AgentError> {
+    conn.query_row(
+        r#"
+        SELECT m.id, m.scope, m.kind, m.project_id, p.name, m.title, m.body, m.enabled,
+               m.source_conversation_id, m.updated_at, m.revision
+        FROM memories m
+        LEFT JOIN projects p ON p.id = m.project_id
+        WHERE m.id = ?1
+        "#,
+        params![id],
+        map_memory,
+    )
+    .optional()?
+    .ok_or_else(|| AgentError::new("store_error", "记忆写入后读取失败。"))
+}
+
+fn memory_conflict() -> AgentError {
+    AgentError::new(
+        "memory_conflict",
+        "记忆已被其他对话更新，请重新召回后再保存。",
+    )
+}
+
 fn map_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> {
     Ok(MemoryRecord {
         id: row.get(0)?,
@@ -1141,6 +1217,7 @@ fn map_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecord> {
         enabled: row.get::<_, i64>(7)? != 0,
         source_conversation_id: row.get(8)?,
         updated_at: row.get(9)?,
+        revision: row.get(10)?,
     })
 }
 
@@ -1159,6 +1236,7 @@ fn memory_view(memory: MemoryRecord) -> Result<MemoryViewRecord, AgentError> {
         enabled: memory.enabled,
         source_conversation_id: memory.source_conversation_id,
         updated_at: memory.updated_at,
+        revision: memory.revision,
     })
 }
 
@@ -1180,6 +1258,42 @@ fn migrate_pending_asks(conn: &Connection) -> Result<(), AgentError> {
             "#,
         )?;
     }
+    Ok(())
+}
+
+fn migrate_memory_bodies(conn: &Connection) -> Result<(), AgentError> {
+    let transaction = conn.unchecked_transaction()?;
+    ensure_column(
+        &transaction,
+        "memories",
+        "revision",
+        "INTEGER NOT NULL DEFAULT 1",
+    )?;
+    let memories = {
+        let mut statement = transaction.prepare("SELECT id, scope, title, body FROM memories")?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    for (id, scope, title, body) in memories {
+        let normalized =
+            crate::agent::memory_markdown::normalize_for_migration(&scope, &title, &body)?;
+        if normalized != body {
+            transaction.execute(
+                "UPDATE memories SET body = ?1, revision = revision + 1 WHERE id = ?2",
+                params![normalized, id],
+            )?;
+        }
+    }
+    transaction.commit()?;
     Ok(())
 }
 
@@ -1233,6 +1347,7 @@ pub(crate) fn truncate_summary(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::memory_recall::{MemoryRecallDepth, MemoryRecallRequest, MemoryRecallScope};
 
     fn project_body(overview: &str) -> String {
         format!("## Overview\n{overview}\n")
@@ -1240,6 +1355,15 @@ mod tests {
 
     fn global_body(summary: &str) -> String {
         format!("## Summary\n{summary}\n")
+    }
+
+    fn recall_request(query: &str, depth: MemoryRecallDepth) -> MemoryRecallRequest {
+        MemoryRecallRequest {
+            query: query.into(),
+            depth,
+            scope: MemoryRecallScope::All,
+            limit: None,
+        }
     }
 
     #[test]
@@ -1270,9 +1394,14 @@ mod tests {
                 source_conversation_id: Some(conversation.id.clone()),
             })
             .unwrap();
-        let memories = store.list_agent_memories(&conversation.id).unwrap();
-        assert_eq!(memories.len(), 1);
-        assert_eq!(memories[0].overview, "已创建眼睛参数");
+        let recall = store
+            .recall_agent_memories(
+                &conversation.id,
+                recall_request("眼睛参数", MemoryRecallDepth::Index),
+            )
+            .unwrap();
+        assert_eq!(recall.matches.len(), 1);
+        assert_eq!(recall.matches[0].layers[0].content, "已创建眼睛参数");
         store
             .append_tool_trace(
                 &conversation.id,
@@ -1314,28 +1443,28 @@ mod tests {
             .unwrap();
 
         store
-            .upsert_memory(MemoryUpsertInput {
-                id: None,
-                scope: "project".into(),
-                kind: "stage".into(),
-                project_id: project_a.project_id.clone(),
-                title: "A 阶段".into(),
-                body: "## Overview\nA 摘要\n## Stage\nA 阶段内容".into(),
-                enabled: Some(true),
-                source_conversation_id: Some(project_a.id.clone()),
-            })
+            .upsert_agent_memory(
+                &project_a.id,
+                None,
+                None,
+                "project",
+                "A 阶段",
+                Some("## Overview\nA 摘要\n## Stage\nA 阶段内容"),
+                None,
+                None,
+            )
             .unwrap();
         store
-            .upsert_memory(MemoryUpsertInput {
-                id: None,
-                scope: "project".into(),
-                kind: "stage".into(),
-                project_id: project_b.project_id,
-                title: "B 阶段".into(),
-                body: "## Overview\nB 摘要".into(),
-                enabled: Some(true),
-                source_conversation_id: Some(project_b.id),
-            })
+            .upsert_agent_memory(
+                &project_b.id,
+                None,
+                None,
+                "project",
+                "B 阶段",
+                Some("## Overview\nB 摘要"),
+                None,
+                None,
+            )
             .unwrap();
         let legacy = store
             .upsert_memory(MemoryUpsertInput {
@@ -1410,6 +1539,7 @@ mod tests {
             .upsert_agent_memory(
                 &project_a.id,
                 None,
+                None,
                 "project",
                 "A 阶段",
                 Some(&project_body("A 已完成")),
@@ -1420,6 +1550,7 @@ mod tests {
         let stage_b = store
             .upsert_agent_memory(
                 &project_b.id,
+                None,
                 None,
                 "project",
                 "B 阶段",
@@ -1432,6 +1563,7 @@ mod tests {
             .upsert_agent_memory(
                 &project_a.id,
                 None,
+                None,
                 "global",
                 "通用经验",
                 Some(&global_body("可跨项目复用")),
@@ -1442,6 +1574,7 @@ mod tests {
         let archived = store
             .upsert_agent_memory(
                 &project_a.id,
+                None,
                 None,
                 "project",
                 "旧阶段",
@@ -1454,21 +1587,20 @@ mod tests {
             .archive_agent_memory(&project_a.id, &archived.id)
             .unwrap();
 
-        let project_memories = store.list_agent_memories(&project_a.id).unwrap();
-        assert_eq!(project_memories.len(), 2);
-        assert!(project_memories.iter().any(|memory| {
-            memory.id == stage_a.id
-                && memory.scope == "project"
-                && memory.kind == "stage"
-                && memory.overview == "A 已完成"
-        }));
-        assert!(project_memories.iter().any(|memory| {
-            memory.id == experience.id
-                && memory.scope == "global"
-                && memory.kind == "experience"
-                && memory.overview == "可跨项目复用"
-        }));
-        assert!(!project_memories
+        let project_recall = store
+            .recall_agent_memories(
+                &project_a.id,
+                recall_request("完成 复用", MemoryRecallDepth::Focused),
+            )
+            .unwrap();
+        assert_eq!(project_recall.matches.len(), 2);
+        assert_eq!(project_recall.matches[0].id, stage_a.id);
+        assert!(project_recall
+            .matches
+            .iter()
+            .any(|memory| memory.id == experience.id && memory.scope == "global"));
+        assert!(!project_recall
+            .matches
             .iter()
             .any(|memory| memory.id == stage_b.id || memory.id == archived.id));
 
@@ -1476,6 +1608,7 @@ mod tests {
             .upsert_agent_memory(
                 &project_a.id,
                 Some(stage_a.id.clone()),
+                Some(stage_a.revision),
                 "project",
                 "A 阶段",
                 Some(&project_body("A 已完成并验证")),
@@ -1486,20 +1619,11 @@ mod tests {
         assert_eq!(updated_stage.id, stage_a.id);
         assert!(updated_stage.body.contains("A 已完成并验证"));
 
-        let layered = store
-            .read_agent_memory(
-                &project_a.id,
-                &stage_a.id,
-                Some(vec!["Overview".into(), "Stage".into()]),
-            )
-            .unwrap();
-        assert!(layered.body.contains("## Overview\nA 已完成并验证"));
-        assert!(layered.body.contains("## Stage"));
-
         let patched = store
             .upsert_agent_memory(
                 &project_a.id,
                 Some(stage_a.id.clone()),
+                Some(updated_stage.revision),
                 "project",
                 "A 阶段",
                 None,
@@ -1509,11 +1633,59 @@ mod tests {
             .unwrap();
         assert!(patched.body.contains("## Stage\nParamAngleX 已对齐。"));
         assert!(patched.body.contains("## Overview\nA 已完成并验证"));
+        let structure_update = store
+            .upsert_agent_memory(
+                &project_a.id,
+                Some(stage_a.id.clone()),
+                Some(patched.revision),
+                "project",
+                "A 阶段",
+                None,
+                Some("Structure"),
+                Some("参数位于 Face 组。"),
+            )
+            .unwrap();
+        assert!(matches!(
+            store.upsert_agent_memory(
+                &project_a.id,
+                Some(stage_a.id.clone()),
+                Some(patched.revision),
+                "project",
+                "A 阶段",
+                None,
+                Some("Decisions"),
+                Some("保留标准参数 ID。"),
+            ),
+            Err(error) if error.code == "memory_conflict"
+        ));
+        let reconciled = store
+            .upsert_agent_memory(
+                &project_a.id,
+                Some(stage_a.id.clone()),
+                Some(structure_update.revision),
+                "project",
+                "A 阶段",
+                None,
+                Some("Decisions"),
+                Some("保留标准参数 ID。"),
+            )
+            .unwrap();
+        assert!(reconciled.body.contains("## Structure\n参数位于 Face 组。"));
+        assert!(reconciled.body.contains("## Decisions\n保留标准参数 ID。"));
+        let layered = store
+            .recall_agent_memories(
+                &project_a.id,
+                recall_request("ParamAngleX", MemoryRecallDepth::Focused),
+            )
+            .unwrap();
+        assert_eq!(layered.matches[0].id, stage_a.id);
+        assert_eq!(layered.matches[0].layers[1].name, "Stage");
 
         assert_eq!(
             store
                 .upsert_agent_memory(
                     &project_a.id,
+                    None,
                     None,
                     "project",
                     "非法",
@@ -1526,9 +1698,15 @@ mod tests {
             "invalid_memory_body"
         );
 
-        let inbox_memories = store.list_agent_memories(&inbox.id).unwrap();
+        let inbox_recall = store
+            .recall_agent_memories(
+                &inbox.id,
+                recall_request("复用", MemoryRecallDepth::Focused),
+            )
+            .unwrap();
         assert_eq!(
-            inbox_memories
+            inbox_recall
+                .matches
                 .iter()
                 .map(|memory| memory.id.as_str())
                 .collect::<Vec<_>>(),
@@ -1539,6 +1717,7 @@ mod tests {
             store.upsert_agent_memory(
                 &project_b.id,
                 Some(stage_a.id.clone()),
+                Some(stage_a.revision),
                 "project",
                 "越权更新",
                 Some(&project_body("不应成功")),
@@ -1555,6 +1734,7 @@ mod tests {
             store.upsert_agent_memory(
                 &project_a.id,
                 Some(experience.id),
+                Some(experience.revision),
                 "project",
                 "错误改类",
                 Some(&project_body("不应成功")),
@@ -1566,6 +1746,7 @@ mod tests {
         assert!(matches!(
             store.upsert_agent_memory(
                 &inbox.id,
+                None,
                 None,
                 "project",
                 "无项目",
@@ -1785,13 +1966,39 @@ mod tests {
                 ) VALUES (
                   'legacy-question', 'older', '继续？', '["继续"]', 'tool-call', '2026-01-01T00:00:00Z'
                 );
+                CREATE TABLE memories (
+                  id TEXT PRIMARY KEY,
+                  scope TEXT NOT NULL,
+                  kind TEXT NOT NULL,
+                  project_id TEXT,
+                  title TEXT NOT NULL,
+                  body TEXT NOT NULL,
+                  enabled INTEGER NOT NULL DEFAULT 1,
+                  source_conversation_id TEXT,
+                  updated_at TEXT NOT NULL
+                );
+                INSERT INTO memories (
+                  id, scope, kind, project_id, title, body, enabled,
+                  source_conversation_id, updated_at
+                ) VALUES
+                  (
+                    'legacy-stage', 'project', 'stage', 'legacy-project', '旧阶段',
+                    '旧阶段正文
+
+## 自定义标题
+保留内容', 1, 'older', '2026-01-01T00:00:00Z'
+                  ),
+                  (
+                    'legacy-global', 'global', 'experience', NULL, '旧经验',
+                    '旧版全局经验', 1, 'older', '2026-01-01T00:00:00Z'
+                  );
                 "#,
             )
             .unwrap();
         }
 
         let store = AgentStore::default();
-        store.open(path).unwrap();
+        store.open(path.clone()).unwrap();
         let newer = store
             .create_conversation(Some("较新对话".into()), None)
             .unwrap();
@@ -1808,6 +2015,40 @@ mod tests {
         let pending = store.get_pending_question("older").unwrap().unwrap();
         assert_eq!(pending.action_id, "legacy-question");
         assert_eq!(pending.options, vec!["继续"]);
+        let project_memories = store
+            .list_memory_views("project", Some("legacy-project".into()))
+            .unwrap();
+        assert_eq!(project_memories.len(), 1);
+        assert_eq!(project_memories[0].layers[0].name, "Overview");
+        assert!(project_memories[0].layers[0]
+            .content
+            .contains("### 自定义标题\n保留内容"));
+        let global_memories = store.list_memory_views("global", None).unwrap();
+        assert_eq!(global_memories[0].layers[0].content, "旧版全局经验");
+        let updated = store
+            .upsert_agent_memory(
+                "older",
+                Some("legacy-stage".into()),
+                Some(project_memories[0].revision),
+                "project",
+                "旧阶段",
+                None,
+                Some("Stage"),
+                Some("迁移后可继续更新。"),
+            )
+            .unwrap();
+        assert!(updated.body.contains("## Overview\n旧阶段正文"));
+        assert!(updated.body.contains("## Stage\n迁移后可继续更新。"));
+        let revision_after_update = updated.revision;
+        let reopened = AgentStore::default();
+        reopened.open(path.clone()).unwrap();
+        assert_eq!(
+            reopened
+                .list_memory_views("project", Some("legacy-project".into()))
+                .unwrap()[0]
+                .revision,
+            revision_after_update
+        );
 
         store
             .with_conn(|conn| {
@@ -1837,6 +2078,74 @@ mod tests {
             store.ensure_active_conversation(&newer.id),
             Err(error) if error.code == "not_found"
         ));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn memory_migration_rolls_back_schema_and_bodies_on_invalid_layered_data() {
+        let dir = std::env::temp_dir().join(format!("nbc-memory-rollback-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("agent.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE memories (
+                  id TEXT PRIMARY KEY,
+                  scope TEXT NOT NULL,
+                  kind TEXT NOT NULL,
+                  project_id TEXT,
+                  title TEXT NOT NULL,
+                  body TEXT NOT NULL,
+                  enabled INTEGER NOT NULL DEFAULT 1,
+                  source_conversation_id TEXT,
+                  updated_at TEXT NOT NULL
+                );
+                INSERT INTO memories (
+                  id, scope, kind, project_id, title, body, enabled,
+                  source_conversation_id, updated_at
+                ) VALUES
+                  (
+                    'legacy', 'global', 'experience', NULL, '旧经验', '完整保留的旧正文',
+                    1, NULL, '2026-01-01T00:00:00Z'
+                  ),
+                  (
+                    'invalid', 'global', 'experience', NULL, '损坏分层',
+                    '## Summary
+第一份
+## Summary
+第二份', 1, NULL, '2026-01-01T00:00:00Z'
+                  );
+                "#,
+            )
+            .unwrap();
+        }
+
+        let store = AgentStore::default();
+        assert!(matches!(
+            store.open(path.clone()),
+            Err(error) if error.code == "invalid_memory_body"
+        ));
+        assert!(matches!(
+            store.list_memory_views("global", None),
+            Err(error) if error.code == "store_not_ready"
+        ));
+
+        let conn = Connection::open(&path).unwrap();
+        let columns = conn
+            .prepare("PRAGMA table_info(memories)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(!columns.iter().any(|column| column == "revision"));
+        let legacy_body: String = conn
+            .query_row("SELECT body FROM memories WHERE id = 'legacy'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(legacy_body, "完整保留的旧正文");
         let _ = std::fs::remove_dir_all(dir);
     }
 

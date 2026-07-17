@@ -20,6 +20,7 @@ const projectMemories: MemoryRecord[] = [
     enabled: true,
     sourceConversationId: "conversation-a",
     updatedAt: "2026-07-16T00:00:00Z",
+    revision: 1,
   },
   {
     id: "project-memory-b",
@@ -36,6 +37,7 @@ const projectMemories: MemoryRecord[] = [
     enabled: false,
     sourceConversationId: null,
     updatedAt: "2026-07-15T00:00:00Z",
+    revision: 1,
   },
 ];
 
@@ -54,6 +56,7 @@ const globalMemories: MemoryRecord[] = [
     enabled: true,
     sourceConversationId: null,
     updatedAt: "2026-07-16T00:00:00Z",
+    revision: 1,
   },
 ];
 

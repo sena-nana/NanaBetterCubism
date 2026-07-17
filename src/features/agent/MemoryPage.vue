@@ -27,6 +27,7 @@ const loadError = ref<string | null>(null);
 const actionError = ref<string | null>(null);
 const togglingId = ref<string | null>(null);
 let loadGeneration = 0;
+let initializationGeneration = 0;
 
 const scopeOptions = [
   { value: "project", label: "项目记忆", agentId: "agent.memory.scope.project" },
@@ -53,20 +54,32 @@ watch(
 onMounted(() => void initialize());
 
 async function initialize() {
+  const generation = ++initializationGeneration;
+  ++loadGeneration;
   loading.value = true;
+  refreshing.value = false;
   loadError.value = null;
   try {
-    projects.value = await listProjects();
+    const nextProjects = await listProjects();
+    if (generation !== initializationGeneration) return;
+    projects.value = nextProjects;
     scope.value = route.query.scope === "global" ? "global" : "project";
     const queryProject = typeof route.query.project === "string" ? route.query.project : "";
     projectId.value = projects.value.some((project) => project.id === queryProject)
       ? queryProject
       : "";
     await syncRoute();
+    if (generation !== initializationGeneration) return;
     await loadCurrentScope(false);
   } catch (error) {
-    loadError.value = normalizeCommandError(error).message;
-    loading.value = false;
+    if (generation === initializationGeneration) {
+      loadError.value = normalizeCommandError(error).message;
+    }
+  } finally {
+    if (generation === initializationGeneration) {
+      loading.value = false;
+      refreshing.value = false;
+    }
   }
 }
 

@@ -12,7 +12,7 @@ describe("共享模型配置状态", () => {
     bridge.getLlmConfig.mockReset();
   });
 
-  it("加载配置后只更新模型 footer", async () => {
+  it("模型就绪后自检优先展示 Editor 未连接", async () => {
     bridge.getLlmConfig.mockResolvedValue({
       baseUrl: "https://api.example.test/v1",
       model: "example-model",
@@ -22,13 +22,10 @@ describe("共享模型配置状态", () => {
 
     await store.initialize();
 
-    expect(statuses.find((status) => status.key === "model")).toMatchObject({
-      label: "example-model",
-      tone: "ok",
-    });
-    expect(statuses.find((status) => status.key === "editor")).toMatchObject({
+    expect(statuses.find((status) => status.key === "selfcheck")).toMatchObject({
       label: "Editor 未连接",
       tone: "warn",
+      to: "/settings?tab=editor",
     });
   });
 
@@ -38,7 +35,7 @@ describe("共享模型配置状态", () => {
 
     await expect(store.initialize()).rejects.toThrow("unavailable");
 
-    expect(statuses.find((status) => status.key === "model")).toMatchObject({
+    expect(statuses.find((status) => status.key === "selfcheck")).toMatchObject({
       label: "模型状态异常",
       tone: "error",
       to: "/settings?tab=model-config",
@@ -48,9 +45,9 @@ describe("共享模型配置状态", () => {
 
 async function setupStore() {
   const { appConfig } = await import("../src/app.config");
-  const { setLiliaUiConfig, SIDEBAR_FOOTER_STATUSES } = await import("@lilia/ui/shell");
+  const { setLiliaAppConfig, SIDEBAR_FOOTER_STATUSES } = await import("@lilia/ui");
   const { useLlmConfigStore } = await import("../src/features/agent/llmConfigStore");
-  setLiliaUiConfig(appConfig);
+  setLiliaAppConfig(appConfig);
   return {
     store: useLlmConfigStore(),
     statuses: SIDEBAR_FOOTER_STATUSES,

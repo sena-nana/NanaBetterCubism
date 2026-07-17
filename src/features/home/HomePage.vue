@@ -5,18 +5,18 @@ import {
   createConversation,
   normalizeCommandError,
   sendMessage,
-} from "./bridge";
-import ConversationComposer from "./components/ConversationComposer.vue";
-import ConversationSurface from "./components/ConversationSurface.vue";
-import ConversationTranscript from "./components/ConversationTranscript.vue";
-import { useLlmConfigStore } from "./llmConfigStore";
+} from "../agent/bridge";
+import ConversationComposer from "../agent/components/ConversationComposer.vue";
+import ConversationSurface from "../agent/components/ConversationSurface.vue";
+import ConversationTranscript from "../agent/components/ConversationTranscript.vue";
+import { useLlmConfigStore } from "../agent/llmConfigStore";
 import {
   beginConversationTurn,
   conversationOnly,
   failConversationTurn,
   installConversationRuntimeStore,
-} from "./conversationRuntimeStore";
-import { ensureSidebarConversationsLoaded } from "./sidebarConversations";
+} from "../agent/conversationRuntimeStore";
+import { ensureSidebarConversationsLoaded } from "../agent/sidebarConversations";
 
 const router = useRouter();
 const llm = useLlmConfigStore();
@@ -74,8 +74,9 @@ async function startConversation() {
 </script>
 
 <template>
-  <ConversationSurface data-agent-id="agent.home">
+  <ConversationSurface data-agent-id="home.page">
     <ConversationTranscript
+      data-agent-id="home.header"
       :messages="[]"
       :loading="loading"
       :running="sending"
@@ -85,16 +86,18 @@ async function startConversation() {
     />
 
     <template #composer>
-      <ConversationComposer
-        v-model="draft"
-        v-model:conversation-only="conversationOnly"
-        agent-id-prefix="agent.home"
-        :disabled="!llm.state.config.hasApiKey"
-        :running="sending"
-        :can-send="canSend"
-        :error="error"
-        @send="startConversation"
-      />
+      <div data-agent-id="home.start-card">
+        <ConversationComposer
+          v-model="draft"
+          v-model:conversation-only="conversationOnly"
+          agent-id-prefix="agent.home"
+          :disabled="!llm.state.config.hasApiKey"
+          :running="sending"
+          :can-send="canSend"
+          :error="error"
+          @send="startConversation"
+        />
+      </div>
     </template>
   </ConversationSurface>
 </template>

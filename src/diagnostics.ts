@@ -1,6 +1,6 @@
 export async function installNanaBetterCubismDiagnostics() {
-  const diagnostics = await import("@lilia/ui/diagnostics");
-  if (!diagnostics.isLiliaAgentDebugEnabled()) return false;
-  diagnostics.installAgentDebugHarness();
+  const { installAgentDebugHarness, isLiliaAgentDebugEnabled } = await import("@lilia/ui");
+  if (!isLiliaAgentDebugEnabled()) return false;
+  installAgentDebugHarness();
   return true;
 }

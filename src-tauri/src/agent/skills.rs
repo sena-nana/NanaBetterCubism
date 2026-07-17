@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::sync::LazyLock;
 
 pub const READ_SKILL_TOOL_NAME: &str = "read_skill";
-pub const MAX_SKILL_LOAD_STEPS: usize = 6;
+pub const MAX_SKILL_LOAD_STEPS: usize = 7;
 
 const CORE_DOMAIN_TOOLS: &[&str] = &[
     "get_editor_snapshot",
@@ -85,8 +85,9 @@ const OBJECT_EDITING_TOOLS: &[&str] = &[
     "cancel_editor_edit",
 ];
 
-const PROJECT_MEMORY_TOOLS: &[&str] =
-    &["list_memories", "read_memory", "upsert_memory", "archive_memory"];
+const MEMORY_RECALL_TOOLS: &[&str] = &["recall_memory"];
+
+const PROJECT_MEMORY_TOOLS: &[&str] = &["upsert_memory", "archive_memory"];
 
 const COMPUTER_OPERATION_TOOLS: &[&str] = &[
     "list_cubism_windows",
@@ -126,6 +127,10 @@ static SKILLS: LazyLock<Result<Vec<RuntimeSkill>, AgentError>> = LazyLock::new(|
         SkillSource {
             content: include_str!("skills/object-editing/SKILL.md"),
             tools: OBJECT_EDITING_TOOLS,
+        },
+        SkillSource {
+            content: include_str!("skills/memory-recall/SKILL.md"),
+            tools: MEMORY_RECALL_TOOLS,
         },
         SkillSource {
             content: include_str!("skills/project-memory/SKILL.md"),

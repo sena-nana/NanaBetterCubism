@@ -1,9 +1,6 @@
-import {
-  SIDEBAR_FOOTER_STATUSES,
-  type SidebarFooterStatus,
-} from "@lilia/ui/shell";
 import { reactive } from "vue";
 import { getLlmConfig } from "./bridge";
+import { publishModelFooter } from "../shell/footerSelfCheck";
 import type { LlmConfigView } from "./types";
 
 const defaultConfig: LlmConfigView = {
@@ -22,13 +19,13 @@ let initializePromise: Promise<LlmConfigView> | null = null;
 
 async function initialize(): Promise<LlmConfigView> {
   if (state.initialized) {
-    updateModelFooter(configPresentation(state.config));
+    publishModelFooter(configPresentation(state.config));
     return state.config;
   }
   if (initializePromise) return initializePromise;
 
   state.loading = true;
-  updateModelFooter({
+  publishModelFooter({
     label: "模型读取中",
     title: "正在读取模型配置。",
     tone: "warn",
@@ -39,7 +36,7 @@ async function initialize(): Promise<LlmConfigView> {
       return state.config;
     })
     .catch((error) => {
-      updateModelFooter({
+      publishModelFooter({
         label: "模型状态异常",
         title: "无法读取模型配置。点击进入设置。",
         tone: "error",
@@ -56,14 +53,18 @@ async function initialize(): Promise<LlmConfigView> {
 function applyConfig(config: LlmConfigView) {
   state.config = { ...config };
   state.initialized = true;
-  updateModelFooter(configPresentation(config));
+  publishModelFooter(configPresentation(config));
 }
 
 export function useLlmConfigStore() {
   return { state, initialize, applyConfig };
 }
 
-function configPresentation(config: LlmConfigView): FooterPresentation {
+function configPresentation(config: LlmConfigView): {
+  label: string;
+  title: string;
+  tone: "ok" | "warn" | "error";
+} {
   if (!config.hasApiKey) {
     return {
       label: "模型未配置",
@@ -77,23 +78,4 @@ function configPresentation(config: LlmConfigView): FooterPresentation {
     title: model ? `已保存模型 ${model}。点击进入设置。` : "已保存模型配置。点击进入设置。",
     tone: "ok",
   };
-}
-
-function updateModelFooter(presentation: FooterPresentation) {
-  const footer = footerStatus("model");
-  if (!footer) return;
-  Object.assign(footer, {
-    to: "/settings?tab=model-config",
-    ...presentation,
-  });
-}
-
-function footerStatus(key: string): SidebarFooterStatus | undefined {
-  return SIDEBAR_FOOTER_STATUSES.find((status) => status.key === key);
-}
-
-interface FooterPresentation {
-  label: string;
-  title: string;
-  tone: "ok" | "warn" | "error";
 }

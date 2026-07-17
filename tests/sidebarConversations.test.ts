@@ -25,7 +25,7 @@ beforeEach(() => {
 describe("Agent 侧边栏会话", () => {
   it("按项目与收集箱分组，并保留各组的后端顺序", async () => {
     const { applyConversationGroup } = await import("../src/features/agent/sidebarConversations");
-    const { SIDEBAR_GROUPS } = await import("@lilia/ui/shell");
+    const { SIDEBAR_GROUPS } = await import("@lilia/ui");
     const rows = [
       summary("a", "项目 A - 最近", "项目 A"),
       summary("b", "收集箱 - 最近", null),
@@ -54,17 +54,28 @@ describe("Agent 侧边栏会话", () => {
     const {
       SIDEBAR_FOOTER_STATUSES,
       SIDEBAR_GROUPS,
-      setLiliaUiConfig,
-    } = await import("@lilia/ui/shell");
+      setLiliaAppConfig,
+    } = await import("@lilia/ui");
     const { appConfig } = await import("../src/app.config");
-    setLiliaUiConfig(appConfig);
-    const footerStatus = SIDEBAR_FOOTER_STATUSES.find((status) => status.key === "editor");
-    expect(footerStatus).toBeTruthy();
-    Object.assign(footerStatus!, {
-      to: "/settings?tab=editor",
-      label: "Editor 已就绪",
-      title: "已连接",
+    const { publishModelFooter, publishEditorFooter } = await import(
+      "../src/features/shell/footerSelfCheck"
+    );
+    setLiliaAppConfig(appConfig);
+    publishModelFooter({
+      label: "example-model",
+      title: "已保存模型 example-model。点击进入设置。",
       tone: "ok",
+    });
+    publishEditorFooter({
+      label: "Editor 未连接",
+      title: "在设置中连接 Cubism Editor。",
+      tone: "warn",
+    });
+    const footerStatus = SIDEBAR_FOOTER_STATUSES.find((status) => status.key === "selfcheck");
+    expect(footerStatus).toMatchObject({
+      label: "Editor 未连接",
+      tone: "warn",
+      to: "/settings?tab=editor",
     });
 
     const loading = ensureSidebarConversationsLoaded();
@@ -74,7 +85,7 @@ describe("Agent 侧边栏会话", () => {
 
     expect(SIDEBAR_GROUPS).toHaveLength(1);
     expect(SIDEBAR_GROUPS[0]).toMatchObject({ title: "收集箱", emptyText: "暂无对话" });
-    expect(footerStatus).toMatchObject({ label: "Editor 已就绪", tone: "ok" });
+    expect(footerStatus).toMatchObject({ label: "Editor 未连接", tone: "warn" });
   });
 
   it("壳层重新安装后用成功缓存恢复分组，不重复请求", async () => {
@@ -82,7 +93,7 @@ describe("Agent 侧边栏会话", () => {
     const { installAgentShell, ensureSidebarConversationsLoaded } = await import(
       "../src/features/agent/sidebarConversations"
     );
-    const { SIDEBAR_GROUPS } = await import("@lilia/ui/shell");
+    const { SIDEBAR_GROUPS } = await import("@lilia/ui");
 
     installAgentShell();
     await ensureSidebarConversationsLoaded();
@@ -100,7 +111,7 @@ describe("Agent 侧边栏会话", () => {
     const { ensureSidebarConversationsLoaded } = await import(
       "../src/features/agent/sidebarConversations"
     );
-    const { SIDEBAR_GROUPS } = await import("@lilia/ui/shell");
+    const { SIDEBAR_GROUPS } = await import("@lilia/ui");
 
     await expect(ensureSidebarConversationsLoaded()).rejects.toThrow("unavailable");
     expect(SIDEBAR_GROUPS[0]?.emptyText).toBe("无法加载对话");
@@ -118,7 +129,7 @@ describe("Agent 侧边栏会话", () => {
     const { applyConversationGroup, toggleConversationPinned } = await import(
       "../src/features/agent/sidebarConversations"
     );
-    const { SIDEBAR_GROUPS } = await import("@lilia/ui/shell");
+    const { SIDEBAR_GROUPS } = await import("@lilia/ui");
 
     applyConversationGroup([summary("b", "其他会话", null), row]);
     await toggleConversationPinned(row);
@@ -180,7 +191,7 @@ describe("Agent 侧边栏会话", () => {
     const { setConversationTurnPhase } = await import(
       "../src/features/agent/conversationRuntimeStore"
     );
-    const { SIDEBAR_GROUPS } = await import("@lilia/ui/shell");
+    const { SIDEBAR_GROUPS } = await import("@lilia/ui");
 
     setConversationTurnPhase("a", "running");
     applyConversationGroup([row]);

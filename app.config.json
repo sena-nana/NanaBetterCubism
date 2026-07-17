@@ -3,5 +3,13 @@
   "productTitle": "NanaBetterCubism",
   "version": "0.1.0",
   "identifier": "com.senanana.nanabettercubism",
-  "storageKeyPrefix": "nanabettercubism"
+  "storageKeyPrefix": "nanabettercubism",
+  "shell": {
+    "homeTitle": "首页",
+    "homeDescription": "连接 Cubism Editor，开始建模与对话。",
+    "workspaceSectionTitle": "对话",
+    "statusLabel": "就绪",
+    "statusTitle": "应用状态正常。点击进入设置。",
+    "settingsDescription": "模型、Editor 与外观偏好会保存在本地。"
+  }
 }

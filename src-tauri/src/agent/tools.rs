@@ -1,8 +1,9 @@
-use crate::agent::capture::capture_cubism_editor_window;
+﻿use crate::agent::capture::capture_cubism_editor_window;
 use crate::agent::computer_control::{
     ComputerAction, ComputerActionKind, ComputerOperationOutcome, ComputerOperationStatus,
     ComputerOperationStep, UnsupportedCapability,
 };
+use crate::agent::memory_recall::MemoryRecallRequest;
 use crate::agent::skills;
 use crate::agent::store::{truncate_summary, PendingQuestion, PlanStep};
 use crate::agent::{new_id, AgentError, AgentRuntime, PendingUserAction};
@@ -90,30 +91,35 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
             }),
         ),
         tool(
-            "list_memories",
-            "列出记忆索引",
-            "列出已启用的当前项目阶段记忆与全局 Live2D 经验的索引（含 Overview/Summary，不含深层正文）。",
-            json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            }),
-        ),
-        tool(
-            "read_memory",
-            "读取记忆分层",
-            "按层读取一条记忆。默认只返回 Overview/Summary；可请求 Stage/Structure/Decisions 或 Technique/Caveats。",
+            "recall_memory",
+            "召回相关记忆",
+            "按当前任务语义召回已启用的项目阶段记忆与全局 Live2D 经验；代码自动匹配记忆与分层。",
             json!({
                 "type": "object",
                 "properties": {
-                    "id": { "type": "string", "minLength": 1 },
-                    "layers": {
-                        "type": "array",
-                        "items": { "type": "string", "minLength": 1 },
-                        "description": "可选层名；省略时仅返回索引层"
+                    "query": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "当前任务、问题或待查找的记忆主题"
+                    },
+                    "depth": {
+                        "type": "string",
+                        "enum": ["index", "focused", "full"],
+                        "description": "默认 focused；index 仅摘要，focused 返回命中层，full 返回全部非空层"
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["all", "project", "global"],
+                        "description": "默认 all"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 8,
+                        "description": "默认 5"
                     }
                 },
-                "required": ["id"],
+                "required": ["query"],
                 "additionalProperties": false
             }),
         ),
@@ -125,6 +131,11 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
                 "type": "object",
                 "properties": {
                     "id": { "type": "string", "minLength": 1 },
+                    "expectedRevision": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "更新已有记忆时必填，使用最近一次召回结果中的 revision"
+                    },
                     "scope": { "type": "string", "enum": ["project", "global"] },
                     "title": { "type": "string", "minLength": 1 },
                     "body": {
@@ -672,27 +683,13 @@ async fn execute_tool_inner(
                 image_path: Some(captured.path),
             })
         }
-        "list_memories" => {
-            let memories = runtime.store.list_agent_memories(conversation_id)?;
-            Ok(tool_result(serde_json::to_string_pretty(&memories)?))
-        }
-        "read_memory" => {
-            let layers = args
-                .get("layers")
-                .and_then(Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect::<Vec<_>>()
-                });
-            let memory = runtime.store.read_agent_memory(
-                conversation_id,
-                required_string(&args, "id")?,
-                layers,
-            )?;
-            Ok(tool_result(serde_json::to_string_pretty(&memory)?))
+        "recall_memory" => {
+            let request: MemoryRecallRequest = serde_json::from_value(args)
+                .map_err(|error| AgentError::new("invalid_arguments", error.to_string()))?;
+            let result = runtime
+                .store
+                .recall_agent_memories(conversation_id, request)?;
+            Ok(tool_result(serde_json::to_string_pretty(&result)?))
         }
         "upsert_memory" => {
             let id = args
@@ -709,9 +706,11 @@ async fn execute_tool_inner(
                 .and_then(Value::as_str)
                 .filter(|value| !value.trim().is_empty());
             let content = args.get("content").and_then(Value::as_str);
+            let expected_revision = args.get("expectedRevision").and_then(Value::as_i64);
             let memory = runtime.store.upsert_agent_memory(
                 conversation_id,
                 id,
+                expected_revision,
                 required_string(&args, "scope")?,
                 required_string(&args, "title")?,
                 body,
@@ -1066,7 +1065,7 @@ mod tests {
         assert!(parameter_names.contains("preview_add_parameter"));
         assert!(parameter_names.contains("execute_editor_edit"));
         assert!(!parameter_names.contains("preview_add_part"));
-        assert!(!parameter_names.contains("list_memories"));
+        assert!(!parameter_names.contains("recall_memory"));
 
         let combined = tool_definitions(&BTreeSet::from([
             "parameter-editing".into(),
@@ -1086,12 +1085,33 @@ mod tests {
     }
 
     #[test]
-    fn project_memory_skill_exposes_a_strict_agent_contract() {
+    fn memory_skills_expose_separate_strict_contracts() {
+        let recall_definitions =
+            tool_definitions(&BTreeSet::from(["memory-recall".into()])).unwrap();
+        let recall_names = names(&recall_definitions);
+        assert!(recall_names.contains("recall_memory"));
+        assert!(!recall_names.contains("upsert_memory"));
+        assert!(!recall_names.contains("archive_memory"));
+        assert!(!recall_names.contains("list_memories"));
+        assert!(!recall_names.contains("read_memory"));
+        let recall = recall_definitions
+            .iter()
+            .find(|definition| tool_name(definition) == Some("recall_memory"))
+            .unwrap();
+        let recall_parameters = &recall["function"]["parameters"];
+        assert_eq!(recall_parameters["required"], json!(["query"]));
+        assert_eq!(recall_parameters["additionalProperties"], false);
+        assert_eq!(
+            recall_parameters["properties"]["depth"]["enum"],
+            json!(["index", "focused", "full"])
+        );
+        assert_eq!(recall_parameters["properties"]["limit"]["maximum"], 8);
+
         let definitions = tool_definitions(&BTreeSet::from(["project-memory".into()])).unwrap();
         let memory_names = names(&definitions);
-        for name in ["list_memories", "read_memory", "upsert_memory", "archive_memory"] {
-            assert!(memory_names.contains(name));
-        }
+        assert!(memory_names.contains("upsert_memory"));
+        assert!(memory_names.contains("archive_memory"));
+        assert!(!memory_names.contains("recall_memory"));
 
         let upsert = definitions
             .iter()
@@ -1105,30 +1125,20 @@ mod tests {
         );
         assert_eq!(parameters["required"], json!(["scope", "title"]));
         assert!(parameters["properties"].get("body").is_some());
+        assert!(parameters["properties"].get("expectedRevision").is_some());
         assert!(parameters["properties"].get("layer").is_some());
         assert!(parameters["properties"].get("content").is_some());
         assert!(parameters["properties"].get("kind").is_none());
         assert!(parameters["properties"].get("enabled").is_none());
 
-        let read = definitions
+        let archive = definitions
             .iter()
-            .find(|definition| tool_name(definition) == Some("read_memory"))
+            .find(|definition| tool_name(definition) == Some("archive_memory"))
             .unwrap();
-        assert_eq!(read["function"]["parameters"]["required"], json!(["id"]));
-        assert!(read["function"]["parameters"]["properties"]
-            .get("layers")
-            .is_some());
-
-        for name in ["list_memories", "archive_memory"] {
-            let definition = definitions
-                .iter()
-                .find(|definition| tool_name(definition) == Some(name))
-                .unwrap();
-            assert_eq!(
-                definition["function"]["parameters"]["additionalProperties"],
-                false
-            );
-        }
+        assert_eq!(
+            archive["function"]["parameters"]["additionalProperties"],
+            false
+        );
     }
 
     #[test]

@@ -1,12 +1,12 @@
-import { LiliaSettingsPage } from "@lilia/ui/settings";
+import { LiliaSettingsPage } from "@lilia/ui";
 import type { RouteRecordRaw } from "vue-router";
 
-const ChatHomePage = () => import("./features/agent/ChatHomePage.vue");
+const HomePage = () => import("./features/home/HomePage.vue");
 const ChatPage = () => import("./features/agent/ChatPage.vue");
 const MemoryPage = () => import("./features/agent/MemoryPage.vue");
 
 export const routes: RouteRecordRaw[] = [
-  { path: "", component: ChatHomePage, meta: { sidebar: "main", returnable: true } },
+  { path: "", component: HomePage, meta: { sidebar: "main", returnable: true } },
   {
     path: "chats/:id",
     component: ChatPage,
