@@ -311,9 +311,7 @@ fn send_drag_with_backend(
         backend.wait(delay);
         let x = from_x + (to_x - from_x) * index / steps;
         let y = from_y + (to_y - from_y) * index / steps;
-        if let Err(error) = send_all_with_backend(&[mouse_move(x, y, geometry)], backend) {
-            return Err(error);
-        }
+        send_all_with_backend(&[mouse_move(x, y, geometry)], backend)?;
     }
     send_all_with_backend(&[mouse_input(0, 0, 0, MOUSEEVENTF_LEFTUP)], backend)
 }
@@ -391,7 +389,7 @@ fn validate_action(action: &ComputerAction, geometry: PlatformGeometry) -> Resul
                     "系统级快捷键不允许用于 Cubism 代理操作。",
                 ));
             }
-            virtual_key(&normalized).map(|_| ())
+            virtual_key(normalized).map(|_| ())
         }
         _ => Ok(()),
     }
