@@ -6,7 +6,7 @@ import {
   SIDEBAR_GROUPS,
   type SidebarGroup,
   type SidebarNavItem,
-} from "@lilia/ui/shell";
+} from "@lilia/ui";
 import { markRaw, reactive } from "vue";
 import {
   deleteConversation,

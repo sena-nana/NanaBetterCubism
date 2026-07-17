@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/vue";
-import { SIDEBAR_FOOTER_STATUSES, setLiliaUiConfig } from "@lilia/ui/shell";
+import { SIDEBAR_FOOTER_STATUSES, setLiliaAppConfig } from "@lilia/ui";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { appConfig } from "../src/app.config";
 import LlmSettingsSection from "../src/features/agent/settings/LlmSettingsSection.vue";
@@ -26,7 +26,7 @@ describe("模型配置", () => {
       model: "example-model",
       hasApiKey: true,
     });
-    setLiliaUiConfig(appConfig);
+    setLiliaAppConfig(appConfig);
   });
 
   it("保存配置失败时不会继续测试旧配置", async () => {
@@ -60,9 +60,10 @@ describe("模型配置", () => {
     await waitFor(() => expect(bridge.testLlmConnection).toHaveBeenCalledTimes(1));
     expect(await screen.findByRole("button", { name: "example-model" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "example-model-mini" })).toBeTruthy();
-    expect(SIDEBAR_FOOTER_STATUSES.find((status) => status.key === "model")).toMatchObject({
-      label: "example-model",
-      tone: "ok",
+    expect(SIDEBAR_FOOTER_STATUSES.find((status) => status.key === "selfcheck")).toMatchObject({
+      label: "Editor 未连接",
+      tone: "warn",
+      to: "/settings?tab=editor",
     });
   });
 
@@ -78,9 +79,10 @@ describe("模型配置", () => {
     await fireEvent.click(screen.getByRole("button", { name: "清除密钥" }));
 
     await waitFor(() => {
-      expect(SIDEBAR_FOOTER_STATUSES.find((status) => status.key === "model")).toMatchObject({
+      expect(SIDEBAR_FOOTER_STATUSES.find((status) => status.key === "selfcheck")).toMatchObject({
         label: "模型未配置",
         tone: "warn",
+        to: "/settings?tab=model-config",
       });
     });
   });

@@ -1,7 +1,3 @@
-import {
-  SIDEBAR_FOOTER_STATUSES,
-  type SidebarFooterStatus,
-} from "@lilia/ui/shell";
 import { reactive } from "vue";
 import {
   connectEditor,
@@ -10,6 +6,7 @@ import {
   listenEditorState,
   normalizeCommandError,
 } from "./bridge";
+import { publishEditorFooter } from "../shell/footerSelfCheck";
 import type { DomainCommandError, EditorSnapshot } from "./types";
 
 const defaultSnapshot: EditorSnapshot = {
@@ -89,35 +86,19 @@ export function useEditorStore() {
 function updateSnapshot(snapshot: EditorSnapshot) {
   state.snapshot = snapshot;
   const presentation = footerPresentation(snapshot);
-  updateEditorFooter({
-    to: "/settings?tab=editor",
+  publishEditorFooter({
     label: presentation.label,
     title: snapshot.message,
     tone: presentation.tone,
   });
 }
 
-function updateEditorFooter(presentation: {
-  label: string;
-  title: string;
-  tone: "ok" | "warn" | "error";
-  to?: string;
-}) {
-  const footer = footerStatus("editor");
-  if (!footer) return;
-  Object.assign(footer, { to: "/settings?tab=editor", ...presentation });
-}
-
 function updateEditorErrorFooter() {
-  updateEditorFooter({
+  publishEditorFooter({
     label: "Editor 状态异常",
     title: "无法读取 Editor 状态。点击进入设置。",
     tone: "error",
   });
-}
-
-function footerStatus(key: string): SidebarFooterStatus | undefined {
-  return SIDEBAR_FOOTER_STATUSES.find((status) => status.key === key);
 }
 
 function footerPresentation(snapshot: EditorSnapshot): {

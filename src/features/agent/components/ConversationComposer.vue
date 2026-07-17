@@ -227,8 +227,8 @@ function onAskKeydown(event: KeyboardEvent) {
           >
             仅对话
           </UiButton>
-          <span class="conversation-composer__hint">Enter 发送 · Shift+Enter 换行</span>
         </div>
+        <span class="conversation-composer__hint">Enter 发送 · Shift+Enter 换行</span>
         <UiButton
           v-if="running || cancelling"
           size="sm"

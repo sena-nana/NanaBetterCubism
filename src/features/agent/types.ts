@@ -54,6 +54,7 @@ export interface MemoryRecord {
   enabled: boolean;
   sourceConversationId: string | null;
   updatedAt: string;
+  revision: number;
 }
 
 export interface LlmConfigView {
