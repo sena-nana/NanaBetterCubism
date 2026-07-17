@@ -771,6 +771,7 @@ impl AgentStore {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn upsert_agent_memory(
         &self,
         conversation_id: &str,

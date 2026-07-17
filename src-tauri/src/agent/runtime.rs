@@ -276,6 +276,7 @@ fn emit_finished(app: &AppHandle, conversation_id: &str, result: &Result<TurnEnd
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_turn_inner(
     app: &AppHandle,
     runtime: &Arc<AgentRuntime>,

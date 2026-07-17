@@ -127,7 +127,7 @@ pub fn patch_layer(
     content: &str,
 ) -> Result<String, AgentError> {
     let layers = layers_for_scope(scope)?;
-    if !layers.iter().any(|name| *name == layer) {
+    if !layers.contains(&layer) {
         return Err(AgentError::new(
             "invalid_memory_layer",
             format!("记忆层无效：{layer}"),
@@ -376,7 +376,7 @@ fn reject_unknown_layers(
     sections: &BTreeMap<String, String>,
 ) -> Result<(), AgentError> {
     for key in sections.keys() {
-        if !allowed.iter().any(|layer| *layer == key.as_str()) {
+        if !allowed.contains(&key.as_str()) {
             return Err(AgentError::new(
                 "invalid_memory_body",
                 format!("记忆 Markdown 含有未知分层：{key}"),
