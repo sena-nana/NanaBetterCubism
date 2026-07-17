@@ -7,7 +7,6 @@ export const appConfig = {
   appName: appConfigJson.appName,
   productTitle: appConfigJson.productTitle,
   version: appConfigJson.version,
-  identifier: appConfigJson.identifier,
   storageKeyPrefix: appConfigJson.storageKeyPrefix,
   appearance: {
     backdropTarget: "sidebar",
