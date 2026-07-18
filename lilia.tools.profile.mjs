@@ -17,6 +17,7 @@ export default defineToolsProfile({
     ["app.config.json", "application metadata source"],
     ["src/main.ts", "Vue mount entry"],
     ["src/app.ts", "Vue, Router, commands, settings, and runtime assembly"],
+    ["src/features/shell/AppRoot.vue", "Provider, shell, workspace, and route composition"],
     ["src/routes.ts", "application routes"],
     ["src/ui/index.ts", "active UI facade"],
     ["src/ui/preset.ts", "active preset adapter"],
@@ -26,6 +27,7 @@ export default defineToolsProfile({
   agentTargetFiles: {
     "src/features/home/HomePage.vue": [["agent.home"]],
     "src/features/agent/components/ConversationSidebarTop.vue": [["sidebar.new-chat"], ["sidebar.search.open"]],
+    "src/features/shell/AppRoot.vue": [["shell.sidebar.toggle"]],
   },
   boundaries: {
     includes: ["Cubism Editor integration", "agent, memory, settings, and application shell composition"],

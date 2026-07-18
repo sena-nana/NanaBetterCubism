@@ -1,5 +1,5 @@
 import { createApp } from "vue";
-import { createRouter, createWebHistory, RouterView, type RouterHistory } from "vue-router";
+import { createRouter, createWebHistory, type RouterHistory } from "vue-router";
 import { appConfig, settingsModel } from "./app.config";
 import { commands } from "./commands";
 import { installNanaBetterCubismDiagnostics } from "./diagnostics";
@@ -7,9 +7,9 @@ import { installConversationRuntimeStore } from "./features/agent/conversationRu
 import { useLlmConfigStore } from "./features/agent/llmConfigStore";
 import { installAgentShell } from "./features/agent/sidebarConversations";
 import { useEditorStore } from "./features/editor/editorStore";
+import AppRoot from "./features/shell/AppRoot.vue";
 import { routes } from "./routes";
 import {
-  LiliaDesktopShell,
   installCommandRegistry,
   installCornerStyle,
   installNativeAppearance,
@@ -19,7 +19,7 @@ import {
 } from "./ui";
 
 export function createNanaBetterCubismApp(history?: RouterHistory) {
-  const app = createApp(RouterView);
+  const app = createApp(AppRoot);
   const router = createNanaBetterCubismRouter(history);
 
   setLiliaUiConfig(appConfig);
@@ -46,12 +46,7 @@ export function createNanaBetterCubismRouter(history?: RouterHistory) {
   return createRouter({
     history: history ?? createWebHistory(),
     routes: [
-      {
-        path: "/",
-        component: LiliaDesktopShell,
-        meta: { sidebar: "main", returnable: true },
-        children: routes,
-      },
+      ...routes,
       { path: "/:pathMatch(.*)*", redirect: "/" },
     ],
   });

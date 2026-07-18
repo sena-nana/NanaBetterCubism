@@ -6,20 +6,18 @@ const ChatPage = () => import("./features/agent/ChatPage.vue");
 const MemoryPage = () => import("./features/agent/MemoryPage.vue");
 
 export const routes: RouteRecordRaw[] = [
-  { path: "", component: HomePage, meta: { sidebar: "main", returnable: true } },
+  { path: "/", component: HomePage },
   {
-    path: "chats/:id",
+    path: "/chats/:id",
     component: ChatPage,
-    meta: { sidebar: "main", returnable: true },
   },
   {
-    path: "memory",
+    path: "/memory",
     component: MemoryPage,
-    meta: { sidebar: "main", returnable: true },
   },
   {
-    path: "settings",
+    path: "/settings",
     component: LiliaSettingsPage,
-    meta: { sidebar: "settings", lockSidebar: true, returnable: false },
+    meta: { sidebar: "settings", returnable: false },
   },
 ];

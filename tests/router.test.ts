@@ -31,6 +31,11 @@ describe("Agent 壳层路由", () => {
   it("首页显示 Cubism Agent 入口", async () => {
     await renderAt("/");
 
+    expect(document.querySelector('[data-agent-id="app.provider"]')).toBeTruthy();
+    expect(document.querySelector('[data-agent-id="shell"]')).toBeTruthy();
+    expect(document.querySelector('[data-agent-id="shell.workspace"]')).toBeTruthy();
+    expect(document.querySelector('[data-agent-id="workspace.region.navigation"]')).toBeTruthy();
+    expect(document.querySelector('[data-agent-id="workspace.region.primary"]')).toBeTruthy();
     expect(
       await screen.findByRole("heading", { level: 1, name: "想在 Cubism Editor 中完成什么？" }),
     ).toBeTruthy();
@@ -48,6 +53,21 @@ describe("Agent 壳层路由", () => {
     expect(document.querySelector('[data-agent-id="agent.home.editor-settings"]')).toBeNull();
   });
 
+  it("侧边栏可折叠并使用原有存储键持久化", async () => {
+    const storageKey = `${appConfigJson.storageKeyPrefix}.sidebarCollapsed`;
+    localStorage.removeItem(storageKey);
+    await renderAt("/");
+
+    await fireEvent.click(screen.getByRole("button", { name: "收起侧栏" }));
+    expect(localStorage.getItem(storageKey)).toBe("1");
+    expect(screen.getByRole("button", { name: "展开侧栏" })).toBeTruthy();
+    expect(document.querySelector('[data-agent-id="workspace.region.navigation"]')?.hasAttribute("hidden")).toBe(true);
+
+    await fireEvent.click(screen.getByRole("button", { name: "展开侧栏" }));
+    expect(localStorage.getItem(storageKey)).toBe("0");
+    expect(screen.getByRole("button", { name: "收起侧栏" })).toBeTruthy();
+  });
+
   it("记忆页可打开", async () => {
     await renderAt("/memory");
 
@@ -60,6 +80,8 @@ describe("Agent 壳层路由", () => {
   it("设置页恢复外观、模型配置、Editor 与关于，并默认显示外观", async () => {
     await renderAt("/settings");
 
+    expect(document.querySelector('[data-agent-id="settings.sidebar"]')).toBeTruthy();
+    expect(screen.getByRole("button", { name: "收起侧栏" }).hasAttribute("disabled")).toBe(true);
     expect(settingsModel.defaultTab).toBe("appearance");
     expect(settingsModel.tabs.map((tab) => tab.key)).toEqual([
       "appearance",
