@@ -747,9 +747,9 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@lilia/build@github:sena-nana/LiliaUI#workspace=@lilia/build&commit=97c6e7bfb33ff15ad6953e28726be0bd8ecfaf80":
+"@lilia/build@github:sena-nana/LiliaUI#workspace=@lilia/build&commit=05503bbdbd9cc49b10c5b9fe7a0a73f35afa4101":
   version: 0.1.0
-  resolution: "@lilia/build@https://github.com/sena-nana/LiliaUI.git#workspace=%40lilia%2Fbuild&commit=97c6e7bfb33ff15ad6953e28726be0bd8ecfaf80"
+  resolution: "@lilia/build@https://github.com/sena-nana/LiliaUI.git#workspace=%40lilia%2Fbuild&commit=05503bbdbd9cc49b10c5b9fe7a0a73f35afa4101"
   dependencies:
     "@tauri-apps/cli": "npm:^2.11.4"
     "@testing-library/dom": "npm:^10.4.1"
@@ -770,42 +770,64 @@ __metadata:
     "@lilia/tools": 0.1.0
   bin:
     lilia-build: ./bin/lilia-build.mjs
-  checksum: 10c0/8d72f239389605d447e485fb3fafe16073eb350b93b77754833a6ee9cfa6514dd437e8072396c762a1ec7f96f0635b43322a1c6fe96b26f708a435e128e323fa
+  checksum: 10c0/4eac11e9a7f45e7da88dd3c2e96aefad97686445abd645638d7ddcc3c8f3bcdb1edf16bc34828a10fda0b953b285441c73e19bef07350850c0c94b11026fc982
   languageName: node
   linkType: hard
 
-"@lilia/config@github:sena-nana/LiliaUI#workspace=@lilia/config&commit=97c6e7bfb33ff15ad6953e28726be0bd8ecfaf80":
+"@lilia/config@github:sena-nana/LiliaUI#workspace=@lilia/config&commit=05503bbdbd9cc49b10c5b9fe7a0a73f35afa4101":
   version: 0.1.0
-  resolution: "@lilia/config@https://github.com/sena-nana/LiliaUI.git#workspace=%40lilia%2Fconfig&commit=97c6e7bfb33ff15ad6953e28726be0bd8ecfaf80"
+  resolution: "@lilia/config@https://github.com/sena-nana/LiliaUI.git#workspace=%40lilia%2Fconfig&commit=05503bbdbd9cc49b10c5b9fe7a0a73f35afa4101"
   dependencies:
     "@vitejs/plugin-vue": "npm:^6.0.8"
     vite: "npm:^8.1.4"
     vitepress: "npm:^1.6.4"
     vue: "npm:^3.5.39"
-  checksum: 10c0/04d519bc3e27862a348d4bd0d536d60604245251d42d10a001811940df2e93a9422ed0aee317d2c2e789b769d0b4564b037871b3a7c1144065de3588df393a94
+  checksum: 10c0/a575f9d86e977427b35b96d5b6e218324975e92fe6eee69926a345b4edb561f9c9aaf50627232e111f538cbc0ca5b2b7ed10afd75d7904d7deff154c2e39c013
   languageName: node
   linkType: hard
 
-"@lilia/tools@github:sena-nana/LiliaUI#workspace=@lilia/tools&commit=97c6e7bfb33ff15ad6953e28726be0bd8ecfaf80":
+"@lilia/tools@github:sena-nana/LiliaUI#workspace=@lilia/tools&commit=05503bbdbd9cc49b10c5b9fe7a0a73f35afa4101":
   version: 0.1.0
-  resolution: "@lilia/tools@https://github.com/sena-nana/LiliaUI.git#workspace=%40lilia%2Ftools&commit=97c6e7bfb33ff15ad6953e28726be0bd8ecfaf80"
+  resolution: "@lilia/tools@https://github.com/sena-nana/LiliaUI.git#workspace=%40lilia%2Ftools&commit=05503bbdbd9cc49b10c5b9fe7a0a73f35afa4101"
   peerDependencies:
     "@lilia/config": 0.1.0
   bin:
     lilia-tools: ./bin/lilia-tools.mjs
-  checksum: 10c0/a8c962b3b899eda46042245bfc031c58e105f5ed6eca5041b334b5915d6168c4baa73009180c567c7474d8a9d44cfc22991022a18271d370b01d3c145510debe
+  checksum: 10c0/b208758d26162e59d1cd72b70372dd81fcdb57c13c87740b53ecc08b96b66cc6241a58930c2f1d6f5b98f6a53596aee28fcd281ad0191f2ae243980e9052cae7
   languageName: node
   linkType: hard
 
-"@lilia/ui@github:sena-nana/LiliaUI#workspace=@lilia/ui&commit=97c6e7bfb33ff15ad6953e28726be0bd8ecfaf80":
+"@lilia/ui-contract@github:sena-nana/LiliaUI#workspace=@lilia/ui-contract&commit=05503bbdbd9cc49b10c5b9fe7a0a73f35afa4101":
   version: 0.1.0
-  resolution: "@lilia/ui@https://github.com/sena-nana/LiliaUI.git#workspace=%40lilia%2Fui&commit=97c6e7bfb33ff15ad6953e28726be0bd8ecfaf80"
+  resolution: "@lilia/ui-contract@https://github.com/sena-nana/LiliaUI.git#workspace=%40lilia%2Fui-contract&commit=05503bbdbd9cc49b10c5b9fe7a0a73f35afa4101"
+  checksum: 10c0/a5ef46690bc2c44afda763b4058809680a51727a902bba1a848f2d77a48a96f0b40afe736b4534b974f30419f2416b774d1a41dcd9027bc3991c80d76ce6b134
+  languageName: node
+  linkType: hard
+
+"@lilia/ui-foundation@github:sena-nana/LiliaUI#workspace=@lilia/ui-foundation&commit=05503bbdbd9cc49b10c5b9fe7a0a73f35afa4101":
+  version: 0.1.0
+  resolution: "@lilia/ui-foundation@https://github.com/sena-nana/LiliaUI.git#workspace=%40lilia%2Fui-foundation&commit=05503bbdbd9cc49b10c5b9fe7a0a73f35afa4101"
+  dependencies:
+    "@tauri-apps/api": "npm:^2.11.1"
+  peerDependencies:
+    "@lilia/ui-contract": ^0.1.0
+    vue: ^3.5.39
+  checksum: 10c0/436cfce9af25e924a0c7755f53c88d256e33937f88907e265f2f84af40f6b63f01ae920045bde5983ad74187daa9ddef31dba71f38506202d2606887bcc2f792
+  languageName: node
+  linkType: hard
+
+"@lilia/ui@github:sena-nana/LiliaUI#workspace=@lilia/ui&commit=05503bbdbd9cc49b10c5b9fe7a0a73f35afa4101":
+  version: 0.1.0
+  resolution: "@lilia/ui@https://github.com/sena-nana/LiliaUI.git#workspace=%40lilia%2Fui&commit=05503bbdbd9cc49b10c5b9fe7a0a73f35afa4101"
   dependencies:
     "@lucide/vue": "npm:^1.22.0"
     "@tauri-apps/api": "npm:^2.11.1"
     vue: "npm:^3.5.39"
     vue-router: "npm:^5.1.0"
-  checksum: 10c0/561305282077e46de6847d66892c41821533eb2aef73fbf9a421e27bbb5d989f8de2481aca8ecc5346f672dd3189b90e2537ec4f8c8b13788c86df2c32e6367a
+  peerDependencies:
+    "@lilia/ui-contract": ^0.1.0
+    "@lilia/ui-foundation": ^0.1.0
+  checksum: 10c0/4692c14a8410662e01aa83b466cf1bae8a937ee94445616884308de049e308e09aabba2c18e8e1976a1560abf075cb0ff58d560ed1b0de3e9e645aceca208f43
   languageName: node
   linkType: hard
 
@@ -3560,10 +3582,12 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "nanabettercubism@workspace:."
   dependencies:
-    "@lilia/build": "github:sena-nana/LiliaUI#workspace=@lilia/build&commit=97c6e7bfb33ff15ad6953e28726be0bd8ecfaf80"
-    "@lilia/config": "github:sena-nana/LiliaUI#workspace=@lilia/config&commit=97c6e7bfb33ff15ad6953e28726be0bd8ecfaf80"
-    "@lilia/tools": "github:sena-nana/LiliaUI#workspace=@lilia/tools&commit=97c6e7bfb33ff15ad6953e28726be0bd8ecfaf80"
-    "@lilia/ui": "github:sena-nana/LiliaUI#workspace=@lilia/ui&commit=97c6e7bfb33ff15ad6953e28726be0bd8ecfaf80"
+    "@lilia/build": "github:sena-nana/LiliaUI#workspace=@lilia/build&commit=05503bbdbd9cc49b10c5b9fe7a0a73f35afa4101"
+    "@lilia/config": "github:sena-nana/LiliaUI#workspace=@lilia/config&commit=05503bbdbd9cc49b10c5b9fe7a0a73f35afa4101"
+    "@lilia/tools": "github:sena-nana/LiliaUI#workspace=@lilia/tools&commit=05503bbdbd9cc49b10c5b9fe7a0a73f35afa4101"
+    "@lilia/ui": "github:sena-nana/LiliaUI#workspace=@lilia/ui&commit=05503bbdbd9cc49b10c5b9fe7a0a73f35afa4101"
+    "@lilia/ui-contract": "github:sena-nana/LiliaUI#workspace=@lilia/ui-contract&commit=05503bbdbd9cc49b10c5b9fe7a0a73f35afa4101"
+    "@lilia/ui-foundation": "github:sena-nana/LiliaUI#workspace=@lilia/ui-foundation&commit=05503bbdbd9cc49b10c5b9fe7a0a73f35afa4101"
     "@lucide/vue": "npm:^1.22.0"
     "@tauri-apps/api": "npm:^2.11.1"
     "@tauri-apps/plugin-opener": "npm:2.5.4"

@@ -13,6 +13,8 @@ const packages = [
   ["@lilia/build", "packages/build"],
   ["@lilia/config", "packages/config"],
   ["@lilia/tools", "packages/tools"],
+  ["@lilia/ui-contract", "packages/ui-contract"],
+  ["@lilia/ui-foundation", "packages/ui-foundation"],
   ["@lilia/ui", "packages/ui"],
 ];
 

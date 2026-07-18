@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { UiButton, UiCard, UiInput } from "@lilia/ui";
+import { Button, Card, Input } from "../../ui";
 import { computed, onMounted, ref } from "vue";
 import { readIntegerStorage } from "../../utils/storage";
 import { useEditorStore } from "./editorStore";
@@ -30,34 +30,35 @@ async function connect() {
 </script>
 
 <template>
-  <UiCard title="Editor 连接" :agent-id="agentIdPrefix">
+  <Card :agent-id="agentIdPrefix">
+    <h2>Editor 连接</h2>
     <div class="connection-row">
       <div class="field field--port">
         <label :for="portInputId">本机端口</label>
-        <UiInput
+        <Input
           :id="portInputId"
           v-model="port"
           type="number"
           :agent-id="`${agentIdPrefix}.port`"
         />
       </div>
-      <UiButton
+      <Button
         v-if="editor.state.snapshot.state === 'disconnected' || editor.state.snapshot.state === 'failed'"
         variant="primary"
-        :busy="editor.state.busy"
+        :loading="editor.state.busy"
         :agent-id="`${agentIdPrefix}.connect`"
         @click="connect"
       >
         连接 Editor
-      </UiButton>
-      <UiButton
+      </Button>
+      <Button
         v-else
         :disabled="disconnectDisabled"
         :agent-id="`${agentIdPrefix}.disconnect`"
         @click="editor.disconnect"
       >
         断开
-      </UiButton>
+      </Button>
       <div class="connection-meta">
         <span>地址 127.0.0.1</span>
         <span>API {{ editor.state.snapshot.apiVersion ?? "-" }}</span>
@@ -74,7 +75,7 @@ async function connect() {
       保持此页面打开，在 Cubism Editor 的“外部应用联动设置”中完成授权。
     </p>
     <p v-else class="message">{{ editor.state.snapshot.message }}</p>
-  </UiCard>
+  </Card>
 </template>
 
 <style scoped>

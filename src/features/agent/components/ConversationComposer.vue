@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import { UiButton, UiTextarea } from "@lilia/ui";
+import { Button, Textarea } from "../../../ui";
 import type { ComputerActionKind, ComputerOperationStatus, PendingUserAction } from "../types";
 
 type TextareaRef = { $el?: HTMLTextAreaElement } | HTMLTextAreaElement | null;
@@ -130,7 +130,7 @@ function onAskKeydown(event: KeyboardEvent) {
     >
       <p class="conversation-composer__question">{{ pendingQuestion.question }}</p>
       <div v-if="pendingQuestion.options.length" class="conversation-composer__options">
-        <UiButton
+        <Button
           v-for="(option, index) in pendingQuestion.options"
           :key="option"
           size="sm"
@@ -138,21 +138,21 @@ function onAskKeydown(event: KeyboardEvent) {
           @click="emit('answer', option)"
         >
           {{ option }}
-        </UiButton>
+        </Button>
       </div>
       <div class="conversation-composer__answer">
-        <UiTextarea
+        <Textarea
           ref="askRef"
           :model-value="askAnswer"
-          rows="1"
+          :rows="1"
           placeholder="输入回答"
           :agent-id="`${agentIdPrefix}.ask-input`"
           @update:model-value="emit('update:askAnswer', $event)"
           @keydown="onAskKeydown"
         />
         <div class="conversation-composer__answer-actions">
-          <UiButton size="sm" :agent-id="`${agentIdPrefix}.cancel`" @click="emit('cancel')">取消</UiButton>
-          <UiButton variant="primary" size="sm" :disabled="!askAnswer.trim()" :agent-id="`${agentIdPrefix}.ask-submit`" @click="emit('answer')">回答</UiButton>
+          <Button size="sm" :agent-id="`${agentIdPrefix}.cancel`" @click="emit('cancel')">取消</Button>
+          <Button variant="primary" size="sm" :disabled="!askAnswer.trim()" :agent-id="`${agentIdPrefix}.ask-submit`" @click="emit('answer')">回答</Button>
         </div>
       </div>
     </div>
@@ -179,21 +179,21 @@ function onAskKeydown(event: KeyboardEvent) {
         <span v-if="computerApproval.cannotUndo">取消只会停止后续输入，无法保证自动撤销</span>
       </div>
       <div class="conversation-composer__approval-actions">
-        <UiButton
+        <Button
           size="sm"
           :agent-id="`${agentIdPrefix}.computer-approval.reject`"
           @click="emit('decide', false)"
         >
           拒绝
-        </UiButton>
-        <UiButton
+        </Button>
+        <Button
           variant="primary"
           size="sm"
           :agent-id="`${agentIdPrefix}.computer-approval.approve`"
           @click="emit('decide', true)"
         >
           授权本次操作
-        </UiButton>
+        </Button>
       </div>
     </div>
 
@@ -206,10 +206,10 @@ function onAskKeydown(event: KeyboardEvent) {
         <span class="conversation-composer__status-dot" />
         {{ statusLabels[computerStatus] }}
       </div>
-      <UiTextarea
+      <Textarea
         ref="inputRef"
         :model-value="modelValue"
-        rows="1"
+        :rows="1"
         :placeholder="conversationOnly ? '提问或讨论当前模型…' : placeholder"
         :disabled="disabled || running || cancelling"
         :agent-id="`${agentIdPrefix}.input`"
@@ -218,7 +218,7 @@ function onAskKeydown(event: KeyboardEvent) {
       />
       <div class="conversation-composer__actions">
         <div class="conversation-composer__mode">
-          <UiButton
+          <Button
             size="sm"
             :variant="conversationOnly ? 'primary' : 'ghost'"
             :aria-pressed="conversationOnly"
@@ -226,19 +226,19 @@ function onAskKeydown(event: KeyboardEvent) {
             @click="emit('update:conversationOnly', !conversationOnly)"
           >
             仅对话
-          </UiButton>
+          </Button>
         </div>
         <span class="conversation-composer__hint">Enter 发送 · Shift+Enter 换行</span>
-        <UiButton
+        <Button
           v-if="running || cancelling"
           size="sm"
-          :busy="cancelling"
+          :loading="cancelling"
           :agent-id="`${agentIdPrefix}.stop`"
           @click="emit('cancel')"
         >
           {{ cancelling ? "正在停止" : "停止" }}
-        </UiButton>
-        <UiButton
+        </Button>
+        <Button
           v-else
           variant="primary"
           size="sm"
@@ -247,7 +247,7 @@ function onAskKeydown(event: KeyboardEvent) {
           @click="emit('send')"
         >
           发送
-        </UiButton>
+        </Button>
       </div>
     </template>
 

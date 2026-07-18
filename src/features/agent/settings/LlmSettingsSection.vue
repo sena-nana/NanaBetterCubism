@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { SettingsRow, UiButton, UiCard, UiInput } from "@lilia/ui";
+import { Button, Card, Input } from "../../../ui";
 import { computed, onMounted, ref } from "vue";
 import {
   normalizeCommandError,
@@ -106,47 +106,47 @@ async function test() {
 
 <template>
   <section class="settings-section" data-agent-id="settings.llm">
-    <UiCard title="模型配置" :loading="loading" agent-id="settings.llm.card">
+    <Card :loading="loading" agent-id="settings.llm.card">
+      <h2>模型配置</h2>
       <p class="card-description">配置 OpenAI 兼容 API。密钥仅保存在本机凭据库，不会回显。</p>
 
       <template v-if="!loading">
-        <SettingsRow label="Base URL" hint="例如 https://api.openai.com/v1 或本地兼容代理。">
-          <UiInput
+        <label class="settings-field">
+          <span><strong>Base URL</strong><small>例如 https://api.openai.com/v1 或本地兼容代理。</small></span>
+          <Input
             v-model="baseUrl"
             :disabled="operationBusy"
             placeholder="https://api.openai.com/v1"
             agent-id="settings.llm.base-url"
           />
-        </SettingsRow>
+        </label>
 
-        <SettingsRow
-          label="API Key"
-          :hint="hasApiKey ? '已保存密钥。留空保存可保留原密钥。' : '尚未保存密钥。'"
-        >
-          <UiInput
+        <label class="settings-field">
+          <span><strong>API Key</strong><small>{{ hasApiKey ? "已保存密钥。留空保存可保留原密钥。" : "尚未保存密钥。" }}</small></span>
+          <Input
             v-model="apiKey"
             :disabled="operationBusy"
             type="password"
             placeholder="sk-..."
             agent-id="settings.llm.api-key"
           />
-        </SettingsRow>
+        </label>
 
-        <SettingsRow label="Model" hint="聊天与工具调用使用的模型 ID。可手动填写，或测试连接后从列表选择。">
-          <UiInput
+        <label class="settings-field">
+          <span><strong>Model</strong><small>聊天与工具调用使用的模型 ID。可手动填写，或测试连接后从列表选择。</small></span>
+          <Input
             v-model="model"
             :disabled="operationBusy"
             placeholder="gpt-4o-mini"
             agent-id="settings.llm.model"
           />
-        </SettingsRow>
+        </label>
 
-        <SettingsRow
+        <div
           v-if="availableModels.length"
-          label="可用模型"
-          hint="来自最近一次成功的连接测试。"
-          stacked
+          class="settings-field settings-field--stacked"
         >
+          <span><strong>可用模型</strong><small>来自最近一次成功的连接测试。</small></span>
           <div class="model-pool" data-agent-id="settings.llm.model-pool">
             <button
               v-for="id in availableModels"
@@ -161,35 +161,35 @@ async function test() {
               {{ id }}
             </button>
           </div>
-        </SettingsRow>
+        </div>
 
         <div class="actions">
-          <UiButton
+          <Button
             variant="primary"
-            :busy="operation === 'save'"
+            :loading="operation === 'save'"
             :disabled="operationBusy"
             agent-id="settings.llm.save"
             @click="save"
           >
             保存
-          </UiButton>
-          <UiButton
-            :busy="operation === 'test'"
+          </Button>
+          <Button
+            :loading="operation === 'test'"
             :disabled="operationBusy"
             agent-id="settings.llm.test"
             @click="test"
           >
             测试连接
-          </UiButton>
-          <UiButton
+          </Button>
+          <Button
             v-if="hasApiKey"
-            :busy="operation === 'clear'"
+            :loading="operation === 'clear'"
             :disabled="operationBusy"
             agent-id="settings.llm.clear-key"
             @click="clearKey"
           >
             清除密钥
-          </UiButton>
+          </Button>
         </div>
 
         <p
@@ -213,7 +213,7 @@ async function test() {
           </template>
         </p>
       </template>
-    </UiCard>
+    </Card>
   </section>
 </template>
 
@@ -224,6 +224,11 @@ async function test() {
   font-size: 12px;
   line-height: 1.5;
 }
+.settings-field { display: grid; grid-template-columns: minmax(150px, .6fr) minmax(220px, 1fr); align-items: center; gap: 16px; padding: 10px 0; }
+.settings-field > span { display: grid; gap: 3px; }
+.settings-field strong { font-size: 12px; }
+.settings-field small { color: var(--text-muted); line-height: 1.4; }
+.settings-field--stacked { grid-template-columns: 1fr; }
 .actions {
   display: flex;
   flex-wrap: wrap;

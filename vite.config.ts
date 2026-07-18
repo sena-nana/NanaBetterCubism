@@ -5,6 +5,9 @@ import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL(".", import.meta.url));
 
 export default defineLiliaViteConfig({
+  test: {
+    maxWorkers: 2,
+  },
   vite: {
     resolve: {
       dedupe: ["vue", "vue-router", "@lucide/vue"],

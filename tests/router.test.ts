@@ -1,11 +1,11 @@
 import { fireEvent, screen, within } from "@testing-library/vue";
-import { normalizeSettingsTab } from "@lilia/ui";
+import { normalizeSettingsTab } from "../src/ui";
 import { afterEach, describe, expect, it } from "vitest";
 import { nextTick, type App } from "vue";
 import { createMemoryHistory } from "vue-router";
 import appConfigJson from "../app.config.json";
 import { createNanaBetterCubismApp } from "../src/app";
-import { appConfig } from "../src/app.config";
+import { settingsModel } from "../src/app.config";
 
 const mountedApps: Array<{ app: App; root: HTMLElement }> = [];
 
@@ -42,12 +42,8 @@ describe("Agent 壳层路由", () => {
 
     expect(screen.getByRole("link", { name: "记忆" })).toBeTruthy();
     expect(screen.getAllByRole("link", { name: "设置" })).toHaveLength(1);
-    const primary = document.querySelector('[data-agent-id="sidebar.footer.status"]');
-    const selfcheck = document.querySelector('[data-agent-id="sidebar.footer.status.selfcheck"]');
-    expect(primary?.getAttribute("href")).toBe("/settings?tab=model-config");
-    expect(selfcheck?.closest("a")).toBe(primary);
-    expect(document.querySelector('[data-agent-id="sidebar.footer.status.model"]')).toBeNull();
-    expect(document.querySelector('[data-agent-id="sidebar.footer.status.editor"]')).toBeNull();
+    expect(document.querySelector('[data-agent-id="sidebar.footer.status.model"]')?.closest("a")?.getAttribute("href")).toBe("/settings?tab=model-config");
+    expect(document.querySelector('[data-agent-id="sidebar.footer.status.editor"]')?.closest("a")?.getAttribute("href")).toBe("/settings?tab=editor");
     expect(document.querySelector('[data-agent-id="agent.home.model-settings"]')).toBeNull();
     expect(document.querySelector('[data-agent-id="agent.home.editor-settings"]')).toBeNull();
   });
@@ -64,8 +60,8 @@ describe("Agent 壳层路由", () => {
   it("设置页恢复外观、模型配置、Editor 与关于，并默认显示外观", async () => {
     await renderAt("/settings");
 
-    expect(appConfig.settings?.defaultTab).toBe("appearance");
-    expect((appConfig.settings?.tabs ?? []).map((tab) => tab.key)).toEqual([
+    expect(settingsModel.defaultTab).toBe("appearance");
+    expect(settingsModel.tabs.map((tab) => tab.key)).toEqual([
       "appearance",
       "model-config",
       "editor",
@@ -81,7 +77,7 @@ describe("Agent 壳层路由", () => {
   it("旧 llm tab 映射到模型配置", async () => {
     await renderAt("/settings?tab=llm");
 
-    expect(normalizeSettingsTab("llm")).toBe("model-config");
+    expect(normalizeSettingsTab(settingsModel, "llm")).toBe("model-config");
     expect(await screen.findByRole("heading", { level: 2, name: "模型配置" })).toBeTruthy();
   });
 

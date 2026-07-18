@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { UiSegmentedControl } from "@lilia/ui";
+import { SegmentedControl } from "../../ui";
 import { computed, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
@@ -161,7 +161,7 @@ async function toggleMemory(memory: MemoryRecord, enabled: boolean) {
         <h1>记忆</h1>
         <p>按项目查看当前进展，或浏览可跨项目复用的经验。</p>
       </div>
-      <UiSegmentedControl
+      <SegmentedControl
         :model-value="scope"
         :options="scopeOptions"
         aria-label="记忆范围"

@@ -1,4 +1,4 @@
-import { LiliaSettingsPage } from "@lilia/ui";
+import { LiliaSettingsPage } from "./ui";
 import type { RouteRecordRaw } from "vue-router";
 
 const HomePage = () => import("./features/home/HomePage.vue");
