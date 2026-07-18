@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { UiEmptyState, UiSwitch } from "@lilia/ui";
+import { EmptyState, Switch } from "../../../ui";
 import { formatMemoryTime, memoryLayerLabel } from "../memoryPresentation";
 import MarkdownBlock from "../markdown/MarkdownBlock.vue";
 import type { MemoryRecord } from "../types";
@@ -17,7 +17,7 @@ const emit = defineEmits<{
 
 <template>
   <main class="memory-detail-pane" data-agent-id="agent.memory.detail">
-    <UiEmptyState
+    <EmptyState
       v-if="!memory"
       title="选择一条记忆"
       message="从左侧列表选择记忆后可查看各层内容。"
@@ -44,11 +44,10 @@ const emit = defineEmits<{
           </div>
         </div>
 
-        <UiSwitch
+        <Switch
           :model-value="memory.enabled"
           :label="memory.enabled ? '已启用' : '已停用'"
           aria-label="启用记忆"
-          control-position="end"
           :disabled="busy"
           :agent-id="`agent.memory.enable.${memory.id}`"
           @update:model-value="emit('toggle', memory, Boolean($event))"

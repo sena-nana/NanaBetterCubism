@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
-import { UiButton } from "@lilia/ui";
+import { Button } from "../../../ui";
 import { buildConversationTimeline } from "../toolActivityGroups";
 import MarkdownBlock from "../markdown/MarkdownBlock.vue";
 import ToolActivityGroup from "./ToolActivityGroup.vue";
@@ -119,7 +119,7 @@ onMounted(() => void scrollToBottom(true));
       </div>
     </div>
 
-    <UiButton
+    <Button
       v-if="!followOutput && messages.length"
       class="conversation-transcript__latest"
       size="sm"
@@ -127,7 +127,7 @@ onMounted(() => void scrollToBottom(true));
       @click="scrollToBottom(true)"
     >
       回到最新
-    </UiButton>
+    </Button>
   </div>
 </template>
 

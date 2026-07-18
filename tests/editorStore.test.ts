@@ -30,34 +30,25 @@ describe("Editor 侧栏状态", () => {
 
   it("模型未就绪时 Editor 快照不抢占自检展示", async () => {
     bridge.getEditorSnapshot.mockResolvedValue(snapshot("ready", "Editor 已连接。"));
-    const { appConfig } = await import("../src/app.config");
-    const { setLiliaAppConfig, SIDEBAR_FOOTER_STATUSES } = await import("@lilia/ui");
+    const { editorFooterStatus, modelFooterStatus } = await import("../src/features/shell/footerSelfCheck");
     const { useEditorStore } = await import("../src/features/editor/editorStore");
-    setLiliaAppConfig(appConfig);
-
     await useEditorStore().initialize();
 
-    expect(SIDEBAR_FOOTER_STATUSES.find((status) => status.key === "selfcheck")).toMatchObject({
+    expect(modelFooterStatus).toMatchObject({
       label: "模型读取中",
       tone: "warn",
       to: "/settings?tab=model-config",
     });
+    expect(editorFooterStatus).toMatchObject({ label: "Editor 已就绪", tone: "ok" });
 
     stateListener?.(snapshot("failed", "Editor 连接失败。"));
-    expect(SIDEBAR_FOOTER_STATUSES.find((status) => status.key === "selfcheck")).toMatchObject({
-      label: "模型读取中",
-      tone: "warn",
-    });
+    expect(editorFooterStatus).toMatchObject({ label: "Editor 连接异常", tone: "error" });
   });
 
   it("模型就绪后自检跟随 Editor 状态，双端 OK 时显示就绪", async () => {
     bridge.getEditorSnapshot.mockResolvedValue(snapshot("ready", "Editor 已连接。"));
-    const { appConfig } = await import("../src/app.config");
-    const { setLiliaAppConfig, SIDEBAR_FOOTER_STATUSES } = await import("@lilia/ui");
-    const { publishModelFooter } = await import("../src/features/shell/footerSelfCheck");
+    const { editorFooterStatus, modelFooterStatus, publishModelFooter } = await import("../src/features/shell/footerSelfCheck");
     const { useEditorStore } = await import("../src/features/editor/editorStore");
-    setLiliaAppConfig(appConfig);
-
     publishModelFooter({
       label: "example-model",
       title: "已保存模型 example-model。点击进入设置。",
@@ -65,13 +56,11 @@ describe("Editor 侧栏状态", () => {
     });
     await useEditorStore().initialize();
 
-    expect(SIDEBAR_FOOTER_STATUSES.find((status) => status.key === "selfcheck")).toMatchObject({
-      label: "就绪",
-      tone: "ok",
-    });
+    expect(modelFooterStatus).toMatchObject({ label: "example-model", tone: "ok" });
+    expect(editorFooterStatus).toMatchObject({ label: "Editor 已就绪", tone: "ok" });
 
     stateListener?.(snapshot("failed", "Editor 连接失败。"));
-    expect(SIDEBAR_FOOTER_STATUSES.find((status) => status.key === "selfcheck")).toMatchObject({
+    expect(editorFooterStatus).toMatchObject({
       label: "Editor 连接异常",
       tone: "error",
       to: "/settings?tab=editor",
@@ -80,11 +69,8 @@ describe("Editor 侧栏状态", () => {
 
   it("初始化失败后重复进入设置仍保留异常状态", async () => {
     bridge.getEditorSnapshot.mockRejectedValue(new Error("unavailable"));
-    const { appConfig } = await import("../src/app.config");
-    const { setLiliaAppConfig, SIDEBAR_FOOTER_STATUSES } = await import("@lilia/ui");
-    const { publishModelFooter } = await import("../src/features/shell/footerSelfCheck");
+    const { editorFooterStatus, publishModelFooter } = await import("../src/features/shell/footerSelfCheck");
     const { useEditorStore } = await import("../src/features/editor/editorStore");
-    setLiliaAppConfig(appConfig);
     publishModelFooter({
       label: "example-model",
       title: "已保存模型 example-model。点击进入设置。",
@@ -95,7 +81,7 @@ describe("Editor 侧栏状态", () => {
     await store.initialize();
     await store.initialize();
 
-    expect(SIDEBAR_FOOTER_STATUSES.find((status) => status.key === "selfcheck")).toMatchObject({
+    expect(editorFooterStatus).toMatchObject({
       label: "Editor 状态异常",
       tone: "error",
     });

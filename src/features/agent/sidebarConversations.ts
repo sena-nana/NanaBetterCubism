@@ -2,12 +2,12 @@ import MessageSquare from "@lucide/vue/dist/esm/icons/message-square.mjs";
 import Pin from "@lucide/vue/dist/esm/icons/pin.mjs";
 import RotateCcw from "@lucide/vue/dist/esm/icons/rotate-ccw.mjs";
 import Trash2 from "@lucide/vue/dist/esm/icons/trash-2.mjs";
+import { markRaw, reactive } from "vue";
 import {
   SIDEBAR_GROUPS,
   type SidebarGroup,
   type SidebarNavItem,
-} from "@lilia/ui";
-import { markRaw, reactive } from "vue";
+} from "../../ui/shell-state";
 import {
   deleteConversation,
   listConversations,
@@ -27,6 +27,7 @@ const pinIcon = markRaw(Pin);
 const deleteIcon = markRaw(Trash2);
 const retryIcon = markRaw(RotateCcw);
 
+export const sidebarConversationSections = SIDEBAR_GROUPS;
 export const sidebarConversationsState = reactive({
   rows: [] as ConversationSummary[],
   loaded: false,
@@ -80,24 +81,22 @@ export function applyConversationGroup(rows: ConversationSummary[]) {
   sidebarConversationsState.loaded = true;
   sidebarConversationsState.loadError = null;
 
-  const grouped = new Map<string, { title: string; items: SidebarNavItem[] }>();
+  const grouped = new Map<string, { label: string; items: SidebarNavItem[] }>();
   for (const row of rows) {
     const key = row.projectId ? `project:${row.projectId}` : "inbox";
-    const title = row.projectName?.trim() || "收集箱";
-    const group = grouped.get(key) ?? { title, items: [] };
+    const label = row.projectName?.trim() || "收集箱";
+    const group = grouped.get(key) ?? { label, items: [] };
     const phase = getConversationTurnPhase(row.id);
     group.items.push({
       key: row.id,
       label: row.title,
       icon: conversationIcon,
       to: `/chats/${row.id}`,
-      badges: phase === "idle"
-        ? undefined
-        : [{
-            key: "phase",
-            label: phaseLabel(phase),
-            tone: phase === "awaiting_input" ? "warn" : "muted",
-          }],
+      badges: phase === "idle" ? undefined : [{
+        key: "phase",
+        label: phaseLabel(phase),
+        tone: phase === "awaiting_input" ? "warn" : "accent",
+      }],
       tools: [
         {
           key: "pin",
@@ -118,15 +117,15 @@ export function applyConversationGroup(rows: ConversationSummary[]) {
     grouped.set(key, group);
   }
 
-  const groups: SidebarGroup[] = [...grouped].map(([key, group]) => ({
+  const sections: SidebarGroup[] = [...grouped].map(([key, group]) => ({
     key,
-    title: group.title,
+    title: group.label,
     items: group.items,
   }));
-  if (groups.length === 0) {
-    groups.push({ key: "inbox", title: "收集箱", emptyText: "暂无对话", items: [] });
+  if (sections.length === 0) {
+    sections.push({ key: "inbox", title: "收集箱", emptyText: "暂无对话", items: [] });
   }
-  replaceGroups(groups);
+  replaceSections(sections);
 }
 
 export function installAgentShell() {
@@ -141,9 +140,7 @@ export function installAgentShell() {
   }
   unsubscribePhases?.();
   unsubscribePhases = subscribeConversationTurnPhases(() => {
-    if (sidebarConversationsState.loaded) {
-      applyConversationGroup(sidebarConversationsState.rows);
-    }
+    if (sidebarConversationsState.loaded) applyConversationGroup(sidebarConversationsState.rows);
   });
 }
 
@@ -166,8 +163,7 @@ export function requestConversationDelete(row: ConversationSummary) {
 }
 
 export function cancelConversationDelete() {
-  if (sidebarConversationsState.deleting) return;
-  sidebarConversationsState.deleteTarget = null;
+  if (!sidebarConversationsState.deleting) sidebarConversationsState.deleteTarget = null;
 }
 
 export async function confirmConversationDelete(): Promise<string | null> {
@@ -179,9 +175,7 @@ export async function confirmConversationDelete(): Promise<string | null> {
     await deleteConversation(target.id);
     sidebarConversationsState.deleteTarget = null;
     clearConversationTurnPhase(target.id);
-    applyConversationGroup(
-      sidebarConversationsState.rows.filter((row) => row.id !== target.id),
-    );
+    applyConversationGroup(sidebarConversationsState.rows.filter((row) => row.id !== target.id));
     return target.id;
   } catch (error) {
     sidebarConversationsState.actionError = normalizeCommandError(error).message;
@@ -197,8 +191,7 @@ export function dismissConversationError() {
 }
 
 function compareConversations(left: ConversationSummary, right: ConversationSummary) {
-  return Number(right.pinned) - Number(left.pinned)
-    || right.updatedAt.localeCompare(left.updatedAt);
+  return Number(right.pinned) - Number(left.pinned) || right.updatedAt.localeCompare(left.updatedAt);
 }
 
 function phaseLabel(phase: ReturnType<typeof getConversationTurnPhase>) {
@@ -209,32 +202,24 @@ function phaseLabel(phase: ReturnType<typeof getConversationTurnPhase>) {
 }
 
 function applyLoadingGroup() {
-  replaceGroups([
-    { key: "conversations-loading", title: "对话", emptyText: "正在加载对话…", items: [] },
-  ]);
+  replaceSections([{ key: "conversations-loading", title: "对话", emptyText: "正在加载对话…", items: [] }]);
 }
 
 function applyErrorGroup() {
-  replaceGroups([
-    {
-      key: "conversations-error",
-      title: "对话",
-      emptyText: "无法加载对话",
-      items: [],
-      tools: [
-        {
-          key: "retry",
-          label: "重试",
-          icon: retryIcon,
-          onSelect: () => ensureSidebarConversationsLoaded(true)
-            .then(() => undefined)
-            .catch(() => undefined),
-        },
-      ],
-    },
-  ]);
+  replaceSections([{
+    key: "conversations-error",
+    title: "对话",
+    emptyText: "无法加载对话",
+    items: [],
+    tools: [{
+      key: "retry",
+      label: "重试",
+      icon: retryIcon,
+      onSelect: () => ensureSidebarConversationsLoaded(true).then(() => undefined).catch(() => undefined),
+    }],
+  }]);
 }
 
-function replaceGroups(groups: SidebarGroup[]) {
-  SIDEBAR_GROUPS.splice(0, SIDEBAR_GROUPS.length, ...groups);
+function replaceSections(sections: SidebarGroup[]) {
+  SIDEBAR_GROUPS.splice(0, SIDEBAR_GROUPS.length, ...sections);
 }

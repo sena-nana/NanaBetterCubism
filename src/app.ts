@@ -1,30 +1,35 @@
 import { createApp } from "vue";
-import {
-  createRouter,
-  createWebHistory,
-  type RouterHistory,
-} from "vue-router";
-import { installCommandRegistry } from "@lilia/ui/commands";
-import {
-  LiliaAppRoot,
-  LiliaDesktopShell,
-  installLiliaAppRuntime,
-} from "@lilia/ui";
-import { appConfig } from "./app.config";
+import { createRouter, createWebHistory, RouterView, type RouterHistory } from "vue-router";
+import { appConfig, settingsModel } from "./app.config";
 import { commands } from "./commands";
 import { installNanaBetterCubismDiagnostics } from "./diagnostics";
-import { useLlmConfigStore } from "./features/agent/llmConfigStore";
 import { installConversationRuntimeStore } from "./features/agent/conversationRuntimeStore";
+import { useLlmConfigStore } from "./features/agent/llmConfigStore";
 import { installAgentShell } from "./features/agent/sidebarConversations";
 import { useEditorStore } from "./features/editor/editorStore";
 import { routes } from "./routes";
+import {
+  LiliaDesktopShell,
+  installCommandRegistry,
+  installCornerStyle,
+  installNativeAppearance,
+  installTauriNativeAppearanceAdapter,
+  provideSettings,
+  setLiliaUiConfig,
+} from "./ui";
 
 export function createNanaBetterCubismApp(history?: RouterHistory) {
-  const app = createApp(LiliaAppRoot);
+  const app = createApp(RouterView);
   const router = createNanaBetterCubismRouter(history);
 
-  installLiliaAppRuntime({ app, config: appConfig });
+  setLiliaUiConfig(appConfig);
+  if (typeof window !== "undefined" && "__TAURI_INTERNALS__" in window) {
+    installTauriNativeAppearanceAdapter();
+  }
+  installCornerStyle();
+  installNativeAppearance();
   installCommandRegistry(app, commands);
+  provideSettings(app, settingsModel);
   app.use(router);
   installShellState();
   if (

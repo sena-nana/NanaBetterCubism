@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import RefreshCw from "@lucide/vue/dist/esm/icons/refresh-cw.mjs";
-import { UiButton, UiEmptyState, UiIconButton, UiInput } from "@lilia/ui";
+import { Button, EmptyState, IconButton, Input } from "../../../ui";
 import { computed } from "vue";
 import { formatMemoryTime } from "../memoryPresentation";
 import type { MemoryRecord, MemoryScope, ProjectRecord } from "../types";
@@ -58,7 +58,7 @@ function updateProject(event: Event) {
       </label>
 
       <div class="memory-search">
-        <UiInput
+        <Input
           :model-value="search"
           type="search"
           aria-label="搜索记忆"
@@ -66,11 +66,11 @@ function updateProject(event: Event) {
           agent-id="agent.memory.search"
           @update:model-value="emit('update:search', $event)"
         />
-        <UiIconButton
+        <IconButton
           :icon="RefreshCw"
           label="刷新记忆"
           size="md"
-          :busy="refreshing"
+          :loading="refreshing"
           :disabled="loading"
           agent-id="agent.memory.refresh"
           @click="emit('refresh')"
@@ -79,7 +79,7 @@ function updateProject(event: Event) {
     </div>
 
     <div class="memory-list-pane__body">
-      <UiEmptyState
+      <EmptyState
         v-if="loading"
         title="正在加载记忆"
         message="正在读取本地记忆。"
@@ -88,10 +88,10 @@ function updateProject(event: Event) {
 
       <div v-else-if="error" class="memory-list-error" role="alert" data-agent-id="agent.memory.error">
         <p>{{ error }}</p>
-        <UiButton size="sm" agent-id="agent.memory.retry" @click="emit('retry')">重试</UiButton>
+        <Button size="sm" agent-id="agent.memory.retry" @click="emit('retry')">重试</Button>
       </div>
 
-      <UiEmptyState
+      <EmptyState
         v-else-if="!memories.length"
         :title="emptyTitle"
         :message="emptyMessage"

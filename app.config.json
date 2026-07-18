@@ -4,6 +4,10 @@
   "version": "0.1.0",
   "identifier": "com.senanana.nanabettercubism",
   "storageKeyPrefix": "nanabettercubism",
+  "ui": {
+    "preset": "lilia",
+    "density": "compact"
+  },
   "shell": {
     "homeTitle": "首页",
     "homeDescription": "连接 Cubism Editor，开始建模与对话。",
