@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { SurfaceMode } from "../../ui/contract";
 import {
   IconButton,
   LiliaSidebarFrame,
@@ -10,6 +11,10 @@ import {
   type SidebarActionItem,
 } from "../../ui";
 
+const { surfaceMode } = defineProps<{
+  surfaceMode: SurfaceMode;
+}>();
+
 function selectAction(action: SidebarActionItem) {
   if (action.disabled || !action.onSelect) return;
   void action.onSelect();
@@ -17,7 +22,7 @@ function selectAction(action: SidebarActionItem) {
 </script>
 
 <template>
-  <LiliaSidebarFrame aria-label="主导航">
+  <LiliaSidebarFrame aria-label="主导航" :surface-mode="surfaceMode">
     <template #top>
       <div class="app-sidebar__top">
         <component v-if="SIDEBAR_TOP_CONTENT" :is="SIDEBAR_TOP_CONTENT" />

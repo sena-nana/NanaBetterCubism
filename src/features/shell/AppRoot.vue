@@ -104,7 +104,7 @@ function toggleSidebar() {
             :return-to="returnTo"
             :surface-mode="sidebarSurfaceMode"
           />
-          <AppSidebar v-else />
+          <AppSidebar v-else :surface-mode="sidebarSurfaceMode" />
         </LiliaSectionNavigation>
 
         <LiliaPrimaryContent
