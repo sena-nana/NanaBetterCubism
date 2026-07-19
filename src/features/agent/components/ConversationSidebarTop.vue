@@ -71,8 +71,8 @@ async function deleteSelectedConversation() {
 <template>
   <div class="conversation-sidebar-top">
     <div class="conversation-sidebar-top__actions">
-      <Button class="conversation-sidebar-top__primary" agent-id="sidebar.new-chat" @click="startConversation">
-        <MessageSquarePlus :size="15" aria-hidden="true" /><span>新对话</span>
+      <Button :icon="MessageSquarePlus" class="conversation-sidebar-top__primary" agent-id="sidebar.new-chat" @click="startConversation">
+        新对话
       </Button>
       <Popover :open="active" aria-label="搜索会话" placement="bottom" agent-id="sidebar.search" @update:open="setSearchOpen">
         <template #trigger><IconButton :icon="Search" label="搜索会话" agent-id="sidebar.search.open" /></template>
