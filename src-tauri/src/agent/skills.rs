@@ -50,6 +50,7 @@ const PARAMETER_EDITING_TOOLS: &[&str] = &[
     "clear_parameter_values",
     "preview_parameter_batch",
     "execute_parameter_batch",
+    "get_parameter_batch_result",
     "cancel_parameter_batch",
     "preview_add_parameter_key",
     "preview_delete_parameter_key",

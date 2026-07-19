@@ -417,7 +417,7 @@ mod tests {
         let body = validate_and_normalize(
             "project",
             "眼睛参数",
-            "## Overview\n已完成眼睛参数结构。\n## Stage\nParamAngleX 已对齐。\n",
+            "## Overview\n已完成眼睛参数结构。\n## Stage\n事务提交并完成回读验证。\n## Structure\nParamAngleX 已对齐。\n",
         )
         .unwrap();
         assert!(body.contains("# 眼睛参数"));
@@ -425,7 +425,11 @@ mod tests {
         assert!(body.contains("## Decisions\n"));
         let layers = strict_layers("project", &body).unwrap();
         assert_eq!(layers[0].1, "已完成眼睛参数结构。");
-        assert_eq!(layers[1].1, "ParamAngleX 已对齐。");
+        assert_eq!(layers[1].1, "事务提交并完成回读验证。");
+        assert_eq!(layers[2].1, "ParamAngleX 已对齐。");
+        for forbidden in ["operationId", "ModelUID", "DocumentUID", "RequestId"] {
+            assert!(!body.contains(forbidden));
+        }
     }
 
     #[test]

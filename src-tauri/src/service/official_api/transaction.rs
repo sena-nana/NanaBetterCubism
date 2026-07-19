@@ -9,6 +9,7 @@ use crate::domain::{
 };
 use crate::protocol::RpcClient;
 use crate::service::{
+    insert_bounded_result,
     transaction::{mutation_request, require_execution_true, require_true, ExecutionError},
     ActiveOperation, OperationOwnerKind,
 };
@@ -67,7 +68,8 @@ impl EditorService {
                 cancel: cancel.clone(),
                 _permit: permit,
             });
-            inner.editor_edit_results.insert(
+            insert_bounded_result(
+                &mut inner.editor_edit_results,
                 operation_id.clone(),
                 EditorEditResult {
                     operation_id: operation_id.clone(),
@@ -343,14 +345,11 @@ impl EditorService {
                 inner.operation = None;
             }
             inner.clear_previews();
-            inner
-                .editor_edit_results
-                .insert(operation_id.into(), result.clone());
-            if inner.editor_edit_results.len() > 32 {
-                if let Some(key) = inner.editor_edit_results.keys().next().cloned() {
-                    inner.editor_edit_results.remove(&key);
-                }
-            }
+            insert_bounded_result(
+                &mut inner.editor_edit_results,
+                operation_id.into(),
+                result.clone(),
+            );
             if inner.rpc.is_some() && inner.model_uid.is_some() {
                 inner.snapshot.state = EditorConnectionState::Ready;
                 inner.snapshot.capabilities.batch_create_parameters = true;

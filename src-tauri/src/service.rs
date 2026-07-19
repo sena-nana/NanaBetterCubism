@@ -14,8 +14,8 @@ pub use commands::{
 use crate::domain::{
     build_preview, BatchFinished, BatchOutcome, BatchPhase, EditorCapabilities,
     EditorConnectionState, EditorEditResult, EditorSnapshot, ModelStructure, OperationAccepted,
-    ParameterBatchInput, ParameterBatchPreview, PartParameterQueryResult, StoredEditorEditPlan,
-    StoredPlan, EDIT_API_VERSION,
+    ParameterBatchInput, ParameterBatchPreview, ParameterBatchResult, PartParameterQueryResult,
+    StoredEditorEditPlan, StoredPlan, EDIT_API_VERSION,
 };
 use crate::protocol::{RpcClient, RpcError};
 use credentials::{load_token, save_token};
@@ -43,6 +43,16 @@ const EDITOR_STATE_EVENT: &str = "cubism://editor-state";
 const BATCH_PROGRESS_EVENT: &str = "cubism://parameter-batch-progress";
 const BATCH_FINISHED_EVENT: &str = "cubism://parameter-batch-finished";
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(1);
+const MAX_STORED_TRANSACTION_RESULTS: usize = 32;
+
+fn insert_bounded_result<T>(results: &mut HashMap<String, T>, id: String, result: T) {
+    if !results.contains_key(&id) && results.len() >= MAX_STORED_TRANSACTION_RESULTS {
+        if let Some(expired) = results.keys().next().cloned() {
+            results.remove(&expired);
+        }
+    }
+    results.insert(id, result);
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -145,6 +155,7 @@ struct ServiceState {
     previews: PendingPreviews<StoredPlan>,
     editor_edit_previews: PendingPreviews<StoredEditorEditPlan>,
     editor_edit_results: HashMap<String, EditorEditResult>,
+    parameter_batch_results: HashMap<String, ParameterBatchResult>,
     document_refs: HashMap<String, String>,
     operation: Option<ActiveOperation>,
     part_query_in_progress: bool,
@@ -154,6 +165,14 @@ impl ServiceState {
     fn clear_previews(&mut self) {
         self.previews.clear();
         self.editor_edit_previews.clear();
+    }
+
+    fn set_parameter_batch_result(&mut self, result: ParameterBatchResult) {
+        insert_bounded_result(
+            &mut self.parameter_batch_results,
+            result.operation_id.clone(),
+            result,
+        );
     }
 }
 
@@ -777,6 +796,7 @@ impl EditorService {
                 cancel: cancel.clone(),
                 _permit: permit,
             });
+            inner.set_parameter_batch_result(ParameterBatchResult::running(operation_id.clone()));
             inner.snapshot.state = EditorConnectionState::Editing;
             inner.snapshot.capabilities.batch_create_parameters = false;
             inner.snapshot.capabilities.find_part_parameters = false;
@@ -795,6 +815,19 @@ impl EditorService {
                 .await;
         });
         Ok(accepted)
+    }
+
+    pub(crate) async fn parameter_batch_result(
+        &self,
+        operation_id: &str,
+    ) -> Result<ParameterBatchResult, CommandError> {
+        self.inner
+            .lock()
+            .await
+            .parameter_batch_results
+            .get(operation_id)
+            .cloned()
+            .ok_or_else(|| CommandError::new("missing_operation", "没有该参数批量操作。"))
     }
 
     pub(crate) async fn cancel_batch(
@@ -1199,6 +1232,12 @@ impl EditorService {
         message: String,
         structure: Option<ModelStructure>,
     ) {
+        let finished = BatchFinished {
+            operation_id: operation_id.into(),
+            outcome,
+            created_ids,
+            message,
+        };
         {
             let mut inner = self.inner.lock().await;
             if inner
@@ -1215,7 +1254,7 @@ impl EditorService {
                 inner.snapshot.groups = structure.groups.clone();
                 inner.structure = structure;
             }
-            let safe_to_continue = !matches!(outcome, BatchOutcome::Unknown);
+            let safe_to_continue = !matches!(&finished.outcome, BatchOutcome::Unknown);
             inner.snapshot.state = if safe_to_continue {
                 EditorConnectionState::Ready
             } else {
@@ -1225,14 +1264,9 @@ impl EditorService {
             inner.snapshot.capabilities.find_part_parameters = safe_to_continue;
             inner.snapshot.capabilities.official_api = safe_to_continue;
             inner.snapshot.capabilities.official_edit_api = safe_to_continue;
-            inner.snapshot.message = message.clone();
+            inner.snapshot.message = finished.message.clone();
+            inner.set_parameter_batch_result(ParameterBatchResult::finished(&finished));
         }
-        let finished = BatchFinished {
-            operation_id: operation_id.into(),
-            outcome,
-            created_ids,
-            message,
-        };
         let _ = app.emit(BATCH_FINISHED_EVENT, &finished);
         self.emit_snapshot(app).await;
     }
@@ -1487,6 +1521,48 @@ mod tests {
             ..Default::default()
         };
         assert!(verify_plan(&plan, &structure));
+    }
+
+    #[tokio::test]
+    async fn parameter_batch_results_report_running_and_reject_unknown_handles() {
+        let service = EditorService::default();
+        {
+            let mut inner = service.inner.lock().await;
+            inner.set_parameter_batch_result(ParameterBatchResult::running("batch-running".into()));
+        }
+
+        let running = service
+            .parameter_batch_result("batch-running")
+            .await
+            .unwrap();
+        assert_eq!(running.outcome, crate::domain::EditorEditOutcome::Running);
+        assert!(matches!(
+            service.parameter_batch_result("missing").await,
+            Err(error) if error.code == "missing_operation"
+        ));
+    }
+
+    #[test]
+    fn transaction_result_history_is_bounded_and_keeps_the_new_operation() {
+        let mut state = ServiceState::default();
+        for index in 0..MAX_STORED_TRANSACTION_RESULTS {
+            state.set_parameter_batch_result(ParameterBatchResult::finished(&BatchFinished {
+                operation_id: format!("finished-{index}"),
+                outcome: BatchOutcome::Committed,
+                created_ids: Vec::new(),
+                message: "verified".into(),
+            }));
+        }
+        state.set_parameter_batch_result(ParameterBatchResult::running("active".into()));
+
+        assert_eq!(
+            state.parameter_batch_results.len(),
+            MAX_STORED_TRANSACTION_RESULTS
+        );
+        assert_eq!(
+            state.parameter_batch_results["active"].outcome,
+            crate::domain::EditorEditOutcome::Running
+        );
     }
 
     #[tokio::test]

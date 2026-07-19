@@ -256,6 +256,42 @@ pub struct BatchFinished {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ParameterBatchResult {
+    pub operation_id: String,
+    pub outcome: EditorEditOutcome,
+    pub created_ids: Vec<String>,
+    pub message: String,
+}
+
+impl ParameterBatchResult {
+    pub fn running(operation_id: String) -> Self {
+        Self {
+            operation_id,
+            outcome: EditorEditOutcome::Running,
+            created_ids: Vec::new(),
+            message: "参数批量事务正在执行。".into(),
+        }
+    }
+
+    pub fn finished(value: &BatchFinished) -> Self {
+        let outcome = match value.outcome {
+            BatchOutcome::Committed => EditorEditOutcome::Committed,
+            BatchOutcome::CancelledRolledBack => EditorEditOutcome::CancelledRolledBack,
+            BatchOutcome::FailedRolledBack => EditorEditOutcome::FailedRolledBack,
+            BatchOutcome::Failed => EditorEditOutcome::Failed,
+            BatchOutcome::Unknown => EditorEditOutcome::Unknown,
+        };
+        Self {
+            operation_id: value.operation_id.clone(),
+            outcome,
+            created_ids: value.created_ids.clone(),
+            message: value.message.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExistingParameter {
     pub id: String,
@@ -791,5 +827,25 @@ mod tests {
         assert!(value.get("modelUid").is_none());
         assert!(value.get("documentUid").is_none());
         assert!(value.get("token").is_none());
+    }
+
+    #[test]
+    fn maps_batch_finished_outcomes_to_pollable_results() {
+        let committed = ParameterBatchResult::finished(&BatchFinished {
+            operation_id: "batch".into(),
+            outcome: BatchOutcome::Committed,
+            created_ids: vec!["ParamAngleX".into()],
+            message: "verified".into(),
+        });
+        assert_eq!(committed.outcome, EditorEditOutcome::Committed);
+        assert_eq!(committed.created_ids, vec!["ParamAngleX"]);
+
+        let unknown = ParameterBatchResult::finished(&BatchFinished {
+            operation_id: "batch-unknown".into(),
+            outcome: BatchOutcome::Unknown,
+            created_ids: Vec::new(),
+            message: "uncertain".into(),
+        });
+        assert_eq!(unknown.outcome, EditorEditOutcome::Unknown);
     }
 }
