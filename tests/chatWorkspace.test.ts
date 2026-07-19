@@ -154,6 +154,25 @@ describe("对话工作区", () => {
     expect(regular.emitted().send).toHaveLength(1);
   });
 
+  it("使用现有提问面板处理保存到项目记忆的选择", async () => {
+    const view = render(ConversationComposer, {
+      props: {
+        modelValue: "",
+        pendingAction: {
+          kind: "question",
+          actionId: "memory-offer",
+          conversationId: "a",
+          question: "是否将这次已验证的修改保存到项目记忆？",
+          options: ["保存到项目记忆", "暂不保存"],
+        },
+      },
+    });
+
+    expect(screen.queryByRole("button", { name: "授权本次操作" })).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "保存到项目记忆" }));
+    expect(view.emitted().answer).toEqual([["保存到项目记忆"]]);
+  });
+
   it("电脑代理授权只能通过独立的批准或拒绝操作", async () => {
     const view = render(ConversationComposer, {
       props: {

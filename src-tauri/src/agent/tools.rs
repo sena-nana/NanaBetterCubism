@@ -7,8 +7,9 @@ use crate::agent::memory_recall::MemoryRecallRequest;
 use crate::agent::skills;
 use crate::agent::store::{truncate_summary, PendingQuestion, PlanStep};
 use crate::agent::{new_id, AgentError, AgentRuntime, PendingUserAction};
-use crate::domain::ParameterBatchInput;
+use crate::domain::{EditorEditOutcome, ParameterBatchInput};
 use crate::service::{CommandError, EditorService};
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{atomic::AtomicBool, Arc, LazyLock};
@@ -77,6 +78,17 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
                 "type": "object",
                 "properties": { "operationId": { "type": "string" } },
                 "required": ["operationId"]
+            }),
+        ),
+        tool(
+            "get_parameter_batch_result",
+            "查询参数修改结果",
+            "查询参数批量事务的 Rust 终态与回读验证资格。仅 canOfferProjectMemory=true 时可询问是否保存项目记忆。",
+            json!({
+                "type": "object",
+                "properties": { "operationId": { "type": "string" } },
+                "required": ["operationId"],
+                "additionalProperties": false
             }),
         ),
         tool(
@@ -617,6 +629,26 @@ async fn execute_tool_inner(
                 .map_err(map_command_error)?;
             Ok(tool_result(serde_json::to_string_pretty(&accepted)?))
         }
+        "get_parameter_batch_result" => {
+            let operation_id = args
+                .get("operationId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| AgentError::new("invalid_arguments", "缺少 operationId"))?;
+            let result = editor
+                .parameter_batch_result(operation_id)
+                .await
+                .map_err(map_command_error)?;
+            let project_bound = runtime
+                .store
+                .conversation_project_id(conversation_id)?
+                .is_some();
+            let can_offer = can_offer_project_memory(
+                &result.outcome,
+                result.outcome == EditorEditOutcome::Committed,
+                project_bound,
+            );
+            Ok(tool_result(result_with_memory_offer(&result, can_offer)?))
+        }
         "cancel_parameter_batch" => {
             let operation_id = args
                 .get("operationId")
@@ -649,7 +681,16 @@ async fn execute_tool_inner(
                 .editor_edit_result(operation_id)
                 .await
                 .map_err(map_command_error)?;
-            Ok(tool_result(serde_json::to_string_pretty(&result)?))
+            let project_bound = runtime
+                .store
+                .conversation_project_id(conversation_id)?
+                .is_some();
+            let can_offer = can_offer_project_memory(
+                &result.outcome,
+                result.verification.is_some(),
+                project_bound,
+            );
+            Ok(tool_result(result_with_memory_offer(&result, can_offer)?))
         }
         "cancel_editor_edit" => {
             let operation_id = args
@@ -923,6 +964,32 @@ fn required_string<'a>(args: &'a Value, key: &str) -> Result<&'a str, AgentError
         .ok_or_else(|| AgentError::new("invalid_arguments", format!("缺少 {key}")))
 }
 
+fn can_offer_project_memory(
+    outcome: &EditorEditOutcome,
+    reread_verified: bool,
+    project_bound: bool,
+) -> bool {
+    *outcome == EditorEditOutcome::Committed && reread_verified && project_bound
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResultWithMemoryOffer<'a, T> {
+    #[serde(flatten)]
+    result: &'a T,
+    can_offer_project_memory: bool,
+}
+
+fn result_with_memory_offer(
+    result: &impl Serialize,
+    can_offer_project_memory: bool,
+) -> Result<String, AgentError> {
+    Ok(serde_json::to_string_pretty(&ResultWithMemoryOffer {
+        result,
+        can_offer_project_memory,
+    })?)
+}
+
 pub(crate) fn is_computer_tool(name: &str) -> bool {
     matches!(
         name,
@@ -1064,8 +1131,12 @@ mod tests {
         let parameter_names = names(&parameter);
         assert!(parameter_names.contains("preview_add_parameter"));
         assert!(parameter_names.contains("execute_editor_edit"));
+        assert!(parameter_names.contains("get_parameter_batch_result"));
         assert!(!parameter_names.contains("preview_add_part"));
         assert!(!parameter_names.contains("recall_memory"));
+
+        let object = tool_definitions(&BTreeSet::from(["object-editing".into()])).unwrap();
+        assert!(!names(&object).contains("get_parameter_batch_result"));
 
         let combined = tool_definitions(&BTreeSet::from([
             "parameter-editing".into(),
@@ -1175,6 +1246,27 @@ mod tests {
         ] {
             assert!(!arguments.contains(sensitive));
             assert!(!result.contains(sensitive));
+        }
+    }
+
+    #[test]
+    fn project_memory_offer_requires_verified_commit_and_bound_project() {
+        let cases = [
+            (EditorEditOutcome::Committed, true, true, true),
+            (EditorEditOutcome::Committed, false, true, false),
+            (EditorEditOutcome::Committed, true, false, false),
+            (EditorEditOutcome::Running, true, true, false),
+            (EditorEditOutcome::CancelledRolledBack, true, true, false),
+            (EditorEditOutcome::FailedRolledBack, true, true, false),
+            (EditorEditOutcome::Failed, true, true, false),
+            (EditorEditOutcome::Unknown, true, true, false),
+        ];
+        for (outcome, verified, project_bound, expected) in cases {
+            assert_eq!(
+                can_offer_project_memory(&outcome, verified, project_bound),
+                expected,
+                "unexpected eligibility for {outcome:?}",
+            );
         }
     }
 }

@@ -11,3 +11,4 @@ description: Preview, confirm, execute, cancel, and verify selection, Part, obje
 4. Execute with `execute_editor_edit`, poll `get_editor_edit_result`, and report success only for a verified committed outcome.
 5. On cancellation, disconnect, timeout, or unknown commit/rollback state, report the real outcome and never retry automatically.
 6. Do not infer or promise mesh geometry, UV/topology, Warp control-point, animation, physics-editing, save/export, atlas, PSD, Glue-creation, or ArtPath capabilities.
+7. Only when `get_editor_edit_result` returns `canOfferProjectMemory: true`, call `ask_user` once with `保存到项目记忆` and `暂不保存`. On save, read `memory-recall`, recall the project topic, then read and follow `project-memory`; store only verified fixed-layer facts, never operation handles, session UIDs, or raw RPC. On decline/cancel or a false flag, do not offer or write memory.
