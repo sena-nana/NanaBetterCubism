@@ -52,7 +52,7 @@ describe("单应用模板工具链", () => {
     expect(report.checks.every((check) => check.ok)).toBe(true);
   }, 15_000);
 
-  it("app.config.json 是应用名称、标题和版本的同步来源", () => {
+  it("同步应用元数据并保留主窗口透明合成层", () => {
     const config = appConfig();
     const pkg = JSON.parse(readFileSync(resolve("package.json"), "utf-8"));
     const tauri = JSON.parse(readFileSync(resolve("src-tauri/tauri.conf.json"), "utf-8"));
@@ -63,5 +63,7 @@ describe("单应用模板工具链", () => {
     expect(tauri.version).toBe(config.version);
     expect(tauri.identifier).toBe(config.identifier);
     expect(tauri.app.windows[0].title).toBe(config.productTitle);
+    expect(tauri.app.windows[0].transparent).toBe(true);
+    expect(tauri.app.windows[0].backgroundColor).toBe("#00000000");
   });
 });
