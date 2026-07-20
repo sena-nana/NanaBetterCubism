@@ -1,4 +1,4 @@
-import { computed, reactive, ref } from "vue";
+import { computed, reactive } from "vue";
 import {
   getMessages,
   getPendingUserAction,
@@ -13,6 +13,7 @@ import {
 } from "./bridge";
 import type {
   AgentToolEvent,
+  AgentTurnMode,
   ChatMessage,
   ChatImageDraft,
   ComputerOperationStatus,
@@ -32,6 +33,8 @@ export interface ConversationRuntimeState {
   draft: string;
   imageDrafts: ChatImageDraft[];
   askAnswer: string;
+  planRevision: string;
+  composerMode: AgentTurnMode;
   error: string | null;
   loading: boolean;
   loaded: boolean;
@@ -46,9 +49,6 @@ const states = reactive<Record<string, InternalConversationRuntimeState>>({});
 const phaseListeners = new Set<() => void>();
 let installPromise: Promise<void> | null = null;
 let localSequence = 0;
-
-/** Shared composer preference; not persisted. */
-export const conversationOnly = ref(false);
 
 export function installConversationRuntimeStore() {
   if (installPromise) return installPromise;
@@ -71,6 +71,10 @@ export function installConversationRuntimeStore() {
       const state = runtimeState(payload.conversationId);
       state.pendingAction = payload.action;
       state.askAnswer = "";
+      if (payload.action.kind === "plan_approval") {
+        state.composerMode = "plan";
+        state.planRevision = "";
+      }
       if (payload.action.kind === "computer_approval") {
         state.computerStatus = "awaiting_approval";
       }
@@ -137,6 +141,7 @@ export async function loadConversationRuntime(
     if (!changedWhileLoading) {
       state.plan = plan;
       state.pendingAction = pendingAction;
+      if (pendingAction?.kind === "plan_approval") state.composerMode = "plan";
       if (pendingAction?.kind === "computer_approval") {
         state.computerStatus = "awaiting_approval";
       }
@@ -241,6 +246,8 @@ function runtimeState(conversationId: string) {
       draft: "",
       imageDrafts: [],
       askAnswer: "",
+      planRevision: "",
+      composerMode: "default",
       error: null,
       loading: true,
       loaded: false,

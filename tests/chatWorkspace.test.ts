@@ -32,6 +32,7 @@ const bridge = vi.hoisted(() => ({
   deleteConversation: vi.fn(async () => undefined),
   cancelTurn: vi.fn(async () => ({ state: "idle" as const })),
   decideComputerOperation: vi.fn(async () => undefined),
+  decidePlan: vi.fn(async () => "execution_started" as const),
   getLlmConfig: vi.fn(async () => ({ baseUrl: null, model: "test-model", hasApiKey: true })),
   getMessages: vi.fn(),
   getPendingUserAction: vi.fn(async () => null),
@@ -87,6 +88,7 @@ beforeEach(() => {
   bridge.answerQuestion.mockClear();
   bridge.cancelTurn.mockClear();
   bridge.decideComputerOperation.mockClear();
+  bridge.decidePlan.mockReset().mockResolvedValue("execution_started");
   bridge.getMessages.mockReset().mockResolvedValue([]);
   bridge.getPendingUserAction.mockReset().mockResolvedValue(null);
   bridge.getPlan.mockReset().mockResolvedValue(null);
@@ -209,6 +211,70 @@ describe("对话工作区", () => {
     expect(view.emitted().decide).toEqual([[false], [true]]);
   });
 
+  it("计划确认支持修改、取消和执行，Enter 只提交非空修改", async () => {
+    const view = render(ConversationComposer, {
+      props: {
+        modelValue: "",
+        planRevision: "补充参数回读验收",
+        pendingAction: {
+          kind: "plan_approval",
+          actionId: "plan-1",
+          conversationId: "a",
+          title: "整理参数结构",
+        },
+      },
+    });
+
+    const revision = screen.getByPlaceholderText("输入修改要求");
+    await fireEvent.keyDown(revision, { key: "Enter", shiftKey: true });
+    expect(view.emitted().decidePlan).toBeUndefined();
+    await fireEvent.keyDown(revision, { key: "Enter" });
+    await fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    await fireEvent.click(screen.getByRole("button", { name: "按计划执行" }));
+    expect(view.emitted().decidePlan).toEqual([
+      ["revise", "补充参数回读验收"],
+      ["cancel"],
+      ["approve"],
+    ]);
+  });
+
+  it("计划与仅对话互斥，并按对话保留模式", async () => {
+    const router = await renderChat("a");
+    const planButton = await screen.findByRole("button", { name: "计划" });
+    await fireEvent.click(planButton);
+    expect(planButton.getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "仅对话" }).getAttribute("aria-pressed")).toBe("false");
+
+    await router.push("/chats/b");
+    await waitForConversationLoad("b");
+    expect(screen.getByRole("button", { name: "计划" }).getAttribute("aria-pressed")).toBe("false");
+    await fireEvent.click(screen.getByRole("button", { name: "仅对话" }));
+
+    await router.push("/chats/a");
+    expect((await screen.findByRole("button", { name: "计划" })).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "仅对话" }).getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("计划决策失败时保留待确认状态，成功后按真实结果切换模式", async () => {
+    bridge.getPendingUserAction.mockResolvedValue({
+      kind: "plan_approval",
+      actionId: "plan-a",
+      conversationId: "a",
+      title: "参数计划",
+    });
+    bridge.decidePlan.mockRejectedValueOnce(new Error("暂时失败"));
+    await renderChat("a");
+
+    await fireEvent.click(await screen.findByRole("button", { name: "按计划执行" }));
+    expect(await screen.findByRole("button", { name: "按计划执行" })).toBeTruthy();
+    expect(getConversationRuntime("a").phase).toBe("awaiting_input");
+
+    await fireEvent.click(screen.getByRole("button", { name: "按计划执行" }));
+    expect(bridge.decidePlan).toHaveBeenLastCalledWith("plan-a", "approve", undefined);
+    expect(getConversationRuntime("a").composerMode).toBe("default");
+    expect(getConversationRuntime("a").phase).toBe("running");
+  });
+
   it("授权事件绑定当前会话并调用独立授权命令", async () => {
     bridge.getMessages.mockResolvedValue([]);
     const router = createRouter({
@@ -279,7 +345,7 @@ describe("对话工作区", () => {
     const input = await screen.findByPlaceholderText("描述你想在 Cubism Editor 中完成的事…");
     await fireEvent.update(input, "A 请求");
     await fireEvent.keyDown(input, { key: "Enter" });
-    expect(bridge.sendMessage).toHaveBeenCalledWith("a", "A 请求", [], false);
+    expect(bridge.sendMessage).toHaveBeenCalledWith("a", "A 请求", [], "default");
 
     await router.push("/chats/b");
     await waitForConversationLoad("b");
@@ -287,7 +353,7 @@ describe("对话工作区", () => {
     await fireEvent.update(inputB, "B 请求");
     await fireEvent.keyDown(inputB, { key: "Enter" });
 
-    expect(bridge.sendMessage).toHaveBeenNthCalledWith(2, "b", "B 请求", [], false);
+    expect(bridge.sendMessage).toHaveBeenNthCalledWith(2, "b", "B 请求", [], "default");
     expect(bridge.cancelTurn).not.toHaveBeenCalled();
     expect(getConversationRuntime("a").phase).toBe("running");
     expect(getConversationRuntime("b").phase).toBe("running");

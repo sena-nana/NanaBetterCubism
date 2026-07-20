@@ -14,12 +14,12 @@ import { useLlmConfigStore } from "../agent/llmConfigStore";
 import {
   beginConversationTurn,
   confirmConversationTurn,
-  conversationOnly,
   failConversationTurn,
+  getConversationRuntime,
   installConversationRuntimeStore,
 } from "../agent/conversationRuntimeStore";
 import { ensureSidebarConversationsLoaded } from "../agent/sidebarConversations";
-import type { ChatImageDraft } from "../agent/types";
+import type { AgentTurnMode, ChatImageDraft } from "../agent/types";
 import { useChatImageDrafts } from "../agent/useChatImageDrafts";
 
 const router = useRouter();
@@ -29,6 +29,7 @@ const sending = ref(false);
 const loading = ref(true);
 const error = ref<string | null>(null);
 const imageDrafts = ref<ChatImageDraft[]>([]);
+const composerMode = ref<AgentTurnMode>("default");
 const canCompose = computed(() => llm.state.config.hasApiKey && !sending.value);
 const imageDraftController = useChatImageDrafts({
   drafts: imageDrafts,
@@ -64,13 +65,14 @@ async function startConversation() {
   error.value = null;
   try {
     const created = await createConversation();
+    getConversationRuntime(created.id).composerMode = composerMode.value;
     const optimisticId = beginConversationTurn(created.id, content, images);
     try {
       const persisted = await sendMessage(
         created.id,
         content,
         images.map((image) => image.draftId),
-        conversationOnly.value,
+        composerMode.value,
       );
       confirmConversationTurn(created.id, optimisticId, persisted);
     } catch (err) {
@@ -117,7 +119,7 @@ async function startConversation() {
       <div data-agent-id="home.start-card">
         <ConversationComposer
           v-model="draft"
-          v-model:conversation-only="conversationOnly"
+          v-model:mode="composerMode"
           agent-id-prefix="agent.home"
           :disabled="!llm.state.config.hasApiKey"
           :running="sending"

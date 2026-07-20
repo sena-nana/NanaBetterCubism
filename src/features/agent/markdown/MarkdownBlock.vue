@@ -3,6 +3,7 @@ import { computed, ref, type CSSProperties } from "vue";
 import { openExternalUrl } from "../externalLinks";
 import MarkdownInline from "./MarkdownInline.vue";
 import MarkdownList from "./MarkdownList.vue";
+import MarkdownMermaid from "./MarkdownMermaid.vue";
 import {
   normalizeMarkdownSource,
   parseMarkdownBlocks,
@@ -40,6 +41,7 @@ async function openLink(href: string) {
         <MarkdownInline :tokens="block.inlines" @open-link="openLink" />
       </component>
       <pre v-else-if="block.type === 'code'" class="markdown-block__code" :data-language="block.language || undefined"><code>{{ block.text }}</code></pre>
+      <MarkdownMermaid v-else-if="block.type === 'mermaid'" :source="block.text" />
       <div v-else-if="block.type === 'table'" class="markdown-block__table-wrap">
         <table class="markdown-block__table">
           <thead>

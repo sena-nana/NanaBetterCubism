@@ -8,6 +8,12 @@ pub(super) enum ToolMode {
     Preview,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolAccess {
+    ReadOnly,
+    Mutating,
+}
+
 #[derive(Clone, Copy)]
 enum FieldKind {
     String { max_len: Option<usize> },
@@ -35,6 +41,7 @@ pub(super) struct ToolSpec {
     pub(super) description: &'static str,
     pub(super) display_name: &'static str,
     pub(super) mode: ToolMode,
+    pub(super) access: ToolAccess,
     pub(super) fields: Vec<FieldSpec>,
     pub(super) uses_model: bool,
     pub(super) destructive: bool,
@@ -163,7 +170,7 @@ pub(super) fn choice(
     FieldSpec::new(input, editor, required, FieldKind::Choice(choices))
 }
 
-pub(super) fn direct(
+pub(super) fn query(
     tool_name: &'static str,
     display_name: &'static str,
     method: &'static str,
@@ -177,6 +184,28 @@ pub(super) fn direct(
         description,
         display_name,
         mode: ToolMode::Direct,
+        access: ToolAccess::ReadOnly,
+        fields,
+        uses_model,
+        destructive: false,
+    }
+}
+
+pub(super) fn effect(
+    tool_name: &'static str,
+    display_name: &'static str,
+    method: &'static str,
+    description: &'static str,
+    uses_model: bool,
+    fields: Vec<FieldSpec>,
+) -> ToolSpec {
+    ToolSpec {
+        tool_name,
+        method,
+        description,
+        display_name,
+        mode: ToolMode::Direct,
+        access: ToolAccess::Mutating,
         fields,
         uses_model,
         destructive: false,
@@ -197,6 +226,7 @@ pub(super) fn preview(
         description,
         display_name,
         mode: ToolMode::Preview,
+        access: ToolAccess::Mutating,
         fields,
         uses_model: true,
         destructive,

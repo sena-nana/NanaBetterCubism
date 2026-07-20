@@ -5,6 +5,7 @@ pub(crate) mod images;
 mod llm;
 mod memory_markdown;
 mod memory_recall;
+mod plan;
 mod runtime;
 mod skills;
 pub(crate) mod store;
@@ -13,10 +14,11 @@ pub(crate) mod tools;
 mod user_action;
 
 pub use commands::*;
+pub use plan::{PlanApprovalAction, PlanDecision, PlanDecisionResult};
 pub use store::AgentStore;
 pub use user_action::PendingUserAction;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{hash_map::Entry, BTreeSet, HashMap};
 use std::sync::atomic::AtomicBool;
@@ -75,6 +77,7 @@ pub struct PendingContinuation {
 }
 
 pub struct AgentTurnState {
+    pub mode: AgentTurnMode,
     pub messages: Vec<serde_json::Value>,
     pub active_skills: BTreeSet<String>,
     pub action_steps: usize,
@@ -83,14 +86,30 @@ pub struct AgentTurnState {
 }
 
 impl AgentTurnState {
-    pub fn new(messages: Vec<serde_json::Value>) -> Self {
+    pub fn new(messages: Vec<serde_json::Value>, mode: AgentTurnMode) -> Self {
         Self {
+            mode,
             messages,
             active_skills: BTreeSet::new(),
             action_steps: 0,
             computer_action_steps: 0,
             skill_load_steps: 0,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTurnMode {
+    #[default]
+    Default,
+    ConversationOnly,
+    Plan,
+}
+
+impl AgentTurnMode {
+    pub fn is_read_only(self) -> bool {
+        matches!(self, Self::ConversationOnly | Self::Plan)
     }
 }
 
@@ -168,6 +187,10 @@ impl AgentRuntime {
             .values()
             .any(|continuation| continuation.conversation_id == conversation_id)
             || self.store.get_pending_question(conversation_id)?.is_some()
+            || self
+                .store
+                .get_pending_plan_approval(conversation_id)?
+                .is_some()
             || self
                 .computer_control
                 .pending_approval_for_conversation(conversation_id)
@@ -291,6 +314,11 @@ pub const CONVERSATION_ONLY_PROMPT: &str = "\
 ## Conversation-only mode
 Read-only: do not edit the model, run previews/executes, or use computer-operation tools. You may inspect Editor/model state and answer questions. Do not read editing or computer-operation SKILLs. If the user asks for edits, tell them to turn off conversation-only mode.";
 
+pub const PLAN_MODE_PROMPT: &str = "\
+## Plan mode
+This turn is strictly read-only. Inspect the current Editor and model state with available read-only tools before planning. Do not connect or disconnect Editor, preview or execute edits, change temporary values, write memory, or operate the computer.
+Finish by calling submit_plan exactly once with a complete structured plan. Include a concise title and summary, ordered production steps, Mermaid diagram source, acceptance checks, assumptions, and risks. The diagram must contain Mermaid source only: no Markdown fence, HTML, or external links. A plan-mode turn that ends without submit_plan is an error. Plan approval only starts execution; every concrete Cubism edit still requires its normal preview, confirmation, transaction, and verification.";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,7 +344,10 @@ mod tests {
 
     #[test]
     fn pending_answer_resumes_the_same_turn_skill_state() {
-        let mut state = AgentTurnState::new(vec![json!({"role": "system", "content": "base"})]);
+        let mut state = AgentTurnState::new(
+            vec![json!({"role": "system", "content": "base"})],
+            AgentTurnMode::Plan,
+        );
         state.active_skills.insert("parameter-editing".into());
         state.action_steps = 3;
         state.skill_load_steps = 1;
@@ -334,6 +365,7 @@ mod tests {
         );
         assert_eq!(resumed.action_steps, 3);
         assert_eq!(resumed.skill_load_steps, 1);
+        assert_eq!(resumed.mode, AgentTurnMode::Plan);
         assert_eq!(
             resumed.messages.last().unwrap(),
             &json!({
@@ -342,7 +374,9 @@ mod tests {
                 "content": "确认",
             })
         );
-        assert!(AgentTurnState::new(Vec::new()).active_skills.is_empty());
+        assert!(AgentTurnState::new(Vec::new(), AgentTurnMode::Default)
+            .active_skills
+            .is_empty());
     }
 
     #[tokio::test]
@@ -370,7 +404,11 @@ mod tests {
         assert!(!second.load(Ordering::SeqCst));
 
         runtime.finish_turn(&conversation_a.id, &first).await;
-        assert!(runtime.cancel_flags.lock().await.contains_key(&conversation_b.id));
+        assert!(runtime
+            .cancel_flags
+            .lock()
+            .await
+            .contains_key(&conversation_b.id));
         let restarted = runtime.begin_turn(&conversation_a.id).await.unwrap();
         runtime.finish_turn(&conversation_b.id, &second).await;
         runtime.finish_turn(&conversation_a.id, &restarted).await;
@@ -409,6 +447,7 @@ mod tests {
                 conversation_id: conversation.id.clone(),
                 tool_call_id: "tool-call".into(),
                 state: AgentTurnState {
+                    mode: AgentTurnMode::Default,
                     messages: Vec::new(),
                     active_skills: BTreeSet::new(),
                     action_steps: 0,
@@ -487,7 +526,7 @@ mod tests {
             PendingContinuation {
                 conversation_id: conversation.id,
                 tool_call_id: "computer-call".into(),
-                state: AgentTurnState::new(Vec::new()),
+                state: AgentTurnState::new(Vec::new(), AgentTurnMode::Default),
             },
         );
 

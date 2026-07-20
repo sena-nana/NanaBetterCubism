@@ -28,7 +28,7 @@ export interface MarkdownListNode {
 
 export interface MarkdownBlockNode {
   key: string;
-  type: "paragraph" | "heading" | "code" | "list" | "quote" | "table";
+  type: "paragraph" | "heading" | "code" | "mermaid" | "list" | "quote" | "table";
   inlines: InlineToken[];
   text: string;
   language: string;

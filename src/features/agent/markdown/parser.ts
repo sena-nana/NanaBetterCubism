@@ -26,7 +26,10 @@ export function parseMarkdownBlocks(source: string): MarkdownBlockNode[] {
 
     const fence = parseFence(lines, index);
     if (fence) {
-      blocks.push(makeBlock("code", key, { text: fence.text, language: fence.language }));
+      const type = fence.closed && fence.language.toLowerCase() === "mermaid"
+        ? "mermaid"
+        : "code";
+      blocks.push(makeBlock(type, key, { text: fence.text, language: fence.language }));
       index = fence.nextIndex;
       continue;
     }
@@ -89,12 +92,14 @@ function parseFence(lines: string[], startIndex: number) {
   const match = (lines[startIndex] ?? "").match(/^\s*(```+|~~~+)\s*([A-Za-z0-9_-]*)?.*$/);
   if (!match) return null;
   const marker = match[1] ?? "```";
-  const closing = marker[0]!.repeat(marker.length);
+  const closingPattern = new RegExp(`^${marker[0]}{${marker.length},}\\s*$`);
   const code: string[] = [];
   let index = startIndex + 1;
+  let closed = false;
   while (index < lines.length) {
     const line = lines[index] ?? "";
-    if (line.trimStart().startsWith(closing)) {
+    if (closingPattern.test(line.trim())) {
+      closed = true;
       index += 1;
       break;
     }
@@ -104,6 +109,7 @@ function parseFence(lines: string[], startIndex: number) {
   return {
     text: code.join("\n").replace(/\n+$/, ""),
     language: match[2] ?? "",
+    closed,
     nextIndex: index,
   };
 }

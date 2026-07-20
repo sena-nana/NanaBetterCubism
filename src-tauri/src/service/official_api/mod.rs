@@ -7,6 +7,7 @@ mod verification;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use self::schema::ToolAccess;
 use self::schema::{field_schema, function_tool, ToolMode, ToolSpec};
 use super::{CommandError, EditorService};
 use serde_json::{json, Map, Value};
@@ -33,15 +34,21 @@ fn spec(name: &str) -> Option<&'static ToolSpec> {
 }
 
 pub(crate) fn tool_display_name(name: &str) -> Option<&'static str> {
-    spec(name)
-        .map(|spec| spec.display_name)
-        .or(match name {
-            "list_editor_notifications" => Some("读取 Editor 通知"),
-            "execute_editor_edit" => Some("执行 Editor 修改"),
-            "get_editor_edit_result" => Some("查询 Editor 修改结果"),
-            "cancel_editor_edit" => Some("取消 Editor 修改"),
-            _ => None,
-        })
+    spec(name).map(|spec| spec.display_name).or(match name {
+        "list_editor_notifications" => Some("读取 Editor 通知"),
+        "execute_editor_edit" => Some("执行 Editor 修改"),
+        "get_editor_edit_result" => Some("查询 Editor 修改结果"),
+        "cancel_editor_edit" => Some("取消 Editor 修改"),
+        _ => None,
+    })
+}
+
+pub(crate) fn tool_access(name: &str) -> Option<ToolAccess> {
+    spec(name).map(|spec| spec.access).or(match name {
+        "list_editor_notifications" | "get_editor_edit_result" => Some(ToolAccess::ReadOnly),
+        "execute_editor_edit" | "cancel_editor_edit" => Some(ToolAccess::Mutating),
+        _ => None,
+    })
 }
 
 pub(crate) fn tool_definitions() -> Vec<Value> {

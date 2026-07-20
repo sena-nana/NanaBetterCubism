@@ -4,10 +4,16 @@ import MarkdownBlock from "../src/features/agent/markdown/MarkdownBlock.vue";
 import PlanTodoPanel from "../src/features/agent/components/PlanTodoPanel.vue";
 import ConversationTranscript from "../src/features/agent/components/ConversationTranscript.vue";
 import { toolActivityPresentation } from "../src/features/agent/conversationPresentation";
+import { parseMarkdownBlocks } from "../src/features/agent/markdown/parser";
 import type { ChatMessage, ConversationPlan } from "../src/features/agent/types";
 
 const opener = vi.hoisted(() => ({ openUrl: vi.fn(async () => undefined) }));
+const mermaid = vi.hoisted(() => ({
+  initialize: vi.fn(),
+  render: vi.fn(async () => ({ svg: '<svg data-rendered="true"></svg>' })),
+}));
 vi.mock("@tauri-apps/plugin-opener", () => opener);
+vi.mock("mermaid", () => ({ default: mermaid }));
 
 function message(overrides: Partial<ChatMessage>): ChatMessage {
   return {
@@ -88,6 +94,31 @@ describe("成熟对话展示", () => {
     });
     await fireEvent.click(screen.getByRole("button", { expanded: true }));
     expect(screen.getByRole("status")).toBeTruthy();
+  });
+
+  it("仅将闭合 Mermaid 围栏延迟渲染，并使用严格安全级别", async () => {
+    expect(parseMarkdownBlocks("```mermaid\nflowchart TD\nA --> B\n```")[0]?.type)
+      .toBe("mermaid");
+    expect(parseMarkdownBlocks("```mermaid\nflowchart TD\nA --> B")[0]?.type)
+      .toBe("code");
+    expect(parseMarkdownBlocks("```mermaid\nflowchart TD\n```not-closed")[0]?.type)
+      .toBe("code");
+
+    const view = render(MarkdownBlock, {
+      props: { content: "```mermaid\nflowchart TD\nA --> B\n```" },
+    });
+    await vi.waitFor(() => expect(mermaid.render).toHaveBeenCalled());
+    expect(mermaid.initialize).toHaveBeenCalledWith(expect.objectContaining({
+      startOnLoad: false,
+      securityLevel: "strict",
+    }));
+    expect(view.container.querySelector("svg[data-rendered='true']")).toBeTruthy();
+
+    await view.rerender({
+      content: `\`\`\`mermaid\n${"A".repeat(20_001)}\n\`\`\``,
+    });
+    expect(await screen.findByText("图表内容过长，已保留原始图源。")).toBeTruthy();
+    expect(view.container.querySelector("pre code")?.textContent).toHaveLength(20_001);
   });
 
   it("用户向上阅读时不抢滚动，并能主动回到最新", async () => {

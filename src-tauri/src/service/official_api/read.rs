@@ -1,7 +1,7 @@
 use super::{
     schema::{
-        boolean, choice, direct, limited_string, normalize_arguments, number, parameter_filters,
-        parameter_values, string, strings, ToolSpec, LOG_TYPES,
+        boolean, choice, effect, limited_string, normalize_arguments, number, parameter_filters,
+        parameter_values, query, string, strings, ToolSpec, LOG_TYPES,
     },
     CommandError, CurrentModelingDocument, EditorService,
 };
@@ -65,7 +65,7 @@ fn normalize_modeling_document_path(
 
 pub(super) fn specs() -> Vec<ToolSpec> {
     vec![
-        direct(
+        query(
             "get_parameter_values",
             "读取参数值",
             "GetParameterValues",
@@ -73,7 +73,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             true,
             vec![strings("ids", "Ids", false)],
         ),
-        direct(
+        effect(
             "set_parameter_values",
             "设置临时参数值",
             "SetParameterValues",
@@ -81,7 +81,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             true,
             vec![parameter_values("parameters", "Parameters", true)],
         ),
-        direct(
+        query(
             "get_parameters",
             "读取参数定义",
             "GetParameters",
@@ -89,7 +89,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             true,
             vec![],
         ),
-        direct(
+        query(
             "get_parameter_groups",
             "读取参数组",
             "GetParameterGroups",
@@ -97,7 +97,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             true,
             vec![],
         ),
-        direct(
+        query(
             "list_editor_documents",
             "列出 Editor 文档",
             "GetDocuments",
@@ -105,7 +105,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             false,
             vec![],
         ),
-        direct(
+        query(
             "get_editor_document",
             "读取 Editor 文档",
             "GetDocument",
@@ -113,7 +113,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             false,
             vec![string("documentRef", "", true)],
         ),
-        direct(
+        query(
             "get_current_document",
             "读取当前文档",
             "GetCurrentDocumentUID",
@@ -121,7 +121,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             false,
             vec![],
         ),
-        direct(
+        query(
             "get_current_model",
             "检查当前模型",
             "GetCurrentModelUID",
@@ -129,7 +129,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             false,
             vec![],
         ),
-        direct(
+        query(
             "get_current_edit_mode",
             "读取编辑模式",
             "GetCurrentEditMode",
@@ -137,7 +137,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             false,
             vec![],
         ),
-        direct(
+        effect(
             "clear_parameter_values",
             "清除临时参数值",
             "ClearParameterValues",
@@ -145,7 +145,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             true,
             vec![],
         ),
-        direct(
+        query(
             "get_physics_info",
             "读取物理设置",
             "GetPhysicsInfo",
@@ -153,7 +153,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             true,
             vec![number("fps", "Fps", false, Some(0.0), None)],
         ),
-        direct(
+        effect(
             "send_cubism_log",
             "发送 Cubism 日志",
             "SendCubismLog",
@@ -165,7 +165,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                 boolean("display", "Display", false),
             ],
         ),
-        direct(
+        effect(
             "notify_physics_file_exported",
             "监听物理文件导出",
             "NotifyPhysicsFileExported",
@@ -173,7 +173,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             false,
             vec![boolean("enabled", "Enabled", true)],
         ),
-        direct(
+        effect(
             "notify_moc_file_exported",
             "监听 MOC3 文件导出",
             "NotifyMocFileExported",
@@ -181,7 +181,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             false,
             vec![boolean("enabled", "Enabled", true)],
         ),
-        direct(
+        effect(
             "notify_motion_file_exported",
             "监听 Motion 文件导出",
             "NotifyMotionFileExported",
@@ -189,7 +189,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             false,
             vec![boolean("enabled", "Enabled", true)],
         ),
-        direct(
+        effect(
             "notify_motion_sync_file_exported",
             "监听 MotionSync 文件导出",
             "NotifyMotionSyncFileExported",
@@ -197,7 +197,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             false,
             vec![boolean("enabled", "Enabled", true)],
         ),
-        direct(
+        effect(
             "notify_change_edit_mode",
             "监听编辑模式变化",
             "NotifyChangeEditMode",
@@ -205,7 +205,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             false,
             vec![boolean("enabled", "Enabled", true)],
         ),
-        direct(
+        query(
             "get_parameter_keys",
             "读取参数关键点",
             "GetParameterKeys",
@@ -213,7 +213,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             true,
             vec![string("objectId", "ObjectId", true)],
         ),
-        direct(
+        query(
             "get_objects_by_parameter_key",
             "读取关键点关联对象",
             "GetObjectsByParameterKeys",
@@ -224,7 +224,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                 number("keyValue", "KeyValue", true, None, None),
             ],
         ),
-        direct(
+        query(
             "get_parameter_structure",
             "读取参数结构",
             "GetParameterStructure",
@@ -232,7 +232,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             true,
             vec![],
         ),
-        direct(
+        query(
             "get_selected_objects",
             "读取已选对象",
             "GetSelectedObjecs",
@@ -240,7 +240,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             true,
             vec![],
         ),
-        direct(
+        query(
             "get_part_structure",
             "读取 Part 结构",
             "GetPartStructure",
@@ -248,7 +248,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             true,
             vec![],
         ),
-        direct(
+        query(
             "get_object",
             "读取对象属性",
             "GetObject",
@@ -259,7 +259,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
                 parameter_filters("parameters", "Parameters", false),
             ],
         ),
-        direct(
+        query(
             "get_deformer_structure",
             "读取 Deformer 结构",
             "GetDeformerStructure",
