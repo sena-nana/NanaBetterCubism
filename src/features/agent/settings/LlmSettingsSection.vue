@@ -156,11 +156,11 @@ async function test() {
         </label>
 
         <label class="settings-field">
-          <span><strong>上下文窗口</strong><small>模型上下文窗口大小（token）。留空则不启用自动压缩。</small></span>
+          <span><strong>上下文窗口</strong><small>模型上下文窗口大小（token）。留空则按默认 256000 估算。</small></span>
           <Input
             v-model="contextWindow"
             :disabled="operationBusy"
-            placeholder="128000"
+            placeholder="256000"
             agent-id="settings.llm.context-window"
           />
         </label>
