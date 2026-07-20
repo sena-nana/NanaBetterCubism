@@ -543,6 +543,19 @@ impl EditorService {
                     tokio::time::sleep(Duration::from_secs(2)).await;
                     continue;
                 }
+                Err(error) if matches!(error, RpcError::Protocol(_)) => {
+                    // Editor 返回了无法解析的参数结构（例如条目缺 Name/Min/Default/Max）。
+                    // 连接本身健康，沿用上次成功的结构，下一轮再重试，避免拖垮连接。
+                    self.set_snapshot(
+                        app,
+                        EditorConnectionState::Ready,
+                        "参数结构解析失败，已沿用上次结构；连接保持可用。",
+                        true,
+                    )
+                    .await;
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
                 value => value?,
             };
 
@@ -1483,6 +1496,72 @@ mod tests {
             Some("ParamGroupFace")
         );
         assert_eq!(structure.parameters[1].group_id, None);
+    }
+
+    #[test]
+    fn parse_structure_tolerates_entries_missing_optional_fields() {
+        let structure = parse_structure(&json!({
+            "ParameterStructure": {
+                "Entries": [
+                    {
+                        "EntryType": "ParameterGroup",
+                        "Id": "ParamGroupFace",
+                        "Parameters": [{
+                            "EntryType": "Parameter",
+                            "Id": "ParamEyeLOpen"
+                        }]
+                    },
+                    {
+                        "EntryType": "Parameter",
+                        "Id": "ParamAngleX"
+                    },
+                    {
+                        "EntryType": "Parameter",
+                        "Name": "无 Id 的条目应被跳过"
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+        assert_eq!(structure.groups.len(), 1);
+        assert_eq!(structure.groups[0].id, "ParamGroupFace");
+        assert_eq!(structure.groups[0].name, "ParamGroupFace");
+        assert_eq!(structure.parameters.len(), 2);
+        let unnamed = &structure.parameters[0];
+        assert_eq!(unnamed.id, "ParamEyeLOpen");
+        assert_eq!(unnamed.name, "");
+        assert_eq!(unnamed.min, 0.0);
+        assert_eq!(unnamed.default, 0.0);
+        assert_eq!(unnamed.max, 0.0);
+        assert_eq!(unnamed.group_id.as_deref(), Some("ParamGroupFace"));
+        let root = &structure.parameters[1];
+        assert_eq!(root.id, "ParamAngleX");
+        assert_eq!(root.name, "");
+        assert_eq!(root.group_id, None);
+    }
+
+    #[tokio::test]
+    async fn fetch_structure_keeps_connection_healthy_when_editor_omits_name() {
+        // Editor 合法返回缺 Name 的参数条目时，fetch_structure 不应抛 RpcError::Protocol，
+        // 否则 run_session 会在轮询时把连接置为 Failed 并退出循环，导致无法重连。
+        let port = response_server(vec![(
+            "GetParameterStructure",
+            json!({
+                "ParameterStructure": {
+                    "Entries": [
+                        { "EntryType": "Parameter", "Id": "ParamAngleX" },
+                        { "EntryType": "Parameter", "Id": "ParamEyeLOpen", "Name": "Eye L" }
+                    ]
+                }
+            }),
+        )])
+        .await;
+        let rpc = RpcClient::connect(port).await.unwrap();
+        let structure = fetch_structure(&rpc, "model").await.unwrap();
+        assert_eq!(structure.parameters.len(), 2);
+        assert_eq!(structure.parameters[0].id, "ParamAngleX");
+        assert_eq!(structure.parameters[0].name, "");
+        assert_eq!(structure.parameters[1].name, "Eye L");
     }
 
     #[test]
