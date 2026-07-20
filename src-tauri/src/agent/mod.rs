@@ -21,11 +21,46 @@ pub use user_action::PendingUserAction;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{hash_map::Entry, BTreeSet, HashMap};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 use uuid::Uuid;
+
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageInputSupport {
+    #[default]
+    Unknown,
+    Supported,
+    Unsupported,
+}
+
+impl ImageInputSupport {
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Self::Unknown => 0,
+            Self::Supported => 1,
+            Self::Unsupported => 2,
+        }
+    }
+
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Supported,
+            2 => Self::Unsupported,
+            _ => Self::Unknown,
+        }
+    }
+
+    pub fn is_supported(self) -> bool {
+        matches!(self, Self::Supported)
+    }
+
+    pub fn is_unsupported(self) -> bool {
+        matches!(self, Self::Unsupported)
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,6 +103,7 @@ pub struct AgentRuntime {
     pub cancel_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub pending_continuations: Mutex<HashMap<String, PendingContinuation>>,
     conversation_lifecycle: Mutex<()>,
+    image_capability: AtomicU8,
 }
 
 pub struct PendingContinuation {
@@ -150,7 +186,36 @@ impl AgentRuntime {
             cancel_flags: Mutex::new(HashMap::new()),
             pending_continuations: Mutex::new(HashMap::new()),
             conversation_lifecycle: Mutex::new(()),
+            image_capability: AtomicU8::new(ImageInputSupport::Unknown.as_u8()),
         }
+    }
+
+    pub fn image_capability(&self) -> ImageInputSupport {
+        ImageInputSupport::from_u8(self.image_capability.load(Ordering::SeqCst))
+    }
+
+    pub fn set_image_capability(
+        &self,
+        app: &AppHandle,
+        capability: ImageInputSupport,
+        reason: Option<&str>,
+    ) {
+        let previous = self.image_capability.swap(capability.as_u8(), Ordering::SeqCst);
+        if previous == capability.as_u8() {
+            return;
+        }
+        let _ = app.emit(
+            "agent://image-capability",
+            json!({
+                "supported": capability.is_supported(),
+                "unsupported": capability.is_unsupported(),
+                "reason": reason,
+            }),
+        );
+    }
+
+    pub fn reset_image_capability(&self, app: &AppHandle) {
+        self.set_image_capability(app, ImageInputSupport::Unknown, None);
     }
 
     pub async fn begin_turn(&self, conversation_id: &str) -> Result<Arc<AtomicBool>, AgentError> {

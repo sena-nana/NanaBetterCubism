@@ -109,6 +109,8 @@ pub struct LlmConfigView {
     pub base_url: Option<String>,
     pub model: Option<String>,
     pub has_api_key: bool,
+    #[serde(default)]
+    pub image_input_supported: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1207,6 +1209,7 @@ impl AgentStore {
                 .as_ref()
                 .map(|value| !value.is_empty())
                 .unwrap_or(false),
+            image_input_supported: None,
         })
     }
 

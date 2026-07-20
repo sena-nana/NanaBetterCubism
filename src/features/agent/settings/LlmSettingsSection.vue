@@ -210,6 +210,9 @@ async function test() {
           <template v-if="testResult.models.length">
             （可用模型 {{ testResult.models.length }} 个）
           </template>
+          <template v-if="testResult.imageSupported === false">
+            ；该模型不支持图片输入，「查看 Editor 窗口」等能力将禁用，请更换支持视觉的模型。
+          </template>
         </p>
       </template>
     </Card>

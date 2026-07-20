@@ -10,8 +10,8 @@ use crate::agent::tools::{
 };
 use crate::agent::{
     emit_conversations_changed, new_id, AgentError, AgentRuntime, AgentTurnMode, AgentTurnState,
-    PendingContinuation, PendingUserAction, CONVERSATION_ONLY_PROMPT, PLAN_MODE_PROMPT,
-    SYSTEM_PROMPT,
+    ImageInputSupport, PendingContinuation, PendingUserAction, CONVERSATION_ONLY_PROMPT,
+    PLAN_MODE_PROMPT, SYSTEM_PROMPT,
 };
 use crate::service::EditorService;
 use serde_json::{json, Value};
@@ -288,6 +288,7 @@ async fn run_turn_inner(
     cancel: Arc<AtomicBool>,
 ) -> Result<TurnEnd, AgentError> {
     let config = runtime.store.get_llm_config()?;
+    let mut image_stripped_once = false;
     let mut state = if let Some(existing) = existing_state {
         existing
     } else {
@@ -335,18 +336,38 @@ async fn run_turn_inner(
             return Err(AgentError::new("cancelled", "已取消。"));
         }
 
-        let tools = tool_definitions(&state.active_skills, state.mode)?;
+        let image_supported = runtime.image_capability() != ImageInputSupport::Unsupported;
+        let tools = tool_definitions(&state.active_skills, state.mode, image_supported)?;
         let advertised = advertised_tool_names(&tools);
+        let app_for_capability = app.clone();
         let assistant = {
             let conversation_id = conversation_id.to_string();
             let app = app.clone();
-            chat_completions_stream(&config, &state.messages, &tools, move |piece| {
+            match chat_completions_stream(&config, &state.messages, &tools, move |piece| {
                 let _ = app.emit(
                     "agent://turn-delta",
                     json!({ "conversationId": conversation_id, "text": piece }),
                 );
             })
-            .await?
+            .await
+            {
+                Ok(message) => message,
+                Err(error) if error.code == "llm_image_unsupported" && !image_stripped_once => {
+                    image_stripped_once = true;
+                    runtime.set_image_capability(
+                        &app_for_capability,
+                        ImageInputSupport::Unsupported,
+                        Some("model reported image input is not supported"),
+                    );
+                    state.messages.push(json!({
+                        "role": "system",
+                        "content": "系统通知：当前模型不支持图片输入。从现在起禁止调用 capture_cubism_editor_window（查看 Editor 窗口），不要再请求或引用图片；如用户需要查看窗口或图片，请提示前往「设置」更换支持视觉的模型。已有图片内容已转为文本占位，请基于文本继续。"
+                    }));
+                    strip_image_content(&mut state.messages);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
         };
         let text = content_to_text(&assistant.content);
         if !text.is_empty() {
@@ -571,6 +592,13 @@ async fn run_turn_inner(
                         "content": content,
                     }));
                     if let Some(path) = image_path {
+                        if runtime.image_capability() == ImageInputSupport::Unsupported {
+                            state.messages.push(json!({
+                                "role": "user",
+                                "content": "已截取 Cubism Editor 窗口，但当前模型不支持图片输入，无法查看该图像。请基于工具返回的文本结果继续，并提示用户更换支持视觉的模型。"
+                            }));
+                            continue;
+                        }
                         match image_file_to_data_url(&path) {
                             Ok(data_url) => {
                                 state.messages.push(json!({
@@ -640,6 +668,41 @@ fn tool_error_content(error: &AgentError) -> String {
         }
     })
     .to_string()
+}
+
+/// 将消息序列中的 `image_url` 多模态片段替换为文本占位，纯图消息退化为文本。
+/// 用于模型不支持图片输入时剥离图片内容，避免反复触发同一错误。
+pub fn strip_image_content(messages: &mut [Value]) {
+    for message in messages.iter_mut() {
+        let Some(content) = message.get_mut("content") else {
+            continue;
+        };
+        let Value::Array(parts) = content else {
+            continue;
+        };
+        let mut had_image = false;
+        for part in parts.iter_mut() {
+            if part.get("type").and_then(Value::as_str) == Some("image_url") {
+                had_image = true;
+                *part = json!({
+                    "type": "text",
+                    "text": "[图片已隐藏：当前模型不支持图片输入]"
+                });
+            }
+        }
+        if had_image {
+            let text = parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("");
+            *content = Value::String(if text.is_empty() {
+                "[图片已隐藏：当前模型不支持图片输入]".into()
+            } else {
+                text
+            });
+        }
+    }
 }
 
 fn validate_tool_call_batch(
@@ -808,6 +871,50 @@ mod tests {
         assert_eq!(value["ok"], false);
         assert_eq!(value["error"]["code"], "stale_preview");
         assert!(value["error"]["message"].as_str().is_some());
+    }
+
+    #[test]
+    fn strip_image_content_replaces_image_parts_with_text_placeholders() {
+        let mut messages = vec![
+            json!({
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "看这张图" },
+                    { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } }
+                ]
+            }),
+            json!({ "role": "assistant", "content": "好的" }),
+            json!({
+                "role": "user",
+                "content": [
+                    { "type": "image_url", "image_url": { "url": "data:image/png;base64,BBBB" } }
+                ]
+            }),
+            json!({ "role": "system", "content": "保持不变" }),
+        ];
+        strip_image_content(&mut messages);
+
+        let first = &messages[0];
+        assert_eq!(
+            first["content"],
+            Value::String("看这张图[图片已隐藏：当前模型不支持图片输入]".into())
+        );
+
+        let pure_image = &messages[2];
+        assert_eq!(
+            pure_image["content"],
+            Value::String("[图片已隐藏：当前模型不支持图片输入]".into())
+        );
+
+        assert_eq!(messages[1]["content"], "好的");
+        assert_eq!(messages[3]["content"], "保持不变");
+    }
+
+    #[test]
+    fn strip_image_content_leaves_text_only_messages_untouched() {
+        let mut messages = vec![json!({ "role": "user", "content": "纯文本消息" })];
+        strip_image_content(&mut messages);
+        assert_eq!(messages[0]["content"], "纯文本消息");
     }
 
     #[test]

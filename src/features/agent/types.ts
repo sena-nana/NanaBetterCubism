@@ -92,6 +92,7 @@ export interface LlmConfigView {
   baseUrl: string | null;
   model: string | null;
   hasApiKey: boolean;
+  imageInputSupported?: boolean | null;
 }
 
 export interface LlmConfigInput {
@@ -105,6 +106,7 @@ export interface LlmTestResult {
   ok: boolean;
   message: string;
   models: string[];
+  imageSupported?: boolean | null;
 }
 
 export interface AgentTurnDelta {
@@ -197,4 +199,10 @@ export interface AgentComputerOperationEvent {
 export interface AgentPlanEvent {
   conversationId: string;
   plan: ConversationPlan;
+}
+
+export interface AgentImageCapabilityEvent {
+  supported: boolean;
+  unsupported: boolean;
+  reason?: string | null;
 }
