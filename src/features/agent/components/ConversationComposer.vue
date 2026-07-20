@@ -326,7 +326,9 @@ function onPlanRevisionKeydown(event: KeyboardEvent) {
             :agent-id="`${agentIdPrefix}.plan-mode`"
             @click="emit('update:mode', mode === 'plan' ? 'default' : 'plan')"
           >
-            <ListChecks :size="15" aria-hidden="true" />
+            <template #icon>
+              <ListChecks :size="15" aria-hidden="true" />
+            </template>
             计划
           </Button>
         </div>
