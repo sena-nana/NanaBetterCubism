@@ -1,11 +1,15 @@
 use crate::agent::computer_control::ComputerOperationStatus;
 use crate::agent::llm::test_connection;
+use crate::agent::images::{
+    ChatImageAttachment, ImagePrepareInput, ImagePrepareResult,
+};
 use crate::agent::runtime::{continue_after_computer_approval, continue_after_question, run_turn};
 use crate::agent::store::{
     ChatMessage, ConversationPlan, ConversationSummary, LlmConfigInput, LlmConfigView,
     MemoryViewRecord, ProjectRecord,
 };
 use crate::agent::tools::tool_display_name;
+use crate::agent::title::generate_conversation_title;
 use crate::agent::{
     emit_conversations_changed, AgentError, AgentRuntime, CancelTurnResult, PendingUserAction,
 };
@@ -31,6 +35,7 @@ pub struct ChatMessageView {
     tool_name: Option<String>,
     tool_display_name: Option<String>,
     tool_status: Option<String>,
+    attachments: Vec<ChatImageAttachment>,
     created_at: String,
 }
 
@@ -48,6 +53,7 @@ impl From<ChatMessage> for ChatMessageView {
             tool_name: message.tool_name,
             tool_display_name,
             tool_status: message.tool_status,
+            attachments: message.attachments,
             created_at: message.created_at,
         }
     }
@@ -144,18 +150,84 @@ pub async fn agent_get_messages(
 }
 
 #[tauri::command]
+pub async fn agent_prepare_images(
+    app: AppHandle,
+    inputs: Vec<ImagePrepareInput>,
+    remaining_slots: usize,
+) -> Result<ImagePrepareResult, AgentError> {
+    Ok(runtime(&app)?.images.prepare(inputs, remaining_slots))
+}
+
+#[tauri::command]
+pub async fn agent_discard_image_drafts(
+    app: AppHandle,
+    draft_ids: Vec<String>,
+) -> Result<(), AgentError> {
+    runtime(&app)?.images.discard(&draft_ids)
+}
+
+#[tauri::command]
 pub async fn agent_send_message(
     app: AppHandle,
     conversation_id: String,
     content: String,
+    image_draft_ids: Vec<String>,
     conversation_only: Option<bool>,
-) -> Result<(), AgentError> {
+) -> Result<ChatMessageView, AgentError> {
     let text = content.trim().to_string();
-    if text.is_empty() {
+    if text.is_empty() && image_draft_ids.is_empty() {
         return Err(AgentError::new("invalid_message", "消息不能为空。"));
     }
     let runtime = runtime(&app)?;
     let cancel = runtime.begin_turn(&conversation_id).await?;
+    let commit = match runtime.images.commit(&conversation_id, &image_draft_ids) {
+        Ok(commit) => commit,
+        Err(error) => {
+            runtime.finish_turn(&conversation_id, &cancel).await;
+            return Err(error);
+        }
+    };
+    let message = match runtime.store.append_message_with_attachments(
+        &conversation_id,
+        "user",
+        &text,
+        None,
+        None,
+        &commit.attachments,
+    ) {
+        Ok(message) => message,
+        Err(error) => {
+            runtime.images.rollback(commit);
+            runtime.finish_turn(&conversation_id, &cancel).await;
+            return Err(error);
+        }
+    };
+    let title_seed = if text.is_empty() {
+        format!(
+            "查看图片：{}",
+            message
+                .attachments
+                .first()
+                .map(|attachment| attachment.name.as_str())
+                .unwrap_or("图片")
+        )
+    } else {
+        text.clone()
+    };
+    let title: String = title_seed.chars().take(24).collect();
+    let renamed = runtime
+        .store
+        .set_conversation_title_if_default(&conversation_id, &title)
+        .unwrap_or(false);
+    emit_conversations_changed(&app);
+    if renamed {
+        tauri::async_runtime::spawn(generate_conversation_title(
+            app.clone(),
+            runtime.clone(),
+            conversation_id.clone(),
+            title_seed,
+        ));
+    }
     let app_clone = app.clone();
     let runtime_clone = runtime.clone();
     let conversation_only = conversation_only.unwrap_or(false);
@@ -164,13 +236,12 @@ pub async fn agent_send_message(
             app_clone,
             runtime_clone,
             conversation_id,
-            text,
             conversation_only,
             cancel,
         )
         .await;
     });
-    Ok(())
+    Ok(message.into())
 }
 
 #[tauri::command]

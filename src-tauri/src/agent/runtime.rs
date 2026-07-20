@@ -3,7 +3,6 @@ use crate::agent::llm::{
     chat_completions_stream, content_to_text, image_file_to_data_url, ToolCallPayload,
 };
 use crate::agent::skills::{self, MAX_SKILL_LOAD_STEPS, READ_SKILL_TOOL_NAME};
-use crate::agent::title::generate_conversation_title;
 use crate::agent::tools::{
     advertised_tool_names, emit_tool, execute_tool, tool_definitions, ToolExecutionContext,
     ToolOutcome,
@@ -26,7 +25,6 @@ pub async fn run_turn(
     app: AppHandle,
     runtime: Arc<AgentRuntime>,
     conversation_id: String,
-    user_text: String,
     conversation_only: bool,
     cancel: Arc<AtomicBool>,
 ) -> Result<(), AgentError> {
@@ -36,7 +34,7 @@ pub async fn run_turn(
         &runtime,
         editor.inner(),
         &conversation_id,
-        Some(user_text),
+        None,
         None,
         conversation_only,
         cancel.clone(),
@@ -313,32 +311,10 @@ async fn run_turn_inner(
             }
             seeded.push(json!({
                 "role": item.role,
-                "content": item.content,
+                "content": message_content(&item),
             }));
         }
-        if let Some(text) = user_text {
-            runtime
-                .store
-                .append_message(conversation_id, "user", &text, None, None)?;
-            let title: String = text.chars().take(24).collect();
-            let renamed = runtime
-                .store
-                .set_conversation_title_if_default(conversation_id, &title)
-                .unwrap_or(false);
-            emit_conversations_changed(app);
-            if renamed {
-                tauri::async_runtime::spawn(generate_conversation_title(
-                    app.clone(),
-                    runtime.clone(),
-                    conversation_id.to_string(),
-                    text.clone(),
-                ));
-            }
-            seeded.push(json!({
-                "role": "user",
-                "content": text,
-            }));
-        }
+        debug_assert!(user_text.is_none());
         AgentTurnState::new(seeded)
     };
 
@@ -595,6 +571,36 @@ async fn run_turn_inner(
     }
 }
 
+fn message_content(message: &crate::agent::store::ChatMessage) -> Value {
+    if message.attachments.is_empty() {
+        return Value::String(message.content.clone());
+    }
+    let mut parts = Vec::new();
+    if !message.content.trim().is_empty() {
+        parts.push(json!({ "type": "text", "text": message.content }));
+    }
+    for attachment in &message.attachments {
+        if !attachment.available {
+            parts.push(json!({
+                "type": "text",
+                "text": format!("[图片不可用：{}]", attachment.name),
+            }));
+            continue;
+        }
+        match image_file_to_data_url(&attachment.path) {
+            Ok(data_url) => parts.push(json!({
+                "type": "image_url",
+                "image_url": { "url": data_url },
+            })),
+            Err(_) => parts.push(json!({
+                "type": "text",
+                "text": format!("[图片不可用：{}]", attachment.name),
+            })),
+        }
+    }
+    Value::Array(parts)
+}
+
 fn tool_error_content(error: &AgentError) -> String {
     json!({
         "ok": false,
@@ -813,5 +819,46 @@ mod tests {
         assert_eq!(value["ok"], false);
         assert_eq!(value["error"]["code"], "stale_preview");
         assert!(value["error"]["message"].as_str().is_some());
+    }
+
+    #[test]
+    fn user_image_messages_become_multimodal_content_and_missing_files_stay_truthful() {
+        let dir = std::env::temp_dir().join(format!("nbc-model-image-{}", crate::agent::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("image.webp");
+        std::fs::write(&path, b"webp bytes").unwrap();
+        let attachment = crate::agent::images::ChatImageAttachment {
+            id: "image".into(),
+            name: "image.webp".into(),
+            path: path.to_string_lossy().into_owned(),
+            mime: "image/webp".into(),
+            size: 10,
+            available: true,
+        };
+        let message = crate::agent::store::ChatMessage {
+            id: "message".into(),
+            role: "user".into(),
+            content: "分析图片".into(),
+            tool_name: None,
+            tool_status: None,
+            attachments: vec![attachment.clone()],
+            created_at: "now".into(),
+        };
+        let content = message_content(&message);
+        assert_eq!(content[0], json!({ "type": "text", "text": "分析图片" }));
+        assert!(content[1]["image_url"]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/webp;base64,"));
+
+        let missing = crate::agent::store::ChatMessage {
+            attachments: vec![crate::agent::images::ChatImageAttachment {
+                available: false,
+                ..attachment
+            }],
+            ..message
+        };
+        assert_eq!(message_content(&missing)[1]["text"], "[图片不可用：image.webp]");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

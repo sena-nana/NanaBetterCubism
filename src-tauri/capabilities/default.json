@@ -12,6 +12,7 @@
     "core:window:allow-internal-toggle-maximize",
     "core:window:allow-close",
     "lilia:allow-set-window-backdrop",
+    "dialog:allow-open",
     "store:default",
     "opener:allow-open-url",
     "opener:allow-default-urls"

@@ -358,10 +358,13 @@ pub fn image_file_to_data_url(path: &str) -> Result<String, AgentError> {
             format!("无法读取截屏文件：{error}"),
         )
     })?;
-    let mime = if path.to_ascii_lowercase().ends_with(".jpg")
-        || path.to_ascii_lowercase().ends_with(".jpeg")
-    {
+    let lower = path.to_ascii_lowercase();
+    let mime = if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
         "image/jpeg"
+    } else if lower.ends_with(".webp") {
+        "image/webp"
+    } else if lower.ends_with(".gif") {
+        "image/gif"
     } else {
         "image/png"
     };

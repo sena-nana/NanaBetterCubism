@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
+import UiImageViewer from "@lilia/image-viewer/components/ImageViewer";
 import {
   createConversation,
   normalizeCommandError,
@@ -12,11 +13,14 @@ import ConversationTranscript from "../agent/components/ConversationTranscript.v
 import { useLlmConfigStore } from "../agent/llmConfigStore";
 import {
   beginConversationTurn,
+  confirmConversationTurn,
   conversationOnly,
   failConversationTurn,
   installConversationRuntimeStore,
 } from "../agent/conversationRuntimeStore";
 import { ensureSidebarConversationsLoaded } from "../agent/sidebarConversations";
+import type { ChatImageDraft } from "../agent/types";
+import { useChatImageDrafts } from "../agent/useChatImageDrafts";
 
 const router = useRouter();
 const llm = useLlmConfigStore();
@@ -24,9 +28,19 @@ const draft = ref("");
 const sending = ref(false);
 const loading = ref(true);
 const error = ref<string | null>(null);
+const imageDrafts = ref<ChatImageDraft[]>([]);
+const canCompose = computed(() => llm.state.config.hasApiKey && !sending.value);
+const imageDraftController = useChatImageDrafts({
+  drafts: imageDrafts,
+  canInteract: () => canCompose.value,
+  setError: (message) => {
+    error.value = message;
+  },
+});
+const viewingImage = imageDraftController.viewingImage;
 
 const canSend = computed(
-  () => Boolean(draft.value.trim()) && llm.state.config.hasApiKey && !sending.value,
+  () => Boolean(draft.value.trim() || imageDrafts.value.length) && canCompose.value,
 );
 
 onMounted(async () => {
@@ -44,24 +58,33 @@ onMounted(async () => {
 
 async function startConversation() {
   const content = draft.value.trim();
-  if (!content || !canSend.value) return;
+  if (!canSend.value) return;
+  const images = [...imageDrafts.value];
   sending.value = true;
   error.value = null;
   try {
     const created = await createConversation();
-    const optimisticId = beginConversationTurn(created.id, content);
+    const optimisticId = beginConversationTurn(created.id, content, images);
     try {
-      await sendMessage(created.id, content, conversationOnly.value);
+      const persisted = await sendMessage(
+        created.id,
+        content,
+        images.map((image) => image.draftId),
+        conversationOnly.value,
+      );
+      confirmConversationTurn(created.id, optimisticId, persisted);
     } catch (err) {
       failConversationTurn(
         created.id,
         optimisticId,
         content,
+        images,
         normalizeCommandError(err).message,
       );
       throw err;
     }
     draft.value = "";
+    imageDrafts.value = [];
     await ensureSidebarConversationsLoaded(true);
     await router.push(`/chats/${created.id}`);
   } catch (err) {
@@ -74,7 +97,12 @@ async function startConversation() {
 </script>
 
 <template>
-  <ConversationSurface data-agent-id="home.page">
+  <ConversationSurface
+    data-agent-id="home.page"
+    agent-id-prefix="agent.home"
+    :drop-enabled="canCompose"
+    @drop-paths="imageDraftController.addPaths"
+  >
     <ConversationTranscript
       data-agent-id="home.header"
       :messages="[]"
@@ -94,10 +122,21 @@ async function startConversation() {
           :disabled="!llm.state.config.hasApiKey"
           :running="sending"
           :can-send="canSend"
+          :images="imageDrafts"
           :error="error"
           @send="startConversation"
+          @pick-images="imageDraftController.pickImages"
+          @remove-image="imageDraftController.removeImage"
+          @view-image="imageDraftController.viewImage"
+          @paste="imageDraftController.pasteImages"
         />
       </div>
     </template>
   </ConversationSurface>
+  <UiImageViewer
+    v-if="viewingImage"
+    :source="viewingImage"
+    agent-id="agent.home.image-viewer"
+    @close="viewingImage = null"
+  />
 </template>

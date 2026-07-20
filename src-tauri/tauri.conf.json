@@ -27,7 +27,14 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$APPDATA/chat-images/**",
+          "$APPDATA/cache/chat-image-drafts/**"
+        ]
+      }
     }
   },
   "bundle": {

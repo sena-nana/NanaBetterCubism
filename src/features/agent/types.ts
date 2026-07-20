@@ -16,7 +16,37 @@ export interface ChatMessage {
   toolName: string | null;
   toolDisplayName: string | null;
   toolStatus: string | null;
+  attachments: ChatImageAttachment[];
   createdAt: string;
+}
+
+export interface ChatImageAttachment {
+  id: string;
+  name: string;
+  path: string;
+  mime: string;
+  size: number;
+  available: boolean;
+}
+
+export interface ChatImageDraft extends ChatImageAttachment {
+  draftId: string;
+}
+
+export type ImagePrepareInput =
+  | { kind: "path"; path: string }
+  | { kind: "bytes"; name?: string; bytesBase64: string };
+
+export interface ImagePrepareRejection {
+  index: number;
+  name: string;
+  code: string;
+  message: string;
+}
+
+export interface ImagePrepareResult {
+  accepted: ChatImageDraft[];
+  rejected: ImagePrepareRejection[];
 }
 
 export interface PlanStep {
