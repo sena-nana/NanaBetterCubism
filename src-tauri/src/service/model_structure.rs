@@ -22,21 +22,27 @@ pub(super) fn parse_structure(response: &Value) -> Result<ModelStructure, RpcErr
     for entry in entries {
         match entry.get("EntryType").and_then(Value::as_str) {
             Some("ParameterGroup") => {
-                let id = required_string(entry, "Id")?;
-                let name = required_string(entry, "Name")?;
+                let Some(id) = optional_string(entry, "Id") else {
+                    continue;
+                };
+                let name = optional_string(entry, "Name").unwrap_or_else(|| id.clone());
                 structure.groups.push(ParameterGroupSummary {
                     id: id.clone(),
                     name,
                 });
                 if let Some(parameters) = entry.get("Parameters").and_then(Value::as_array) {
                     for parameter in parameters {
-                        structure
-                            .parameters
-                            .push(parse_parameter(parameter, Some(id.clone()))?);
+                        match parse_parameter(parameter, Some(id.clone())) {
+                            Some(parameter) => structure.parameters.push(parameter),
+                            None => continue,
+                        }
                     }
                 }
             }
-            Some("Parameter") => structure.parameters.push(parse_parameter(entry, None)?),
+            Some("Parameter") => match parse_parameter(entry, None) {
+                Some(parameter) => structure.parameters.push(parameter),
+                None => continue,
+            },
             _ => {}
         }
     }
@@ -65,14 +71,19 @@ pub(super) fn verify_plan(plan: &StoredPlan, structure: &ModelStructure) -> bool
         })
 }
 
-fn parse_parameter(value: &Value, group_id: Option<String>) -> Result<ExistingParameter, RpcError> {
-    Ok(ExistingParameter {
-        id: required_string(value, "Id")?,
-        name: required_string(value, "Name")?,
+/// Parse a parameter entry. Returns `None` when the model-owned `Id` is missing,
+/// so the caller can skip the entry without aborting the whole structure parse.
+/// `Name`/`Min`/`Default`/`Max` are optional per the capability matrix and fall
+/// back to empty string / `0.0` when Editor omits them.
+fn parse_parameter(value: &Value, group_id: Option<String>) -> Option<ExistingParameter> {
+    let id = optional_string(value, "Id")?;
+    Some(ExistingParameter {
+        name: optional_string(value, "Name").unwrap_or_default(),
+        min: optional_number(value, "Min").unwrap_or(0.0),
+        default: optional_number(value, "Default").unwrap_or(0.0),
+        max: optional_number(value, "Max").unwrap_or(0.0),
+        id,
         group_id,
-        min: required_number(value, "Min")?,
-        default: required_number(value, "Default")?,
-        max: required_number(value, "Max")?,
         is_blend_shape: value
             .get("IsBlendShape")
             .and_then(Value::as_bool)
@@ -84,19 +95,12 @@ fn parse_parameter(value: &Value, group_id: Option<String>) -> Result<ExistingPa
     })
 }
 
-fn required_string(value: &Value, key: &str) -> Result<String, RpcError> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| RpcError::Protocol(format!("参数结构缺少 {key}")))
+fn optional_string(value: &Value, key: &str) -> Option<String> {
+    value.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
-fn required_number(value: &Value, key: &str) -> Result<f64, RpcError> {
-    value
-        .get(key)
-        .and_then(Value::as_f64)
-        .ok_or_else(|| RpcError::Protocol(format!("参数结构缺少 {key}")))
+fn optional_number(value: &Value, key: &str) -> Option<f64> {
+    value.get(key).and_then(Value::as_f64)
 }
 
 fn same_number(left: f64, right: f64) -> bool {
