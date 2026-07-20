@@ -11,6 +11,8 @@ type Feedback = { text: string; tone: "ok" | "err" };
 const baseUrl = ref("");
 const apiKey = ref("");
 const model = ref("");
+const contextWindow = ref("");
+const maxInputTokens = ref("");
 const hasApiKey = ref(false);
 const loading = ref(true);
 const operation = ref<Operation | null>(null);
@@ -33,8 +35,18 @@ onMounted(async () => {
 function applyForm(config: LlmConfigView) {
   baseUrl.value = config.baseUrl ?? "";
   model.value = config.model ?? "";
+  contextWindow.value = config.contextWindow ? String(config.contextWindow) : "";
+  maxInputTokens.value = config.maxInputTokens ? String(config.maxInputTokens) : "";
   hasApiKey.value = config.hasApiKey;
   apiKey.value = "";
+}
+
+function parsePositiveInt(value: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const parsed = Number(trimmed);
+  if (!Number.isInteger(parsed) || parsed <= 0) return null;
+  return parsed;
 }
 
 async function persistConfig(clearApiKey = false) {
@@ -43,6 +55,8 @@ async function persistConfig(clearApiKey = false) {
     apiKey: clearApiKey ? null : apiKey.value.trim() || null,
     model: model.value.trim() || null,
     clearApiKey,
+    contextWindow: parsePositiveInt(contextWindow.value),
+    maxInputTokens: parsePositiveInt(maxInputTokens.value),
   });
   llmConfig.applyConfig(next);
   applyForm(next);
@@ -138,6 +152,26 @@ async function test() {
             :disabled="operationBusy"
             placeholder="gpt-4o-mini"
             agent-id="settings.llm.model"
+          />
+        </label>
+
+        <label class="settings-field">
+          <span><strong>上下文窗口</strong><small>模型上下文窗口大小（token）。留空则不启用自动压缩。</small></span>
+          <Input
+            v-model="contextWindow"
+            :disabled="operationBusy"
+            placeholder="128000"
+            agent-id="settings.llm.context-window"
+          />
+        </label>
+
+        <label class="settings-field">
+          <span><strong>输入预算</strong><small>每次请求输入 token 上限。留空则按上下文窗口的 70% 估算。</small></span>
+          <Input
+            v-model="maxInputTokens"
+            :disabled="operationBusy"
+            placeholder="100000"
+            agent-id="settings.llm.max-input-tokens"
           />
         </label>
 

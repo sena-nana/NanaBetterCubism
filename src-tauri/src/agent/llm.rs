@@ -521,6 +521,8 @@ data: [DONE]
             base_url: Some(base_url),
             api_key: Some("test-key".into()),
             model: Some("mock-model".into()),
+            context_window: None,
+            max_input_tokens: None,
         };
 
         let (ok, message, models, image_supported) = test_connection(&config).await.unwrap();
@@ -549,6 +551,8 @@ data: [DONE]
             base_url: Some(base_url),
             api_key: Some("test-key".into()),
             model: Some("mock-model".into()),
+            context_window: None,
+            max_input_tokens: None,
         };
 
         let (ok, message, models, image_supported) = test_connection(&config).await.unwrap();
@@ -575,6 +579,8 @@ data: [DONE]
             base_url: Some(base_url),
             api_key: Some("test-key".into()),
             model: Some("mock-model".into()),
+            context_window: None,
+            max_input_tokens: None,
         };
 
         let first = chat_completions_stream(
@@ -659,6 +665,8 @@ data: [DONE]
             base_url: Some(base_url),
             api_key: Some("test-key".into()),
             model: Some("mock-model".into()),
+            context_window: None,
+            max_input_tokens: None,
         };
         let error = chat_completions(&config, &[json!({"role":"user","content":"hi"})], &[])
             .await

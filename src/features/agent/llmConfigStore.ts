@@ -22,6 +22,8 @@ const defaultConfig: LlmConfigView = {
   baseUrl: null,
   model: null,
   hasApiKey: false,
+  contextWindow: null,
+  maxInputTokens: null,
 };
 
 const state = reactive<LlmConfigState>({

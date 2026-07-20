@@ -339,6 +339,11 @@ async fn run_turn_inner(
         let image_supported = runtime.image_capability() != ImageInputSupport::Unsupported;
         let tools = tool_definitions(&state.active_skills, state.mode, image_supported)?;
         let advertised = advertised_tool_names(&tools);
+
+        if let Some(budget) = crate::agent::compaction::resolve_budget(&config) {
+            crate::agent::compaction::compact(&config, &mut state.messages, &tools, budget).await?;
+        }
+
         let app_for_capability = app.clone();
         let assistant = {
             let conversation_id = conversation_id.to_string();

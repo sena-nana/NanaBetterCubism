@@ -93,6 +93,8 @@ export interface LlmConfigView {
   model: string | null;
   hasApiKey: boolean;
   imageInputSupported?: boolean | null;
+  contextWindow?: number | null;
+  maxInputTokens?: number | null;
 }
 
 export interface LlmConfigInput {
@@ -100,6 +102,8 @@ export interface LlmConfigInput {
   apiKey: string | null;
   model: string | null;
   clearApiKey?: boolean;
+  contextWindow?: number | null;
+  maxInputTokens?: number | null;
 }
 
 export interface LlmTestResult {
