@@ -1,5 +1,6 @@
 use crate::agent::computer_control::ComputerApproval;
 use crate::agent::store::PendingQuestion;
+use crate::agent::PlanApprovalAction;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -19,6 +20,10 @@ pub enum PendingUserAction {
         #[serde(flatten)]
         approval: ComputerApproval,
     },
+    PlanApproval {
+        #[serde(flatten)]
+        approval: PlanApprovalAction,
+    },
 }
 
 impl PendingUserAction {
@@ -26,7 +31,14 @@ impl PendingUserAction {
         match self {
             Self::Question { action_id, .. } => action_id,
             Self::ComputerApproval { approval } => &approval.action_id,
+            Self::PlanApproval { approval } => &approval.action_id,
         }
+    }
+}
+
+impl From<PlanApprovalAction> for PendingUserAction {
+    fn from(approval: PlanApprovalAction) -> Self {
+        Self::PlanApproval { approval }
     }
 }
 
@@ -71,5 +83,18 @@ mod tests {
         assert_eq!(value["actionId"], "approval");
         assert_eq!(value["targetWindowTitle"], "Cubism Editor");
         assert_eq!(value["cannotUndo"], true);
+    }
+
+    #[test]
+    fn plan_approval_uses_the_unified_frontend_contract() {
+        let action = PendingUserAction::from(PlanApprovalAction {
+            action_id: "plan".into(),
+            conversation_id: "conversation".into(),
+            title: "参数计划".into(),
+        });
+        let value = serde_json::to_value(action).unwrap();
+        assert_eq!(value["kind"], "plan_approval");
+        assert_eq!(value["actionId"], "plan");
+        assert_eq!(value["conversationId"], "conversation");
     }
 }

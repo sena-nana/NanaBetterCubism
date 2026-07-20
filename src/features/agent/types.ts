@@ -1,4 +1,5 @@
 export type MessageRole = "user" | "assistant" | "tool" | "system";
+export type AgentTurnMode = "default" | "conversation_only" | "plan";
 
 export interface ConversationSummary {
   id: string;
@@ -157,7 +158,16 @@ export interface ComputerApprovalAction {
   expiresAt: string;
 }
 
-export type PendingUserAction = PendingQuestionAction | ComputerApprovalAction;
+export interface PlanApprovalAction {
+  kind: "plan_approval";
+  actionId: string;
+  conversationId: string;
+  title: string;
+}
+
+export type PendingUserAction = PendingQuestionAction | ComputerApprovalAction | PlanApprovalAction;
+export type PlanDecision = "approve" | "revise" | "cancel";
+export type PlanDecisionResult = "execution_started" | "revision_started" | "cancelled";
 
 export type ComputerOperationStatus =
   | "idle"

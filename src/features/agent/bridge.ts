@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { domainError, isTauriRuntime, normalizeCommandError } from "../editor/bridge";
 import type {
   AgentComputerOperationEvent,
+  AgentTurnMode,
   AgentPlanEvent,
   AgentToolEvent,
   AgentTurnDelta,
@@ -18,6 +19,8 @@ import type {
   MemoryRecord,
   MemoryScope,
   PendingUserAction,
+  PlanDecision,
+  PlanDecisionResult,
   ProjectRecord,
   ImagePrepareInput,
   ImagePrepareResult,
@@ -46,7 +49,7 @@ export async function sendMessage(
   conversationId: string,
   content: string,
   imageDraftIds: string[] = [],
-  conversationOnly = false,
+  mode: AgentTurnMode = "default",
 ): Promise<ChatMessage> {
   if (!isTauriRuntime()) {
     throw domainError("desktop_required", "请在桌面应用中发送消息。");
@@ -55,7 +58,22 @@ export async function sendMessage(
     conversationId,
     content,
     imageDraftIds,
-    conversationOnly,
+    mode,
+  });
+}
+
+export async function decidePlan(
+  actionId: string,
+  decision: PlanDecision,
+  revision?: string,
+): Promise<PlanDecisionResult> {
+  if (!isTauriRuntime()) {
+    throw domainError("desktop_required", "请在桌面应用中确认计划。");
+  }
+  return invoke<PlanDecisionResult>("agent_decide_plan", {
+    actionId,
+    decision,
+    revision: revision ?? null,
   });
 }
 

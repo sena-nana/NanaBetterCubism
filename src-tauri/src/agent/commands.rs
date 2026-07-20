@@ -1,17 +1,16 @@
 use crate::agent::computer_control::ComputerOperationStatus;
+use crate::agent::images::{ChatImageAttachment, ImagePrepareInput, ImagePrepareResult};
 use crate::agent::llm::test_connection;
-use crate::agent::images::{
-    ChatImageAttachment, ImagePrepareInput, ImagePrepareResult,
-};
 use crate::agent::runtime::{continue_after_computer_approval, continue_after_question, run_turn};
 use crate::agent::store::{
     ChatMessage, ConversationPlan, ConversationSummary, LlmConfigInput, LlmConfigView,
     MemoryViewRecord, ProjectRecord,
 };
-use crate::agent::tools::tool_display_name;
 use crate::agent::title::generate_conversation_title;
+use crate::agent::tools::tool_display_name;
 use crate::agent::{
-    emit_conversations_changed, AgentError, AgentRuntime, CancelTurnResult, PendingUserAction,
+    emit_conversations_changed, AgentError, AgentRuntime, AgentTurnMode, CancelTurnResult,
+    PendingUserAction, PlanDecision, PlanDecisionResult,
 };
 use crate::service::{official_api, EditorService};
 use serde::Serialize;
@@ -172,7 +171,7 @@ pub async fn agent_send_message(
     conversation_id: String,
     content: String,
     image_draft_ids: Vec<String>,
-    conversation_only: Option<bool>,
+    mode: Option<AgentTurnMode>,
 ) -> Result<ChatMessageView, AgentError> {
     let text = content.trim().to_string();
     if text.is_empty() && image_draft_ids.is_empty() {
@@ -230,18 +229,115 @@ pub async fn agent_send_message(
     }
     let app_clone = app.clone();
     let runtime_clone = runtime.clone();
-    let conversation_only = conversation_only.unwrap_or(false);
+    let mode = mode.unwrap_or_default();
     tauri::async_runtime::spawn(async move {
         let _ = run_turn(
             app_clone,
             runtime_clone,
             conversation_id,
-            conversation_only,
+            mode,
+            None,
             cancel,
         )
         .await;
     });
     Ok(message.into())
+}
+
+#[tauri::command]
+pub async fn agent_decide_plan(
+    app: AppHandle,
+    action_id: String,
+    decision: PlanDecision,
+    revision: Option<String>,
+) -> Result<PlanDecisionResult, AgentError> {
+    let runtime = runtime(&app)?;
+    let pending = runtime
+        .store
+        .get_pending_plan_approval_by_action(&action_id)?
+        .ok_or_else(|| AgentError::new("plan_not_found", "待确认计划已失效。"))?;
+    let conversation_id = pending.action.conversation_id.clone();
+
+    if decision == PlanDecision::Cancel {
+        let pending = runtime
+            .store
+            .take_pending_plan_approval(&action_id)?
+            .ok_or_else(|| AgentError::new("plan_not_found", "待确认计划已失效。"))?;
+        let plan = runtime
+            .store
+            .upsert_plan(&conversation_id, pending.plan.todo_steps("cancelled"))?;
+        let _ = app.emit(
+            "agent://plan",
+            serde_json::json!({"conversationId": conversation_id, "plan": plan}),
+        );
+        emit_conversations_changed(&app);
+        return Ok(PlanDecisionResult::Cancelled);
+    }
+
+    let revision = revision.unwrap_or_default().trim().to_string();
+    if decision == PlanDecision::Revise && revision.is_empty() {
+        return Err(AgentError::new("invalid_revision", "修改要求不能为空。"));
+    }
+
+    let cancel = runtime.begin_turn(&conversation_id).await?;
+    let pending = match runtime.store.take_pending_plan_approval(&action_id) {
+        Ok(Some(pending)) => pending,
+        Ok(None) => {
+            runtime.finish_turn(&conversation_id, &cancel).await;
+            return Err(AgentError::new("plan_not_found", "待确认计划已失效。"));
+        }
+        Err(error) => {
+            runtime.finish_turn(&conversation_id, &cancel).await;
+            return Err(error);
+        }
+    };
+
+    let (mode, prompt, user_message, result) = match decision {
+        PlanDecision::Approve => (
+            AgentTurnMode::Default,
+            format!(
+                "The user approved the following exact plan. Start executing it now in default mode. Plan approval does not authorize any concrete Cubism edit or computer operation; continue to use every required preview, user confirmation, transaction, cancellation, and reread verification.\n\n{}",
+                pending.plan.markdown()
+            ),
+            "已确认计划，开始执行。".to_string(),
+            PlanDecisionResult::ExecutionStarted,
+        ),
+        PlanDecision::Revise => (
+            AgentTurnMode::Plan,
+            format!(
+                "Revise the complete plan in read-only plan mode. Keep useful verified facts, apply the latest revision request, inspect read-only state again when needed, and submit a full replacement through submit_plan.\n\nLatest revision request:\n{}\n\nPrevious plan:\n{}",
+                revision,
+                pending.plan.markdown()
+            ),
+            format!("计划修改要求：{revision}"),
+            PlanDecisionResult::RevisionStarted,
+        ),
+        PlanDecision::Cancel => unreachable!(),
+    };
+    if let Err(error) =
+        runtime
+            .store
+            .append_message(&conversation_id, "user", &user_message, None, None)
+    {
+        let _ = runtime.store.set_pending_plan_approval(&pending);
+        runtime.finish_turn(&conversation_id, &cancel).await;
+        return Err(error);
+    }
+    emit_conversations_changed(&app);
+    let app_clone = app.clone();
+    let runtime_clone = runtime.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = run_turn(
+            app_clone,
+            runtime_clone,
+            conversation_id,
+            mode,
+            Some(prompt),
+            cancel,
+        )
+        .await;
+    });
+    Ok(result)
 }
 
 #[tauri::command]
@@ -360,6 +456,9 @@ pub async fn agent_get_pending_user_action(
         .pending_approval_for_conversation(&conversation_id)
     {
         return Ok(Some(approval.into()));
+    }
+    if let Some(approval) = runtime.store.get_pending_plan_approval(&conversation_id)? {
+        return Ok(Some(approval.action.into()));
     }
     Ok(runtime
         .store

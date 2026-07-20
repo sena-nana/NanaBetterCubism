@@ -6,6 +6,7 @@ import {
   answerQuestion,
   cancelTurn,
   decideComputerOperation,
+  decidePlan,
   listConversations,
   normalizeCommandError,
   sendMessage,
@@ -17,7 +18,6 @@ import ConversationTranscript from "./components/ConversationTranscript.vue";
 import { useLlmConfigStore } from "./llmConfigStore";
 import {
   beginConversationTurn,
-  conversationOnly,
   failConversationTurn,
   confirmConversationTurn,
   getConversationRuntime,
@@ -29,7 +29,7 @@ import {
 import {
   applyConversationGroup,
 } from "./sidebarConversations";
-import type { ConversationSummary } from "./types";
+import type { ConversationSummary, PlanDecision } from "./types";
 import { useChatImageDrafts } from "./useChatImageDrafts";
 
 const route = useRoute();
@@ -54,6 +54,18 @@ const askAnswer = computed({
   get: () => runtime.value.askAnswer,
   set: (value: string) => {
     runtime.value.askAnswer = value;
+  },
+});
+const planRevision = computed({
+  get: () => runtime.value.planRevision,
+  set: (value: string) => {
+    runtime.value.planRevision = value;
+  },
+});
+const composerMode = computed({
+  get: () => runtime.value.composerMode,
+  set: (mode) => {
+    runtime.value.composerMode = mode;
   },
 });
 const imageDrafts = computed({
@@ -137,7 +149,7 @@ async function onSend() {
       id,
       content,
       images.map((image) => image.draftId),
-      conversationOnly.value,
+      runtime.value.composerMode,
     );
     confirmConversationTurn(id, optimisticId, persisted);
   } catch (err) {
@@ -148,6 +160,30 @@ async function onSend() {
       images,
       normalizeCommandError(err).message,
     );
+  }
+}
+
+async function onDecidePlan(decision: PlanDecision, revision?: string) {
+  const approval = runtime.value.pendingAction?.kind === "plan_approval"
+    ? runtime.value.pendingAction
+    : null;
+  if (!approval) return;
+  const state = getConversationRuntime(approval.conversationId);
+  state.error = null;
+  setConversationTurnPhase(approval.conversationId, "running");
+  try {
+    const result = await decidePlan(approval.actionId, decision, revision);
+    state.pendingAction = null;
+    state.planRevision = "";
+    state.composerMode = result === "execution_started" ? "default" : "plan";
+    setConversationTurnPhase(
+      approval.conversationId,
+      result === "cancelled" ? "idle" : "running",
+    );
+  } catch (err) {
+    state.pendingAction = approval;
+    setConversationTurnPhase(approval.conversationId, "awaiting_input");
+    state.error = normalizeCommandError(err).message;
   }
 }
 
@@ -240,7 +276,8 @@ async function onDecideComputerOperation(approved: boolean) {
       <ConversationComposer
         v-model="draft"
         v-model:ask-answer="askAnswer"
-        v-model:conversation-only="conversationOnly"
+        v-model:plan-revision="planRevision"
+        v-model:mode="composerMode"
         :pending-action="runtime.pendingAction"
         :computer-status="runtime.computerStatus"
         :disabled="!llm.state.config.hasApiKey"
@@ -253,6 +290,7 @@ async function onDecideComputerOperation(approved: boolean) {
         @cancel="onCancel"
         @answer="onAnswerAsk"
         @decide="onDecideComputerOperation"
+        @decide-plan="onDecidePlan"
         @pick-images="imageDraftController.pickImages"
         @remove-image="imageDraftController.removeImage"
         @view-image="imageDraftController.viewImage"

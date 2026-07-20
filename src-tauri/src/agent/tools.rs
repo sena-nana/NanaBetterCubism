@@ -1,12 +1,13 @@
-﻿use crate::agent::capture::capture_cubism_editor_window;
+use crate::agent::capture::capture_cubism_editor_window;
 use crate::agent::computer_control::{
     ComputerAction, ComputerActionKind, ComputerOperationOutcome, ComputerOperationStatus,
     ComputerOperationStep, UnsupportedCapability,
 };
 use crate::agent::memory_recall::MemoryRecallRequest;
+use crate::agent::plan::PlanDocument;
 use crate::agent::skills;
 use crate::agent::store::{truncate_summary, PendingQuestion, PlanStep};
-use crate::agent::{new_id, AgentError, AgentRuntime, PendingUserAction};
+use crate::agent::{new_id, AgentError, AgentRuntime, AgentTurnMode, PendingUserAction};
 use crate::domain::{EditorEditOutcome, ParameterBatchInput};
 use crate::service::{CommandError, EditorService};
 use serde::Serialize;
@@ -18,17 +19,24 @@ use tauri::{AppHandle, Emitter};
 struct RegisteredTool {
     schema: Value,
     display_name: String,
+    access: ToolAccess,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolAccess {
+    ReadOnly,
+    Mutating,
 }
 
 fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
     let mut tools = vec![
-        tool(
+        read_tool(
             "get_editor_snapshot",
             "检查 Editor 状态",
             "获取 Cubism Editor 连接状态、能力门控与参数组摘要。",
             json!({"type": "object", "properties": {}}),
         ),
-        tool(
+        mutating_tool(
             "connect_editor",
             "连接 Cubism Editor",
             "连接本机 Cubism Editor External API。",
@@ -38,19 +46,19 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
                 "required": ["port"]
             }),
         ),
-        tool(
+        mutating_tool(
             "disconnect_editor",
             "断开 Editor 连接",
             "断开 Cubism Editor 连接。",
             json!({"type": "object", "properties": {}}),
         ),
-        tool(
+        read_tool(
             "find_selected_part_parameters",
             "读取选中 Part 参数",
             "查询 Editor 当前选中 Part 子树关联的参数。",
             json!({"type": "object", "properties": {}}),
         ),
-        tool(
+        mutating_tool(
             "preview_parameter_batch",
             "预览参数修改",
             "校验并预览批量创建参数，返回 previewId。写操作必须先 preview。",
@@ -60,7 +68,7 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
                 "required": ["input"]
             }),
         ),
-        tool(
+        mutating_tool(
             "execute_parameter_batch",
             "应用参数修改",
             "执行已通过预览的参数批量创建。",
@@ -70,7 +78,7 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
                 "required": ["previewId"]
             }),
         ),
-        tool(
+        mutating_tool(
             "cancel_parameter_batch",
             "取消参数修改",
             "取消进行中的参数批量创建事务。",
@@ -80,7 +88,7 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
                 "required": ["operationId"]
             }),
         ),
-        tool(
+        read_tool(
             "get_parameter_batch_result",
             "查询参数修改结果",
             "查询参数批量事务的 Rust 终态与回读验证资格。仅 canOfferProjectMemory=true 时可询问是否保存项目记忆。",
@@ -91,7 +99,7 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
                 "additionalProperties": false
             }),
         ),
-        tool(
+        read_tool(
             "capture_cubism_editor_window",
             "查看 Editor 窗口",
             "按窗口标题匹配截取 Cubism Editor 窗口。",
@@ -102,7 +110,7 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
                 }
             }),
         ),
-        tool(
+        read_tool(
             "recall_memory",
             "召回相关记忆",
             "按当前任务语义召回已启用的项目阶段记忆与全局 Live2D 经验；代码自动匹配记忆与分层。",
@@ -135,7 +143,7 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
                 "additionalProperties": false
             }),
         ),
-        tool(
+        mutating_tool(
             "upsert_memory",
             "保存记忆",
             "保存或更新一条 Markdown 分层记忆；project 为阶段记忆，global 为 Live2D 经验。提供完整 body，或用 layer+content 单层补丁。",
@@ -169,7 +177,7 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
                 "additionalProperties": false
             }),
         ),
-        tool(
+        mutating_tool(
             "archive_memory",
             "停用记忆",
             "停用一条记忆（enabled=false）。",
@@ -180,7 +188,7 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
                 "additionalProperties": false
             }),
         ),
-        tool(
+        read_tool(
             "ask_user",
             "等待确认",
             "向用户提问并暂停，等待回答后继续。",
@@ -193,7 +201,7 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
                 "required": ["question"]
             }),
         ),
-        tool(
+        read_tool(
             "update_plan",
             "更新计划",
             "更新当前对话的计划步骤。",
@@ -216,7 +224,7 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
                 "required": ["steps"]
             }),
         ),
-        tool(
+        mutating_tool(
             "list_cubism_windows",
             "查找 Cubism 窗口",
             "列出可供电脑代理操作选择的 Cubism 窗口；授权后可列出同进程随后打开的窗口。",
@@ -226,7 +234,7 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
                 "additionalProperties": false
             }),
         ),
-        tool(
+        mutating_tool(
             "request_computer_operation",
             "请求电脑操作授权",
             "仅当能力矩阵确认官方 API 缺失时，提交完整计划并请求用户授权。",
@@ -268,7 +276,7 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
                 "additionalProperties": false
             }),
         ),
-        tool(
+        mutating_tool(
             "capture_computer_operation_frame",
             "查看最新 Cubism 画面",
             "获取当前授权窗口的最新画面；每个手势前都必须调用。",
@@ -282,7 +290,7 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
                 "additionalProperties": false
             }),
         ),
-        tool(
+        mutating_tool(
             "perform_computer_action",
             "操作 Cubism 窗口",
             "基于最新 frameId 执行一个已授权手势，并立即返回新画面。",
@@ -299,7 +307,7 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
                 "additionalProperties": false
             }),
         ),
-        tool(
+        mutating_tool(
             "finish_computer_operation",
             "结束电脑操作",
             "以真实结果结束电脑代理操作并立即销毁授权。",
@@ -321,35 +329,60 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
         crate::service::official_api::tool_definitions()
             .into_iter()
             .map(|schema| {
-                let display_name = tool_name(&schema)
-                    .and_then(crate::service::official_api::tool_display_name)
+                let name = tool_name(&schema).expect("官方 Editor 工具必须有名称");
+                let display_name = crate::service::official_api::tool_display_name(name)
                     .expect("官方 Editor 工具必须具有可读名称")
                     .to_string();
+                let access = match crate::service::official_api::tool_access(name) {
+                    Some(crate::service::official_api::ToolAccess::ReadOnly) => {
+                        ToolAccess::ReadOnly
+                    }
+                    Some(crate::service::official_api::ToolAccess::Mutating) => {
+                        ToolAccess::Mutating
+                    }
+                    None => panic!("官方 Editor 工具必须声明访问属性"),
+                };
                 RegisteredTool {
                     schema,
                     display_name,
+                    access,
                 }
             }),
     );
     tools
 }
 
-static TOOL_DISPLAY_NAMES: LazyLock<BTreeMap<String, String>> = LazyLock::new(|| {
-    let mut names = all_domain_tool_definitions()
+static TOOL_METADATA: LazyLock<BTreeMap<String, (String, ToolAccess)>> = LazyLock::new(|| {
+    let mut tools = all_domain_tool_definitions()
         .into_iter()
         .filter_map(|tool| {
-            tool_name(&tool.schema).map(|name| (name.to_string(), tool.display_name))
+            tool_name(&tool.schema)
+                .map(|name| (name.to_string(), (tool.display_name, tool.access)))
         })
         .collect::<BTreeMap<_, _>>();
-    names.insert(skills::READ_SKILL_TOOL_NAME.into(), "读取任务技能".into());
-    names
+    tools.insert(
+        skills::READ_SKILL_TOOL_NAME.into(),
+        ("读取任务技能".into(), ToolAccess::ReadOnly),
+    );
+    tools.insert(
+        "submit_plan".into(),
+        ("提交计划".into(), ToolAccess::ReadOnly),
+    );
+    tools
 });
 
 pub fn tool_display_name(name: &str) -> Option<&'static str> {
-    TOOL_DISPLAY_NAMES.get(name).map(String::as_str)
+    TOOL_METADATA.get(name).map(|(display_name, _)| display_name.as_str())
 }
 
-pub fn tool_definitions(active_skills: &BTreeSet<String>) -> Result<Vec<Value>, AgentError> {
+pub fn tool_access(name: &str) -> Option<ToolAccess> {
+    TOOL_METADATA.get(name).map(|(_, access)| *access)
+}
+
+pub fn tool_definitions(
+    active_skills: &BTreeSet<String>,
+    mode: AgentTurnMode,
+) -> Result<Vec<Value>, AgentError> {
     let allowed = skills::allowed_domain_tools(active_skills)?;
     let domain_tools = all_domain_tool_definitions();
     let available = domain_tools
@@ -368,9 +401,15 @@ pub fn tool_definitions(active_skills: &BTreeSet<String>) -> Result<Vec<Value>, 
     tools.extend(
         domain_tools
             .into_iter()
-            .filter(|tool| tool_name(&tool.schema).is_some_and(|name| allowed.contains(name)))
+            .filter(|tool| {
+                tool_name(&tool.schema).is_some_and(|name| allowed.contains(name))
+                    && (!mode.is_read_only() || tool.access == ToolAccess::ReadOnly)
+            })
             .map(|tool| tool.schema),
     );
+    if mode == AgentTurnMode::Plan {
+        tools.push(submit_plan_tool().schema);
+    }
     Ok(tools)
 }
 
@@ -410,7 +449,13 @@ fn tool_name(definition: &Value) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
-fn tool(name: &str, display_name: &str, description: &str, parameters: Value) -> RegisteredTool {
+fn registered_tool(
+    name: &str,
+    display_name: &str,
+    description: &str,
+    parameters: Value,
+    access: ToolAccess,
+) -> RegisteredTool {
     RegisteredTool {
         schema: json!({
             "type": "function",
@@ -421,7 +466,60 @@ fn tool(name: &str, display_name: &str, description: &str, parameters: Value) ->
             }
         }),
         display_name: display_name.into(),
+        access,
     }
+}
+
+fn read_tool(
+    name: &str,
+    display_name: &str,
+    description: &str,
+    parameters: Value,
+) -> RegisteredTool {
+    registered_tool(
+        name,
+        display_name,
+        description,
+        parameters,
+        ToolAccess::ReadOnly,
+    )
+}
+
+fn mutating_tool(
+    name: &str,
+    display_name: &str,
+    description: &str,
+    parameters: Value,
+) -> RegisteredTool {
+    registered_tool(
+        name,
+        display_name,
+        description,
+        parameters,
+        ToolAccess::Mutating,
+    )
+}
+
+fn submit_plan_tool() -> RegisteredTool {
+    read_tool(
+        "submit_plan",
+        "提交计划",
+        "提交完整结构化计划并等待用户确认。",
+        json!({
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "minLength": 1},
+                "summary": {"type": "string", "minLength": 1},
+                "steps": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+                "diagram": {"type": "string", "minLength": 1},
+                "acceptance": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+                "assumptions": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+                "risks": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+            },
+            "required": ["title", "summary", "steps", "diagram", "acceptance", "assumptions", "risks"],
+            "additionalProperties": false
+        }),
+    )
 }
 
 pub enum ToolOutcome {
@@ -433,6 +531,7 @@ pub enum ToolOutcome {
         action: PendingUserAction,
         tool_call_id: String,
     },
+    PlanSubmitted(PlanDocument),
 }
 
 pub struct ToolExecutionContext<'a> {
@@ -442,6 +541,7 @@ pub struct ToolExecutionContext<'a> {
     pub conversation_id: &'a str,
     pub tool_call_id: &'a str,
     pub cancel: Arc<AtomicBool>,
+    pub mode: AgentTurnMode,
 }
 
 fn tool_result(content: impl Into<String>) -> ToolOutcome {
@@ -456,6 +556,7 @@ pub async fn execute_tool(
     name: &str,
     arguments: &str,
 ) -> Result<ToolOutcome, AgentError> {
+    ensure_tool_access(context.mode, name)?;
     let app = context.app;
     let runtime = context.runtime;
     let conversation_id = context.conversation_id;
@@ -521,6 +622,24 @@ pub async fn execute_tool(
                 "waiting_user",
             );
         }
+        Ok(ToolOutcome::PlanSubmitted(_)) => {
+            emit_tool(
+                app,
+                conversation_id,
+                tool_call_id,
+                name,
+                "finished",
+                "计划已提交",
+            );
+            let _ = runtime.store.append_tool_trace(
+                conversation_id,
+                tool_call_id,
+                name,
+                "structured_plan",
+                "awaiting_approval",
+                "finished",
+            );
+        }
         Err(error) => {
             if is_computer_tool(name) {
                 if error.code == "input_outcome_unknown" {
@@ -561,6 +680,24 @@ pub async fn execute_tool(
     outcome
 }
 
+fn ensure_tool_access(mode: AgentTurnMode, name: &str) -> Result<(), AgentError> {
+    let access = tool_access(name)
+        .ok_or_else(|| AgentError::new("unknown_tool", format!("未知工具：{name}")))?;
+    if mode.is_read_only() && access == ToolAccess::Mutating {
+        return Err(AgentError::new(
+            "read_only_mode",
+            "当前模式只允许读取，已拒绝写操作。",
+        ));
+    }
+    if name == "submit_plan" && mode != AgentTurnMode::Plan {
+        return Err(AgentError::new(
+            "tool_not_available",
+            "submit_plan 仅在计划模式可用。",
+        ));
+    }
+    Ok(())
+}
+
 async fn execute_tool_inner(
     context: ToolExecutionContext<'_>,
     name: &str,
@@ -573,11 +710,17 @@ async fn execute_tool_inner(
         conversation_id,
         tool_call_id,
         cancel,
+        mode: _,
     } = context;
     let args: Value = serde_json::from_str(arguments)
         .map_err(|error| AgentError::new("invalid_arguments", error.to_string()))?;
 
     let outcome = match name {
+        "submit_plan" => {
+            let plan: PlanDocument = serde_json::from_value(args)
+                .map_err(|error| AgentError::new("invalid_arguments", error.to_string()))?;
+            Ok(ToolOutcome::PlanSubmitted(plan.validate()?))
+        }
         "get_editor_snapshot" => {
             let snapshot = editor.snapshot().await;
             Ok(tool_result(serde_json::to_string_pretty(&snapshot)?))
@@ -1111,7 +1254,7 @@ mod tests {
 
     #[test]
     fn initial_tool_set_only_contains_core_tools() {
-        let definitions = tool_definitions(&BTreeSet::new()).unwrap();
+        let definitions = tool_definitions(&BTreeSet::new(), AgentTurnMode::Default).unwrap();
         assert_eq!(
             names(&definitions),
             BTreeSet::from([
@@ -1127,7 +1270,11 @@ mod tests {
 
     #[test]
     fn active_skills_only_add_their_declared_tools() {
-        let parameter = tool_definitions(&BTreeSet::from(["parameter-editing".into()])).unwrap();
+        let parameter = tool_definitions(
+            &BTreeSet::from(["parameter-editing".into()]),
+            AgentTurnMode::Default,
+        )
+        .unwrap();
         let parameter_names = names(&parameter);
         assert!(parameter_names.contains("preview_add_parameter"));
         assert!(parameter_names.contains("execute_editor_edit"));
@@ -1135,13 +1282,17 @@ mod tests {
         assert!(!parameter_names.contains("preview_add_part"));
         assert!(!parameter_names.contains("recall_memory"));
 
-        let object = tool_definitions(&BTreeSet::from(["object-editing".into()])).unwrap();
+        let object = tool_definitions(
+            &BTreeSet::from(["object-editing".into()]),
+            AgentTurnMode::Default,
+        )
+        .unwrap();
         assert!(!names(&object).contains("get_parameter_batch_result"));
 
-        let combined = tool_definitions(&BTreeSet::from([
-            "parameter-editing".into(),
-            "object-editing".into(),
-        ]))
+        let combined = tool_definitions(
+            &BTreeSet::from(["parameter-editing".into(), "object-editing".into()]),
+            AgentTurnMode::Default,
+        )
         .unwrap();
         let combined_names = names(&combined);
         assert!(combined_names.contains("preview_add_parameter"));
@@ -1157,8 +1308,11 @@ mod tests {
 
     #[test]
     fn memory_skills_expose_separate_strict_contracts() {
-        let recall_definitions =
-            tool_definitions(&BTreeSet::from(["memory-recall".into()])).unwrap();
+        let recall_definitions = tool_definitions(
+            &BTreeSet::from(["memory-recall".into()]),
+            AgentTurnMode::Default,
+        )
+        .unwrap();
         let recall_names = names(&recall_definitions);
         assert!(recall_names.contains("recall_memory"));
         assert!(!recall_names.contains("upsert_memory"));
@@ -1178,7 +1332,11 @@ mod tests {
         );
         assert_eq!(recall_parameters["properties"]["limit"]["maximum"], 8);
 
-        let definitions = tool_definitions(&BTreeSet::from(["project-memory".into()])).unwrap();
+        let definitions = tool_definitions(
+            &BTreeSet::from(["project-memory".into()]),
+            AgentTurnMode::Default,
+        )
+        .unwrap();
         let memory_names = names(&definitions);
         assert!(memory_names.contains("upsert_memory"));
         assert!(memory_names.contains("archive_memory"));
@@ -1225,6 +1383,52 @@ mod tests {
         for forbidden in ["read_file", "write_file", "apply_patch", "run_terminal"] {
             assert!(!registered_names.contains(forbidden));
         }
+    }
+
+    #[test]
+    fn read_only_modes_never_advertise_mutating_tools() {
+        let active = skills::all()
+            .unwrap()
+            .iter()
+            .map(|skill| skill.name.clone())
+            .collect::<BTreeSet<_>>();
+        for mode in [AgentTurnMode::ConversationOnly, AgentTurnMode::Plan] {
+            let definitions = tool_definitions(&active, mode).unwrap();
+            assert!(names(&definitions)
+                .iter()
+                .all(|name| tool_access(name) == Some(ToolAccess::ReadOnly)));
+        }
+        assert!(
+            names(&tool_definitions(&active, AgentTurnMode::Plan).unwrap()).contains("submit_plan")
+        );
+        assert!(
+            !names(&tool_definitions(&active, AgentTurnMode::ConversationOnly).unwrap())
+                .contains("submit_plan")
+        );
+    }
+
+    #[test]
+    fn execution_guard_rejects_directly_constructed_writes() {
+        for mode in [AgentTurnMode::ConversationOnly, AgentTurnMode::Plan] {
+            for name in [
+                "connect_editor",
+                "preview_parameter_batch",
+                "execute_editor_edit",
+                "set_parameter_values",
+                "perform_computer_action",
+                "capture_computer_operation_frame",
+                "list_cubism_windows",
+                "upsert_memory",
+            ] {
+                assert!(matches!(
+                    ensure_tool_access(mode, name),
+                    Err(error) if error.code == "read_only_mode"
+                ));
+            }
+            assert!(ensure_tool_access(mode, "get_parameter_values").is_ok());
+        }
+        assert!(ensure_tool_access(AgentTurnMode::Default, "submit_plan").is_err());
+        assert!(ensure_tool_access(AgentTurnMode::Plan, "submit_plan").is_ok());
     }
 
     #[test]

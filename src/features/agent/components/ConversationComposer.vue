@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
 import { Button, Textarea } from "../../../ui";
-import { ImagePlus, X } from "@lucide/vue";
+import { ImagePlus, ListChecks, X } from "@lucide/vue";
 import { chatImageSrc, MAX_CHAT_IMAGES } from "../useChatImageDrafts";
 import type {
+  AgentTurnMode,
   ChatImageDraft,
   ComputerActionKind,
   ComputerOperationStatus,
@@ -16,7 +17,8 @@ const props = withDefaults(
   defineProps<{
     modelValue: string;
     askAnswer?: string;
-    conversationOnly?: boolean;
+    planRevision?: string;
+    mode?: AgentTurnMode;
     pendingAction?: PendingUserAction | null;
     computerStatus?: ComputerOperationStatus;
     disabled?: boolean;
@@ -30,7 +32,8 @@ const props = withDefaults(
   }>(),
   {
     askAnswer: "",
-    conversationOnly: false,
+    planRevision: "",
+    mode: "default",
     pendingAction: null,
     computerStatus: "idle",
     disabled: false,
@@ -47,11 +50,13 @@ const props = withDefaults(
 const emit = defineEmits<{
   "update:modelValue": [value: string];
   "update:askAnswer": [value: string];
-  "update:conversationOnly": [value: boolean];
+  "update:planRevision": [value: string];
+  "update:mode": [value: AgentTurnMode];
   send: [];
   cancel: [];
   answer: [answer?: string];
   decide: [approved: boolean];
+  decidePlan: [decision: "approve" | "revise" | "cancel", revision?: string];
   pickImages: [];
   removeImage: [draftId: string];
   viewImage: [image: ChatImageDraft];
@@ -60,6 +65,7 @@ const emit = defineEmits<{
 
 const inputRef = ref<TextareaRef>(null);
 const askRef = ref<TextareaRef>(null);
+const planRevisionRef = ref<TextareaRef>(null);
 
 function textareaElement(value: TextareaRef) {
   if (value instanceof HTMLTextAreaElement) return value;
@@ -78,6 +84,9 @@ const pendingQuestion = computed(() =>
 );
 const computerApproval = computed(() =>
   props.pendingAction?.kind === "computer_approval" ? props.pendingAction : null,
+);
+const planApproval = computed(() =>
+  props.pendingAction?.kind === "plan_approval" ? props.pendingAction : null,
 );
 
 const actionLabels: Record<ComputerActionKind, string> = {
@@ -109,10 +118,11 @@ function expiryLabel(value: string) {
 }
 
 watch(
-  () => [props.modelValue, props.askAnswer, props.pendingAction?.actionId],
+  () => [props.modelValue, props.askAnswer, props.planRevision, props.pendingAction?.actionId],
   () => void nextTick(() => {
     resize(inputRef.value);
     resize(askRef.value);
+    resize(planRevisionRef.value);
   }),
   { immediate: true },
 );
@@ -128,6 +138,13 @@ function onAskKeydown(event: KeyboardEvent) {
   event.preventDefault();
   if (props.askAnswer.trim()) emit("answer");
 }
+
+function onPlanRevisionKeydown(event: KeyboardEvent) {
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+  event.preventDefault();
+  const revision = props.planRevision.trim();
+  if (revision) emit("decidePlan", "revise", revision);
+}
 </script>
 
 <template>
@@ -137,7 +154,32 @@ function onAskKeydown(event: KeyboardEvent) {
     </div>
 
     <div
-      v-if="pendingQuestion"
+      v-if="planApproval"
+      class="conversation-composer__pending conversation-composer__plan-approval"
+      :data-agent-id="`${agentIdPrefix}.plan-approval`"
+    >
+      <div class="conversation-composer__approval-heading">
+        <strong>计划确认</strong>
+        <span>{{ planApproval.title }}</span>
+      </div>
+      <Textarea
+        ref="planRevisionRef"
+        :model-value="planRevision"
+        :rows="1"
+        placeholder="输入修改要求"
+        :agent-id="`${agentIdPrefix}.plan-approval.revision`"
+        @update:model-value="emit('update:planRevision', $event)"
+        @keydown="onPlanRevisionKeydown"
+      />
+      <div class="conversation-composer__approval-actions">
+        <Button size="sm" :disabled="running || cancelling" :agent-id="`${agentIdPrefix}.plan-approval.cancel`" @click="emit('decidePlan', 'cancel')">取消</Button>
+        <Button size="sm" :disabled="running || cancelling || !planRevision.trim()" :agent-id="`${agentIdPrefix}.plan-approval.revise`" @click="emit('decidePlan', 'revise', planRevision.trim())">修改计划</Button>
+        <Button variant="primary" size="sm" :disabled="running || cancelling" :agent-id="`${agentIdPrefix}.plan-approval.approve`" @click="emit('decidePlan', 'approve')">按计划执行</Button>
+      </div>
+    </div>
+
+    <div
+      v-else-if="pendingQuestion"
       class="conversation-composer__pending"
       :data-agent-id="`${agentIdPrefix}.ask`"
     >
@@ -223,7 +265,7 @@ function onAskKeydown(event: KeyboardEvent) {
         ref="inputRef"
         :model-value="modelValue"
         :rows="1"
-        :placeholder="conversationOnly ? '提问或讨论当前模型…' : placeholder"
+        :placeholder="mode === 'plan' ? '描述需要规划的 Cubism 工作…' : mode === 'conversation_only' ? '提问或讨论当前模型…' : placeholder"
         :disabled="disabled || running || cancelling"
         :agent-id="`${agentIdPrefix}.input`"
         @update:model-value="emit('update:modelValue', $event)"
@@ -266,12 +308,24 @@ function onAskKeydown(event: KeyboardEvent) {
           </Button>
           <Button
             size="sm"
-            :variant="conversationOnly ? 'primary' : 'ghost'"
-            :aria-pressed="conversationOnly"
+            :variant="mode === 'conversation_only' ? 'primary' : 'ghost'"
+            :aria-pressed="mode === 'conversation_only'"
+            :disabled="disabled || running || cancelling"
             :agent-id="`${agentIdPrefix}.conversation-only`"
-            @click="emit('update:conversationOnly', !conversationOnly)"
+            @click="emit('update:mode', mode === 'conversation_only' ? 'default' : 'conversation_only')"
           >
             仅对话
+          </Button>
+          <Button
+            size="sm"
+            :variant="mode === 'plan' ? 'primary' : 'ghost'"
+            :aria-pressed="mode === 'plan'"
+            :disabled="disabled || running || cancelling"
+            :agent-id="`${agentIdPrefix}.plan-mode`"
+            @click="emit('update:mode', mode === 'plan' ? 'default' : 'plan')"
+          >
+            <ListChecks :size="15" aria-hidden="true" />
+            计划
           </Button>
         </div>
         <span class="conversation-composer__hint">Enter 发送 · Shift+Enter 换行</span>
@@ -332,6 +386,8 @@ function onAskKeydown(event: KeyboardEvent) {
 .conversation-composer__mode { margin-right: auto; min-width: 0; }
 .conversation-composer__hint { color: var(--text-faint); font-size: 11px; }
 .conversation-composer__pending { min-height: 108px; padding: 3px; }
+.conversation-composer__plan-approval { min-height: 0; }
+.conversation-composer__plan-approval :deep(.ui-textarea) { margin-top: 7px; min-height: 42px; }
 .conversation-composer__question { margin: 0 0 9px; font-size: 13px; line-height: 1.5; }
 .conversation-composer__options { flex-wrap: wrap; margin-bottom: 7px; }
 .conversation-composer__answer { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 7px; }

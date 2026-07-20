@@ -1,4 +1,5 @@
-﻿use crate::agent::{new_id, AgentError};
+use crate::agent::plan::{PendingPlanApproval, PlanApprovalAction, PlanDocument};
+use crate::agent::{new_id, AgentError};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -196,6 +197,12 @@ impl AgentStore {
               tool_call_id TEXT NOT NULL,
               created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS pending_plan_approvals (
+              action_id TEXT PRIMARY KEY,
+              conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(id) ON DELETE CASCADE,
+              plan_json TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS memories (
               id TEXT PRIMARY KEY,
               scope TEXT NOT NULL,
@@ -249,7 +256,10 @@ impl AgentStore {
         Ok(())
     }
 
-    fn with_conn<T>(&self, f: impl FnOnce(&Connection) -> Result<T, AgentError>) -> Result<T, AgentError> {
+    fn with_conn<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T, AgentError>,
+    ) -> Result<T, AgentError> {
         let guard = self.conn.lock().unwrap();
         let conn = guard
             .as_ref()
@@ -592,6 +602,10 @@ impl AgentStore {
         let created_at = Utc::now().to_rfc3339();
         self.with_conn(|conn| {
             conn.execute(
+                "DELETE FROM pending_plan_approvals WHERE conversation_id = ?1",
+                params![question.conversation_id],
+            )?;
+            conn.execute(
                 "DELETE FROM pending_user_actions WHERE conversation_id = ?1",
                 params![question.conversation_id],
             )?;
@@ -610,6 +624,126 @@ impl AgentStore {
                 ],
             )?;
             Ok(())
+        })
+    }
+
+    pub fn set_pending_plan_approval(
+        &self,
+        approval: &PendingPlanApproval,
+    ) -> Result<(), AgentError> {
+        let plan_json = serde_json::to_string(&approval.plan)?;
+        let created_at = Utc::now().to_rfc3339();
+        self.with_conn(|conn| {
+            let transaction = conn.unchecked_transaction()?;
+            transaction.execute(
+                "DELETE FROM pending_user_actions WHERE conversation_id = ?1",
+                params![approval.action.conversation_id],
+            )?;
+            transaction.execute(
+                "DELETE FROM pending_plan_approvals WHERE conversation_id = ?1",
+                params![approval.action.conversation_id],
+            )?;
+            transaction.execute(
+                r#"
+                INSERT INTO pending_plan_approvals (action_id, conversation_id, plan_json, created_at)
+                VALUES (?1, ?2, ?3, ?4)
+                "#,
+                params![
+                    approval.action.action_id,
+                    approval.action.conversation_id,
+                    plan_json,
+                    created_at,
+                ],
+            )?;
+            transaction.commit()?;
+            Ok(())
+        })
+    }
+
+    pub fn get_pending_plan_approval(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<PendingPlanApproval>, AgentError> {
+        self.with_conn(|conn| {
+            let row = conn
+                .query_row(
+                    "SELECT action_id, plan_json FROM pending_plan_approvals WHERE conversation_id = ?1",
+                    params![conversation_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?;
+            row.map(|(action_id, plan_json)| {
+                let plan: PlanDocument = serde_json::from_str(&plan_json)?;
+                Ok(PendingPlanApproval {
+                    action: PlanApprovalAction {
+                        action_id,
+                        conversation_id: conversation_id.into(),
+                        title: plan.title.clone(),
+                    },
+                    plan,
+                })
+            })
+            .transpose()
+        })
+    }
+
+    pub fn get_pending_plan_approval_by_action(
+        &self,
+        action_id: &str,
+    ) -> Result<Option<PendingPlanApproval>, AgentError> {
+        self.with_conn(|conn| {
+            let row = conn
+                .query_row(
+                    "SELECT conversation_id, plan_json FROM pending_plan_approvals WHERE action_id = ?1",
+                    params![action_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?;
+            row.map(|(conversation_id, plan_json)| {
+                let plan: PlanDocument = serde_json::from_str(&plan_json)?;
+                Ok(PendingPlanApproval {
+                    action: PlanApprovalAction {
+                        action_id: action_id.into(),
+                        conversation_id,
+                        title: plan.title.clone(),
+                    },
+                    plan,
+                })
+            })
+            .transpose()
+        })
+    }
+
+    pub fn take_pending_plan_approval(
+        &self,
+        action_id: &str,
+    ) -> Result<Option<PendingPlanApproval>, AgentError> {
+        self.with_conn(|conn| {
+            let transaction = conn.unchecked_transaction()?;
+            let row = transaction
+                .query_row(
+                    "SELECT conversation_id, plan_json FROM pending_plan_approvals WHERE action_id = ?1",
+                    params![action_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()?;
+            let Some((conversation_id, plan_json)) = row else {
+                return Ok(None);
+            };
+            transaction.execute(
+                "DELETE FROM pending_plan_approvals WHERE action_id = ?1",
+                params![action_id],
+            )?;
+            transaction.commit()?;
+            let plan: PlanDocument = serde_json::from_str(&plan_json)?;
+            Ok(Some(PendingPlanApproval {
+                action: PlanApprovalAction {
+                    action_id: action_id.into(),
+                    conversation_id,
+                    title: plan.title.clone(),
+                },
+                plan,
+            }))
         })
     }
 
@@ -682,11 +816,15 @@ impl AgentStore {
 
     pub fn clear_pending_user_action(&self, conversation_id: &str) -> Result<bool, AgentError> {
         self.with_conn(|conn| {
-            let deleted = conn.execute(
+            let questions = conn.execute(
                 "DELETE FROM pending_user_actions WHERE conversation_id = ?1",
                 params![conversation_id],
             )?;
-            Ok(deleted > 0)
+            let plans = conn.execute(
+                "DELETE FROM pending_plan_approvals WHERE conversation_id = ?1",
+                params![conversation_id],
+            )?;
+            Ok(questions > 0 || plans > 0)
         })
     }
 
@@ -1042,7 +1180,12 @@ impl AgentStore {
                 .query_row(
                     "SELECT base_url, model FROM llm_config WHERE id = 1",
                     [],
-                    |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?)),
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                        ))
+                    },
                 )
                 .optional()?;
             Ok(row.unwrap_or((None, None)))
@@ -1357,7 +1500,9 @@ fn ensure_column(
             return Ok(());
         }
     }
-    conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"))?;
+    conn.execute_batch(&format!(
+        "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+    ))?;
     Ok(())
 }
 
@@ -1395,6 +1540,7 @@ pub(crate) fn truncate_summary(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::agent::memory_recall::{MemoryRecallDepth, MemoryRecallRequest, MemoryRecallScope};
+    use crate::agent::plan::PlanDocument;
 
     fn project_body(overview: &str) -> String {
         format!("## Overview\n{overview}\n")
@@ -1469,6 +1615,58 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn plan_approval_survives_restart_and_can_only_be_taken_once() {
+        let dir = std::env::temp_dir().join(format!("nbc-plan-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("agent.db");
+        let store = AgentStore::default();
+        store.open(path.clone()).unwrap();
+        let conversation = store
+            .create_conversation(Some("计划".into()), None)
+            .unwrap();
+        let pending = PendingPlanApproval {
+            action: PlanApprovalAction {
+                action_id: new_id(),
+                conversation_id: conversation.id.clone(),
+                title: "参数计划".into(),
+            },
+            plan: PlanDocument {
+                title: "参数计划".into(),
+                summary: "核对后调整".into(),
+                steps: vec!["读取参数".into()],
+                diagram: "flowchart TD\nA --> B".into(),
+                acceptance: vec!["回读一致".into()],
+                assumptions: vec!["模型已打开".into()],
+                risks: vec!["版本差异".into()],
+            },
+        };
+        store.set_pending_plan_approval(&pending).unwrap();
+        drop(store);
+
+        let reopened = AgentStore::default();
+        reopened.open(path).unwrap();
+        reopened.clear_unresumable_pending_user_actions().unwrap();
+        assert_eq!(
+            reopened
+                .get_pending_plan_approval(&conversation.id)
+                .unwrap()
+                .unwrap()
+                .plan,
+            pending.plan
+        );
+        assert!(reopened
+            .take_pending_plan_approval(&pending.action.action_id)
+            .unwrap()
+            .is_some());
+        assert!(reopened
+            .take_pending_plan_approval(&pending.action.action_id)
+            .unwrap()
+            .is_none());
+        drop(reopened);
         let _ = std::fs::remove_dir_all(dir);
     }
 

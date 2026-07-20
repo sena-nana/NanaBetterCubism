@@ -2,14 +2,16 @@ use crate::agent::computer_control::ComputerOperationStatus;
 use crate::agent::llm::{
     chat_completions_stream, content_to_text, image_file_to_data_url, ToolCallPayload,
 };
+use crate::agent::plan::{PendingPlanApproval, PlanApprovalAction};
 use crate::agent::skills::{self, MAX_SKILL_LOAD_STEPS, READ_SKILL_TOOL_NAME};
 use crate::agent::tools::{
     advertised_tool_names, emit_tool, execute_tool, tool_definitions, ToolExecutionContext,
     ToolOutcome,
 };
 use crate::agent::{
-    emit_conversations_changed, AgentError, AgentRuntime, AgentTurnState, PendingContinuation,
-    CONVERSATION_ONLY_PROMPT, SYSTEM_PROMPT,
+    emit_conversations_changed, new_id, AgentError, AgentRuntime, AgentTurnMode, AgentTurnState,
+    PendingContinuation, PendingUserAction, CONVERSATION_ONLY_PROMPT, PLAN_MODE_PROMPT,
+    SYSTEM_PROMPT,
 };
 use crate::service::EditorService;
 use serde_json::{json, Value};
@@ -25,7 +27,8 @@ pub async fn run_turn(
     app: AppHandle,
     runtime: Arc<AgentRuntime>,
     conversation_id: String,
-    conversation_only: bool,
+    mode: AgentTurnMode,
+    additional_prompt: Option<String>,
     cancel: Arc<AtomicBool>,
 ) -> Result<(), AgentError> {
     let editor = app.state::<EditorService>();
@@ -35,8 +38,8 @@ pub async fn run_turn(
         editor.inner(),
         &conversation_id,
         None,
-        None,
-        conversation_only,
+        mode,
+        additional_prompt,
         cancel.clone(),
     )
     .await;
@@ -71,6 +74,7 @@ pub async fn continue_after_question(
             .ok_or_else(|| AgentError::new("ask_not_found", "提问上下文已失效。"))?;
 
         let state = continuation.resume(Value::String(answer.clone()));
+        let mode = state.mode;
         runtime.store.append_message(
             &question.conversation_id,
             "user",
@@ -86,9 +90,9 @@ pub async fn continue_after_question(
             &runtime,
             editor.inner(),
             &conversation_id,
-            None,
             Some(state),
-            false,
+            mode,
+            None,
             cancel.clone(),
         )
         .await
@@ -123,6 +127,7 @@ pub async fn continue_after_computer_approval(
             .ok_or_else(|| AgentError::new("approval_not_found", "授权上下文已失效。"))?;
         let tool_call_id = continuation.tool_call_id.clone();
         let state = continuation.resume(decision);
+        let mode = state.mode;
         runtime.store.append_tool_trace(
             &approval.conversation_id,
             &tool_call_id,
@@ -169,9 +174,9 @@ pub async fn continue_after_computer_approval(
             &runtime,
             editor.inner(),
             &conversation_id,
-            None,
             Some(state),
-            false,
+            mode,
+            None,
             cancel.clone(),
         )
         .await
@@ -280,9 +285,9 @@ async fn run_turn_inner(
     runtime: &Arc<AgentRuntime>,
     editor: &EditorService,
     conversation_id: &str,
-    user_text: Option<String>,
     existing_state: Option<AgentTurnState>,
-    conversation_only: bool,
+    mode: AgentTurnMode,
+    additional_prompt: Option<String>,
     cancel: Arc<AtomicBool>,
 ) -> Result<TurnEnd, AgentError> {
     let config = runtime.store.get_llm_config()?;
@@ -299,10 +304,21 @@ async fn run_turn_inner(
                 "content": skills::catalog_prompt()?
             }),
         ];
-        if conversation_only {
+        if mode == AgentTurnMode::ConversationOnly {
             seeded.push(json!({
                 "role": "system",
                 "content": CONVERSATION_ONLY_PROMPT
+            }));
+        } else if mode == AgentTurnMode::Plan {
+            seeded.push(json!({
+                "role": "system",
+                "content": PLAN_MODE_PROMPT
+            }));
+        }
+        if let Some(prompt) = additional_prompt {
+            seeded.push(json!({
+                "role": "system",
+                "content": prompt
             }));
         }
         for item in runtime.store.get_messages(conversation_id)? {
@@ -314,8 +330,7 @@ async fn run_turn_inner(
                 "content": message_content(&item),
             }));
         }
-        debug_assert!(user_text.is_none());
-        AgentTurnState::new(seeded)
+        AgentTurnState::new(seeded, mode)
     };
 
     loop {
@@ -323,7 +338,7 @@ async fn run_turn_inner(
             return Err(AgentError::new("cancelled", "已取消。"));
         }
 
-        let tools = tool_definitions(&state.active_skills)?;
+        let tools = tool_definitions(&state.active_skills, state.mode)?;
         let advertised = advertised_tool_names(&tools);
         let assistant = {
             let conversation_id = conversation_id.to_string();
@@ -345,6 +360,12 @@ async fn run_turn_inner(
 
         let tool_calls = assistant.tool_calls.clone().unwrap_or_default();
         if tool_calls.is_empty() {
+            if state.mode == AgentTurnMode::Plan {
+                return Err(AgentError::new(
+                    "plan_not_submitted",
+                    "规划回合必须通过 submit_plan 提交完整计划。",
+                ));
+            }
             if runtime.computer_control.has_active_grant(conversation_id) {
                 runtime
                     .computer_control
@@ -494,6 +515,7 @@ async fn run_turn_inner(
                     conversation_id,
                     tool_call_id: &call.id,
                     cancel: cancel.clone(),
+                    mode: state.mode,
                 },
                 &call.function.name,
                 &call.function.arguments,
@@ -529,6 +551,43 @@ async fn run_turn_inner(
                         "agent://user-action",
                         json!({ "conversationId": conversation_id, "action": action }),
                     );
+                    return Ok(TurnEnd::WaitingUser);
+                }
+                ToolOutcome::PlanSubmitted(plan) => {
+                    let markdown = plan.markdown();
+                    runtime.store.append_message(
+                        conversation_id,
+                        "assistant",
+                        &markdown,
+                        None,
+                        None,
+                    )?;
+                    let todo = runtime
+                        .store
+                        .upsert_plan(conversation_id, plan.todo_steps("pending"))?;
+                    let approval = PendingPlanApproval {
+                        action: PlanApprovalAction {
+                            action_id: new_id(),
+                            conversation_id: conversation_id.into(),
+                            title: plan.title.clone(),
+                        },
+                        plan,
+                    };
+                    runtime.store.set_pending_plan_approval(&approval)?;
+                    let _ = app.emit(
+                        "agent://turn-delta",
+                        json!({ "conversationId": conversation_id, "text": markdown }),
+                    );
+                    let _ = app.emit(
+                        "agent://plan",
+                        json!({ "conversationId": conversation_id, "plan": todo }),
+                    );
+                    let action = PendingUserAction::from(approval.action);
+                    let _ = app.emit(
+                        "agent://user-action",
+                        json!({ "conversationId": conversation_id, "action": action }),
+                    );
+                    emit_conversations_changed(app);
                     return Ok(TurnEnd::WaitingUser);
                 }
                 ToolOutcome::Result {
@@ -858,7 +917,10 @@ mod tests {
             }],
             ..message
         };
-        assert_eq!(message_content(&missing)[1]["text"], "[图片不可用：image.webp]");
+        assert_eq!(
+            message_content(&missing)[1]["text"],
+            "[图片不可用：image.webp]"
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }
