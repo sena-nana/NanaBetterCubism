@@ -1,7 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
 import { Button, Textarea } from "../../../ui";
-import type { ComputerActionKind, ComputerOperationStatus, PendingUserAction } from "../types";
+import { ImagePlus, X } from "@lucide/vue";
+import { chatImageSrc, MAX_CHAT_IMAGES } from "../useChatImageDrafts";
+import type {
+  ChatImageDraft,
+  ComputerActionKind,
+  ComputerOperationStatus,
+  PendingUserAction,
+} from "../types";
 
 type TextareaRef = { $el?: HTMLTextAreaElement } | HTMLTextAreaElement | null;
 
@@ -16,6 +23,7 @@ const props = withDefaults(
     running?: boolean;
     cancelling?: boolean;
     canSend?: boolean;
+    images?: ChatImageDraft[];
     error?: string | null;
     placeholder?: string;
     agentIdPrefix?: string;
@@ -29,6 +37,7 @@ const props = withDefaults(
     running: false,
     cancelling: false,
     canSend: false,
+    images: () => [],
     error: null,
     placeholder: "描述你想在 Cubism Editor 中完成的事…",
     agentIdPrefix: "agent.chat",
@@ -43,6 +52,10 @@ const emit = defineEmits<{
   cancel: [];
   answer: [answer?: string];
   decide: [approved: boolean];
+  pickImages: [];
+  removeImage: [draftId: string];
+  viewImage: [image: ChatImageDraft];
+  paste: [event: ClipboardEvent];
 }>();
 
 const inputRef = ref<TextareaRef>(null);
@@ -215,9 +228,42 @@ function onAskKeydown(event: KeyboardEvent) {
         :agent-id="`${agentIdPrefix}.input`"
         @update:model-value="emit('update:modelValue', $event)"
         @keydown="onKeydown"
+        @paste="emit('paste', $event)"
       />
+      <div v-if="images.length" class="conversation-composer__images">
+        <div
+          v-for="(image, index) in images"
+          :key="image.draftId"
+          class="conversation-composer__image"
+          :data-agent-id="`${agentIdPrefix}.draft-image.${index}`"
+        >
+          <button type="button" class="conversation-composer__image-open" :aria-label="`查看 ${image.name}`" @click="emit('viewImage', image)">
+            <img :src="chatImageSrc(image)" :alt="image.name" />
+          </button>
+          <button
+            type="button"
+            class="conversation-composer__image-remove"
+            :aria-label="`移除 ${image.name}`"
+            :data-agent-id="`${agentIdPrefix}.draft-image.${index}.remove`"
+            @click="emit('removeImage', image.draftId)"
+          >
+            <X :size="12" aria-hidden="true" />
+          </button>
+        </div>
+      </div>
       <div class="conversation-composer__actions">
         <div class="conversation-composer__mode">
+          <Button
+            size="sm"
+            variant="ghost"
+            title="添加图片"
+            aria-label="添加图片"
+            :disabled="disabled || running || cancelling || images.length >= MAX_CHAT_IMAGES"
+            :agent-id="`${agentIdPrefix}.add-image`"
+            @click="emit('pickImages')"
+          >
+            <ImagePlus :size="15" aria-hidden="true" />
+          </Button>
           <Button
             size="sm"
             :variant="conversationOnly ? 'primary' : 'ghost'"
@@ -267,6 +313,7 @@ function onAskKeydown(event: KeyboardEvent) {
 }
 
 .conversation-composer__toolbar,
+.conversation-composer__images,
 .conversation-composer__actions,
 .conversation-composer__mode,
 .conversation-composer__answer-actions,
@@ -274,6 +321,11 @@ function onAskKeydown(event: KeyboardEvent) {
 .conversation-composer__approval-actions,
 .conversation-composer__operation-status { display: flex; align-items: center; gap: 6px; }
 .conversation-composer__toolbar { min-height: 28px; padding: 0 1px 6px; overflow-x: auto; }
+.conversation-composer__images { flex-wrap: wrap; padding: 5px 1px 1px; }
+.conversation-composer__image { position: relative; width: 58px; height: 58px; }
+.conversation-composer__image-open { width: 100%; height: 100%; padding: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-subtle); cursor: zoom-in; }
+.conversation-composer__image-open img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.conversation-composer__image-remove { position: absolute; top: -5px; right: -5px; display: grid; place-items: center; width: 18px; height: 18px; padding: 0; border: 1px solid var(--border); border-radius: 50%; background: var(--bg-elev); color: var(--text); cursor: pointer; }
 .conversation-composer :deep(.ui-textarea) { display: block; width: 100%; min-height: 48px; max-height: 180px; resize: none; overflow-y: auto; border: 0; background: transparent; box-shadow: none; line-height: 1.55; }
 .conversation-composer :deep(.ui-textarea:focus) { outline: none; }
 .conversation-composer__actions { justify-content: flex-end; min-height: 30px; padding: 6px 1px 0; }

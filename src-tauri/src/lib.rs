@@ -6,9 +6,10 @@ mod service;
 use agent::{
     agent_answer_question, agent_cancel_turn, agent_create_conversation,
     agent_decide_computer_operation, agent_delete_conversation, agent_get_messages,
-    agent_get_pending_user_action, agent_get_plan, agent_list_conversations, agent_list_projects,
-    agent_send_message, agent_set_conversation_pinned, llm_get_config, llm_set_config,
-    llm_test_connection, memory_list, memory_set_enabled, AgentRuntime, AgentStore,
+    agent_discard_image_drafts, agent_get_pending_user_action, agent_get_plan,
+    agent_list_conversations, agent_list_projects, agent_prepare_images, agent_send_message,
+    agent_set_conversation_pinned, llm_get_config, llm_set_config, llm_test_connection, memory_list,
+    memory_set_enabled, AgentRuntime, AgentStore,
 };
 use service::{
     cancel_parameter_batch, connect_editor, disconnect_editor, execute_parameter_batch,
@@ -21,6 +22,7 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .manage(EditorService::default())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_lilia::init())
@@ -44,7 +46,12 @@ pub fn run() {
                 }
             }
             let coordinator = app.state::<EditorService>().operation_coordinator();
-            app.manage(Arc::new(AgentRuntime::new(store, coordinator)));
+            let runtime = Arc::new(AgentRuntime::new(store, coordinator));
+            runtime
+                .images
+                .clear_stale_drafts()
+                .map_err(|e| Box::<dyn std::error::Error>::from(e.message))?;
+            app.manage(runtime);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -63,6 +70,8 @@ pub fn run() {
             agent_set_conversation_pinned,
             agent_delete_conversation,
             agent_get_messages,
+            agent_prepare_images,
+            agent_discard_image_drafts,
             agent_send_message,
             agent_cancel_turn,
             agent_answer_question,

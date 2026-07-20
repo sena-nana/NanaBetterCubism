@@ -1,6 +1,7 @@
 mod capture;
 pub(crate) mod commands;
 pub(crate) mod computer_control;
+pub(crate) mod images;
 mod llm;
 mod memory_markdown;
 mod memory_recall;
@@ -60,6 +61,7 @@ impl From<serde_json::Error> for AgentError {
 
 pub struct AgentRuntime {
     pub store: AgentStore,
+    pub images: images::ImageService,
     pub computer_control: computer_control::ComputerControlService,
     pub cancel_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub pending_continuations: Mutex<HashMap<String, PendingContinuation>>,
@@ -127,8 +129,10 @@ pub struct CancelTurnResult {
 
 impl AgentRuntime {
     pub fn new(store: AgentStore, coordinator: crate::service::OperationCoordinator) -> Self {
+        let images = images::ImageService::new(store.data_dir());
         Self {
             store,
+            images,
             computer_control: computer_control::ComputerControlService::new(coordinator),
             cancel_flags: Mutex::new(HashMap::new()),
             pending_continuations: Mutex::new(HashMap::new()),
@@ -174,7 +178,8 @@ impl AgentRuntime {
                 "对话正在运行或等待回答，暂时无法删除。",
             ));
         }
-        self.store.delete_conversation(conversation_id)
+        self.store.delete_conversation(conversation_id)?;
+        self.images.delete_conversation_images(conversation_id)
     }
 
     pub async fn begin_question_answer(

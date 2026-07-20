@@ -27,6 +27,7 @@ pub struct ChatMessage {
     pub content: String,
     pub tool_name: Option<String>,
     pub tool_status: Option<String>,
+    pub attachments: Vec<crate::agent::images::ChatImageAttachment>,
     pub created_at: String,
 }
 
@@ -178,6 +179,7 @@ impl AgentStore {
               content TEXT NOT NULL,
               tool_name TEXT,
               tool_status TEXT,
+              attachments_json TEXT NOT NULL DEFAULT '[]',
               created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS plans (
@@ -231,6 +233,12 @@ impl AgentStore {
         )?;
         ensure_column(&conn, "projects", "document_key", "TEXT")?;
         ensure_column(&conn, "projects", "document_path", "TEXT")?;
+        ensure_column(
+            &conn,
+            "messages",
+            "attachments_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )?;
         migrate_pending_asks(&conn)?;
         migrate_memory_bodies(&conn)?;
         conn.execute_batch(
@@ -247,6 +255,14 @@ impl AgentStore {
             .as_ref()
             .ok_or_else(|| AgentError::new("store_not_ready", "本地存储尚未初始化。"))?;
         f(conn)
+    }
+
+    pub fn data_dir(&self) -> Option<PathBuf> {
+        self.path
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|path| path.parent().map(PathBuf::from))
     }
 
     pub fn list_conversations(&self) -> Result<Vec<ConversationSummary>, AgentError> {
@@ -400,20 +416,27 @@ impl AgentStore {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 r#"
-                SELECT id, role, content, tool_name, tool_status, created_at
+                SELECT id, role, content, tool_name, tool_status, attachments_json, created_at
                 FROM messages
                 WHERE conversation_id = ?1
                 ORDER BY created_at ASC, rowid ASC
                 "#,
             )?;
             let rows = stmt.query_map(params![conversation_id], |row| {
+                let attachments_json: String = row.get(5)?;
+                let mut attachments: Vec<crate::agent::images::ChatImageAttachment> =
+                    serde_json::from_str(&attachments_json).unwrap_or_default();
+                for attachment in &mut attachments {
+                    attachment.available = PathBuf::from(&attachment.path).is_file();
+                }
                 Ok(ChatMessage {
                     id: row.get(0)?,
                     role: row.get(1)?,
                     content: row.get(2)?,
                     tool_name: row.get(3)?,
                     tool_status: row.get(4)?,
-                    created_at: row.get(5)?,
+                    attachments,
+                    created_at: row.get(6)?,
                 })
             })?;
             Ok(rows.filter_map(Result::ok).collect())
@@ -428,19 +451,41 @@ impl AgentStore {
         tool_name: Option<&str>,
         tool_status: Option<&str>,
     ) -> Result<ChatMessage, AgentError> {
+        self.append_message_with_attachments(
+            conversation_id,
+            role,
+            content,
+            tool_name,
+            tool_status,
+            &[],
+        )
+    }
+
+    pub fn append_message_with_attachments(
+        &self,
+        conversation_id: &str,
+        role: &str,
+        content: &str,
+        tool_name: Option<&str>,
+        tool_status: Option<&str>,
+        attachments: &[crate::agent::images::ChatImageAttachment],
+    ) -> Result<ChatMessage, AgentError> {
         let message = ChatMessage {
             id: new_id(),
             role: role.into(),
             content: content.into(),
             tool_name: tool_name.map(str::to_string),
             tool_status: tool_status.map(str::to_string),
+            attachments: attachments.to_vec(),
             created_at: Utc::now().to_rfc3339(),
         };
+        let attachments_json = serde_json::to_string(&message.attachments)?;
         self.with_conn(|conn| {
             conn.execute(
                 r#"
-                INSERT INTO messages (id, conversation_id, role, content, tool_name, tool_status, created_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                INSERT INTO messages (
+                  id, conversation_id, role, content, tool_name, tool_status, attachments_json, created_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                 "#,
                 params![
                     message.id,
@@ -449,6 +494,7 @@ impl AgentStore {
                     message.content,
                     message.tool_name,
                     message.tool_status,
+                    attachments_json,
                     message.created_at
                 ],
             )?;
@@ -2165,5 +2211,43 @@ mod tests {
             .set_conversation_title(&conversation.id, "AI短标题")
             .unwrap();
         assert_eq!(store.list_conversations().unwrap()[0].title, "AI短标题");
+    }
+
+    #[test]
+    fn image_attachments_roundtrip_and_report_missing_managed_files() {
+        let dir = std::env::temp_dir().join(format!("nbc-message-images-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let image_path = dir.join("image.png");
+        std::fs::write(&image_path, b"image").unwrap();
+        let store = AgentStore::default();
+        store.open(dir.join("agent.db")).unwrap();
+        let conversation = store.create_conversation(None, None).unwrap();
+        let attachment = crate::agent::images::ChatImageAttachment {
+            id: new_id(),
+            name: "image.png".into(),
+            path: image_path.to_string_lossy().into_owned(),
+            mime: "image/png".into(),
+            size: 5,
+            available: true,
+        };
+        store
+            .append_message_with_attachments(
+                &conversation.id,
+                "user",
+                "查看",
+                None,
+                None,
+                std::slice::from_ref(&attachment),
+            )
+            .unwrap();
+        assert_eq!(
+            store.get_messages(&conversation.id).unwrap()[0].attachments,
+            vec![attachment.clone()]
+        );
+
+        std::fs::remove_file(image_path).unwrap();
+        assert!(!store.get_messages(&conversation.id).unwrap()[0].attachments[0].available);
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

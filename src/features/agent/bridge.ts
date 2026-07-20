@@ -19,6 +19,8 @@ import type {
   MemoryScope,
   PendingUserAction,
   ProjectRecord,
+  ImagePrepareInput,
+  ImagePrepareResult,
 } from "./types";
 
 export { normalizeCommandError };
@@ -43,12 +45,33 @@ export async function getMessages(conversationId: string): Promise<ChatMessage[]
 export async function sendMessage(
   conversationId: string,
   content: string,
+  imageDraftIds: string[] = [],
   conversationOnly = false,
-): Promise<void> {
+): Promise<ChatMessage> {
   if (!isTauriRuntime()) {
     throw domainError("desktop_required", "请在桌面应用中发送消息。");
   }
-  await invoke("agent_send_message", { conversationId, content, conversationOnly });
+  return invoke<ChatMessage>("agent_send_message", {
+    conversationId,
+    content,
+    imageDraftIds,
+    conversationOnly,
+  });
+}
+
+export async function prepareImages(
+  inputs: ImagePrepareInput[],
+  remainingSlots: number,
+): Promise<ImagePrepareResult> {
+  if (!isTauriRuntime()) {
+    throw domainError("desktop_required", "请在桌面应用中添加图片。");
+  }
+  return invoke<ImagePrepareResult>("agent_prepare_images", { inputs, remainingSlots });
+}
+
+export async function discardImageDrafts(draftIds: string[]): Promise<void> {
+  if (!isTauriRuntime() || draftIds.length === 0) return;
+  await invoke("agent_discard_image_drafts", { draftIds });
 }
 
 export async function cancelTurn(conversationId: string): Promise<CancelTurnResult> {

@@ -66,7 +66,16 @@ const bridge = vi.hoisted(() => ({
     return () => undefined;
   }),
   normalizeCommandError: vi.fn((error: unknown) => ({ code: "test", message: String(error) })),
-  sendMessage: vi.fn(async () => undefined),
+  sendMessage: vi.fn(async (_conversationId: string, content: string) => ({
+    id: `persisted-${content}`,
+    role: "user" as const,
+    content,
+    toolName: null,
+    toolDisplayName: null,
+    toolStatus: null,
+    attachments: [],
+    createdAt: "2026-07-15T00:00:00Z",
+  })),
   setConversationPinned: vi.fn(async () => true),
 }));
 
@@ -270,7 +279,7 @@ describe("对话工作区", () => {
     const input = await screen.findByPlaceholderText("描述你想在 Cubism Editor 中完成的事…");
     await fireEvent.update(input, "A 请求");
     await fireEvent.keyDown(input, { key: "Enter" });
-    expect(bridge.sendMessage).toHaveBeenCalledWith("a", "A 请求", false);
+    expect(bridge.sendMessage).toHaveBeenCalledWith("a", "A 请求", [], false);
 
     await router.push("/chats/b");
     await waitForConversationLoad("b");
@@ -278,7 +287,7 @@ describe("对话工作区", () => {
     await fireEvent.update(inputB, "B 请求");
     await fireEvent.keyDown(inputB, { key: "Enter" });
 
-    expect(bridge.sendMessage).toHaveBeenNthCalledWith(2, "b", "B 请求", false);
+    expect(bridge.sendMessage).toHaveBeenNthCalledWith(2, "b", "B 请求", [], false);
     expect(bridge.cancelTurn).not.toHaveBeenCalled();
     expect(getConversationRuntime("a").phase).toBe("running");
     expect(getConversationRuntime("b").phase).toBe("running");

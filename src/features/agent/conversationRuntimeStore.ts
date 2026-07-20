@@ -14,6 +14,7 @@ import {
 import type {
   AgentToolEvent,
   ChatMessage,
+  ChatImageDraft,
   ComputerOperationStatus,
   ConversationPlan,
   PendingUserAction,
@@ -29,6 +30,7 @@ export interface ConversationRuntimeState {
   pendingAction: PendingUserAction | null;
   computerStatus: ComputerOperationStatus;
   draft: string;
+  imageDrafts: ChatImageDraft[];
   askAnswer: string;
   error: string | null;
   loading: boolean;
@@ -147,10 +149,15 @@ export async function loadConversationRuntime(
   }
 }
 
-export function beginConversationTurn(conversationId: string, content: string) {
+export function beginConversationTurn(
+  conversationId: string,
+  content: string,
+  imageDrafts: ChatImageDraft[] = [],
+) {
   const state = runtimeState(conversationId);
   const messageId = nextLocalId("local");
   state.draft = "";
+  state.imageDrafts = [];
   state.error = null;
   state.computerStatus = "idle";
   state.messages.push({
@@ -160,6 +167,7 @@ export function beginConversationTurn(conversationId: string, content: string) {
     toolName: null,
     toolDisplayName: null,
     toolStatus: null,
+    attachments: imageDrafts.map(({ draftId: _, ...attachment }) => attachment),
     createdAt: new Date().toISOString(),
   });
   setConversationTurnPhase(conversationId, "running");
@@ -171,13 +179,26 @@ export function failConversationTurn(
   conversationId: string,
   optimisticMessageId: string,
   content: string,
+  imageDrafts: ChatImageDraft[],
   message: string,
 ) {
   const state = runtimeState(conversationId);
   state.messages = state.messages.filter((item) => item.id !== optimisticMessageId);
   state.draft = content;
+  state.imageDrafts = imageDrafts;
   state.error = message;
   setConversationTurnPhase(conversationId, "idle");
+  touch(state);
+}
+
+export function confirmConversationTurn(
+  conversationId: string,
+  optimisticMessageId: string,
+  persisted: ChatMessage,
+) {
+  const state = runtimeState(conversationId);
+  const index = state.messages.findIndex((message) => message.id === optimisticMessageId);
+  if (index >= 0) state.messages.splice(index, 1, persisted);
   touch(state);
 }
 
@@ -218,6 +239,7 @@ function runtimeState(conversationId: string) {
       pendingAction: null,
       computerStatus: "idle",
       draft: "",
+      imageDrafts: [],
       askAnswer: "",
       error: null,
       loading: true,
@@ -242,6 +264,7 @@ function appendDelta(conversationId: string, text: string) {
       toolName: null,
       toolDisplayName: null,
       toolStatus: null,
+      attachments: [],
       createdAt: new Date().toISOString(),
     });
   }
@@ -264,6 +287,7 @@ function upsertToolEvent(conversationId: string, payload: AgentToolEvent) {
       toolName: payload.toolName,
       toolDisplayName: payload.toolDisplayName,
       toolStatus: payload.status,
+      attachments: [],
       createdAt: new Date().toISOString(),
     });
   }

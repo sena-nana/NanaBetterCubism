@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import UiImageViewer from "@lilia/image-viewer/components/ImageViewer";
 import {
   answerQuestion,
   cancelTurn,
@@ -18,6 +19,7 @@ import {
   beginConversationTurn,
   conversationOnly,
   failConversationTurn,
+  confirmConversationTurn,
   getConversationRuntime,
   installConversationRuntimeStore,
   loadConversationRuntime,
@@ -28,6 +30,7 @@ import {
   applyConversationGroup,
 } from "./sidebarConversations";
 import type { ConversationSummary } from "./types";
+import { useChatImageDrafts } from "./useChatImageDrafts";
 
 const route = useRoute();
 const router = useRouter();
@@ -53,13 +56,29 @@ const askAnswer = computed({
     runtime.value.askAnswer = value;
   },
 });
+const imageDrafts = computed({
+  get: () => runtime.value.imageDrafts,
+  set: (value) => {
+    runtime.value.imageDrafts = value;
+  },
+});
+const canCompose = computed(
+  () => llm.state.config.hasApiKey && !turn.blocked.value && !runtime.value.pendingAction,
+);
+
+const imageDraftController = useChatImageDrafts({
+  drafts: imageDrafts,
+  canInteract: () => canCompose.value,
+  setError: (message) => {
+    runtime.value.error = message;
+  },
+});
+const viewingImage = imageDraftController.viewingImage;
 
 const canSend = computed(
   () =>
-    Boolean(draft.value.trim()) &&
-    llm.state.config.hasApiKey &&
-    !turn.blocked.value &&
-    !runtime.value.pendingAction,
+    Boolean(draft.value.trim() || imageDrafts.value.length) &&
+    canCompose.value,
 );
 
 const currentProjectName = computed(() => conversation.value?.projectName?.trim() || "收集箱");
@@ -110,15 +129,23 @@ async function reloadConversation() {
 async function onSend() {
   const id = conversationId.value;
   const content = draft.value.trim();
-  if (!id || !content || !canSend.value) return;
-  const optimisticId = beginConversationTurn(id, content);
+  if (!id || !canSend.value) return;
+  const images = [...imageDrafts.value];
+  const optimisticId = beginConversationTurn(id, content, images);
   try {
-    await sendMessage(id, content, conversationOnly.value);
+    const persisted = await sendMessage(
+      id,
+      content,
+      images.map((image) => image.draftId),
+      conversationOnly.value,
+    );
+    confirmConversationTurn(id, optimisticId, persisted);
   } catch (err) {
     failConversationTurn(
       id,
       optimisticId,
       content,
+      images,
       normalizeCommandError(err).message,
     );
   }
@@ -187,13 +214,18 @@ async function onDecideComputerOperation(approved: boolean) {
 </script>
 
 <template>
-  <ConversationSurface data-agent-id="agent.chat">
+  <ConversationSurface
+    data-agent-id="agent.chat"
+    :drop-enabled="canCompose"
+    @drop-paths="imageDraftController.addPaths"
+  >
     <ConversationTranscript
       :messages="runtime.messages"
       :loading="runtime.loading"
       :running="turn.running.value"
       :cancelling="turn.cancelling.value"
       :empty-title="`要在${currentProjectName === '收集箱' ? '' : ` ${currentProjectName} `}完成什么？`"
+      @view-image="imageDraftController.viewImage"
     />
 
     <template #context>
@@ -215,12 +247,23 @@ async function onDecideComputerOperation(approved: boolean) {
         :running="turn.running.value"
         :cancelling="turn.cancelling.value"
         :can-send="canSend"
+        :images="imageDrafts"
         :error="runtime.error"
         @send="onSend"
         @cancel="onCancel"
         @answer="onAnswerAsk"
         @decide="onDecideComputerOperation"
+        @pick-images="imageDraftController.pickImages"
+        @remove-image="imageDraftController.removeImage"
+        @view-image="imageDraftController.viewImage"
+        @paste="imageDraftController.pasteImages"
       />
     </template>
   </ConversationSurface>
+  <UiImageViewer
+    v-if="viewingImage"
+    :source="viewingImage"
+    agent-id="agent.chat.image-viewer"
+    @close="viewingImage = null"
+  />
 </template>

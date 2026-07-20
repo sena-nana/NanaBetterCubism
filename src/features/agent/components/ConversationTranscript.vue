@@ -4,7 +4,8 @@ import { Button } from "../../../ui";
 import { buildConversationTimeline } from "../toolActivityGroups";
 import MarkdownBlock from "../markdown/MarkdownBlock.vue";
 import ToolActivityGroup from "./ToolActivityGroup.vue";
-import type { ChatMessage } from "../types";
+import { chatImageSrc } from "../useChatImageDrafts";
+import type { ChatImageAttachment, ChatMessage } from "../types";
 
 const props = withDefaults(
   defineProps<{
@@ -27,6 +28,7 @@ const props = withDefaults(
 );
 
 const scroller = ref<HTMLElement | null>(null);
+const emit = defineEmits<{ viewImage: [image: ChatImageAttachment] }>();
 const followOutput = ref(true);
 const timeline = computed(() => buildConversationTimeline(props.messages));
 
@@ -99,9 +101,31 @@ onMounted(() => void scrollToBottom(true));
             :messages="entry.messages"
             :agent-id-prefix="agentIdPrefix"
           />
-          <p v-else-if="entry.message.role === 'user'" class="timeline-entry__user-body">
-            {{ entry.message.content }}
-          </p>
+          <div v-else-if="entry.message.role === 'user'" class="timeline-entry__user">
+            <div v-if="entry.message.attachments?.length" class="timeline-entry__images">
+              <template v-for="(image, imageIndex) in entry.message.attachments" :key="image.id">
+                <button
+                  v-if="image.available"
+                  type="button"
+                  class="timeline-entry__image"
+                  :aria-label="`查看 ${image.name}`"
+                  :data-agent-id="`${agentIdPrefix}.message.${entry.message.id}.image.${imageIndex}`"
+                  @click="emit('viewImage', image)"
+                >
+                  <img :src="chatImageSrc(image)" :alt="image.name" />
+                </button>
+                <div
+                  v-else
+                  class="timeline-entry__image timeline-entry__image--unavailable"
+                  :data-agent-id="`${agentIdPrefix}.message.${entry.message.id}.image.${imageIndex}`"
+                >
+                  <span>图片不可用</span>
+                  <small>{{ image.name }}</small>
+                </div>
+              </template>
+            </div>
+            <p v-if="entry.message.content" class="timeline-entry__user-body">{{ entry.message.content }}</p>
+          </div>
           <MarkdownBlock v-else-if="entry.message.role === 'assistant'" :content="entry.message.content" />
           <p v-else class="timeline-entry__system-body">{{ entry.message.content }}</p>
         </article>
@@ -175,6 +199,12 @@ onMounted(() => void scrollToBottom(true));
 .timeline-entry--assistant { align-self: stretch; padding-inline: 2px; }
 .timeline-entry--tool, .timeline-entry--system { align-self: flex-start; max-width: min(680px, 92%); }
 .timeline-entry__user-body, .timeline-entry__system-body { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.6; }
+.timeline-entry__user { display: flex; flex-direction: column; gap: 7px; }
+.timeline-entry__images { display: grid; grid-template-columns: repeat(auto-fit, minmax(72px, 112px)); gap: 5px; }
+.timeline-entry__image { width: 100%; aspect-ratio: 1; padding: 0; overflow: hidden; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--bg-subtle); cursor: zoom-in; }
+.timeline-entry__image img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.timeline-entry__image--unavailable { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; padding: 7px; color: var(--text-muted); cursor: default; text-align: center; }
+.timeline-entry__image--unavailable small { max-width: 100%; overflow: hidden; color: var(--text-faint); text-overflow: ellipsis; white-space: nowrap; }
 .timeline-entry__system-body { padding: 7px 9px; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: var(--bg-subtle); color: var(--text-muted); font-size: 12px; }
 
 .conversation-progress { display: inline-flex; align-items: center; gap: 7px; align-self: flex-start; min-height: 28px; color: var(--text-muted); font-size: 12px; }
