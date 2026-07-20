@@ -91,6 +91,43 @@ fn first_message(parsed: ChatCompletionResponse) -> Result<ChatMessagePayload, A
         .ok_or_else(|| AgentError::new("llm_empty", "模型未返回内容。"))
 }
 
+/// 判定模型错误体是否表示「不支持图片输入 / image_url」。
+/// 覆盖 OpenAI 兼容、Anthropic 代理、Gemini 代理等常见文案，大小写不敏感。
+pub fn detect_image_unsupported(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    let contains = |needle: &str| lower.contains(needle);
+
+    let has_image_url = contains("image_url");
+    let has_image_input = contains("image input");
+    let has_vision = contains("vision");
+    let has_multimodal = contains("multimodal");
+
+    let not_supported = contains("not supported")
+        || contains("unsupported")
+        || contains("does not support")
+        || contains("not available")
+        || contains("invalid")
+        || contains("not exist");
+
+    (has_image_url || has_image_input) && not_supported
+        || (has_vision && (contains("not supported") || contains("not available")))
+        || (has_multimodal && (contains("not supported") || contains("unsupported")))
+}
+
+fn classify_request_failure(status: reqwest::StatusCode, text: String) -> AgentError {
+    if detect_image_unsupported(&text) {
+        AgentError::new(
+            "llm_image_unsupported",
+            format!("当前模型不支持图片输入 ({status}): {text}"),
+        )
+    } else {
+        AgentError::new(
+            "llm_request_failed",
+            format!("模型请求失败 ({status}): {text}"),
+        )
+    }
+}
+
 pub async fn chat_completions(
     config: &LlmConfigInternal,
     messages: &[Value],
@@ -107,10 +144,7 @@ pub async fn chat_completions(
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
-        return Err(AgentError::new(
-            "llm_request_failed",
-            format!("模型请求失败 ({status}): {text}"),
-        ));
+        return Err(classify_request_failure(status, text));
     }
     first_message(response.json().await?)
 }
@@ -136,10 +170,7 @@ where
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
-        return Err(AgentError::new(
-            "llm_request_failed",
-            format!("模型请求失败 ({status}): {text}"),
-        ));
+        return Err(classify_request_failure(status, text));
     }
 
     let content_type = response
@@ -264,7 +295,7 @@ where
 
 pub async fn test_connection(
     config: &LlmConfigInternal,
-) -> Result<(bool, String, Vec<String>), AgentError> {
+) -> Result<(bool, String, Vec<String>, Option<bool>), AgentError> {
     let base = config
         .base_url
         .as_ref()
@@ -314,8 +345,11 @@ pub async fn test_connection(
         )
         .await
         {
-            Ok(_) => Ok((true, "连接成功，对话测试通过。".into(), models)),
-            Err(error) => Ok((false, format!("对话失败：{}", error.message), models)),
+            Ok(_) => {
+                let image_supported = probe_image_support(config).await;
+                Ok((true, "连接成功，对话测试通过。".into(), models, image_supported))
+            }
+            Err(error) => Ok((false, format!("对话失败：{}", error.message), models, None)),
         };
     }
 
@@ -329,11 +363,35 @@ pub async fn test_connection(
             true,
             format!("已连接（{detail}）。未配置模型，已跳过对话测试。"),
             models,
+            None,
         ))
     } else {
-        Ok((false, "连接失败：无法访问模型列表。".into(), models))
+        Ok((false, "连接失败：无法访问模型列表。".into(), models, None))
     }
 }
+
+/// 用一张 1x1 透明 PNG 探测当前模型是否支持图片输入。
+/// - 返回 `Some(true)`：多模态请求成功。
+/// - 返回 `Some(false)`：命中 `llm_image_unsupported`。
+/// - 返回 `None`：其它错误或异常，无法判定，跳过。
+pub async fn probe_image_support(config: &LlmConfigInternal) -> Option<bool> {
+    let probe = json!({
+        "role": "user",
+        "content": [
+            { "type": "text", "text": "ping" },
+            { "type": "image_url", "image_url": { "url": TINY_PNG_DATA_URL } }
+        ]
+    });
+    match chat_completions(config, &[probe], &[]).await {
+        Ok(_) => Some(true),
+        Err(error) if error.code == "llm_image_unsupported" => Some(false),
+        Err(_) => None,
+    }
+}
+
+/// 1x1 透明 PNG 的 data URL，用于探测图片输入支持。
+const TINY_PNG_DATA_URL: &str =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
 
 pub fn content_to_text(content: &Option<Value>) -> String {
     match content {
@@ -465,10 +523,11 @@ data: [DONE]
             model: Some("mock-model".into()),
         };
 
-        let (ok, message, models) = test_connection(&config).await.unwrap();
+        let (ok, message, models, image_supported) = test_connection(&config).await.unwrap();
         assert!(ok);
         assert_eq!(message, "连接成功，对话测试通过。");
         assert_eq!(models, vec!["mock-model".to_string(), "mock-mini".to_string()]);
+        let _ = image_supported;
     }
 
     #[tokio::test]
@@ -492,10 +551,11 @@ data: [DONE]
             model: Some("mock-model".into()),
         };
 
-        let (ok, message, models) = test_connection(&config).await.unwrap();
+        let (ok, message, models, image_supported) = test_connection(&config).await.unwrap();
         assert!(!ok);
         assert!(message.starts_with("对话失败："));
         assert_eq!(models, vec!["mock-model".to_string()]);
+        let _ = image_supported;
     }
 
     #[tokio::test]
@@ -554,5 +614,55 @@ data: [DONE]
         let url = image_file_to_data_url(path.to_str().unwrap()).unwrap();
         assert!(url.starts_with("data:image/png;base64,"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn detect_image_unsupported_matches_provider_bodies() {
+        let positive = [
+            r#"{"error":{"message":"image_url is not supported by this model"}}"#,
+            "Unsupported value: 'messages.[0].content.[0].image_url.url' does not exist",
+            "The model does not support image input.",
+            "image input is not supported",
+            "vision is not available for this model",
+            "multimodal is not supported",
+            "Invalid image_url",
+        ];
+        for body in positive {
+            assert!(detect_image_unsupported(body), "should match: {body}");
+        }
+    }
+
+    #[test]
+    fn detect_image_unsupported_ignores_unrelated_errors() {
+        let negative = [
+            r#"{"error":{"message":"rate limit exceeded"}}"#,
+            "context length exceeded",
+            "invalid api key",
+            "model not found",
+            "internal server error",
+            "",
+        ];
+        for body in negative {
+            assert!(!detect_image_unsupported(body), "should not match: {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_completions_classifies_image_unsupported_error() {
+        let base_url = spawn_mock_http(vec![MockHttpResponse {
+            status: 400,
+            content_type: "application/json",
+            body: r#"{"error":{"message":"image_url is not supported by this model"}}"#.into(),
+        }])
+        .await;
+        let config = LlmConfigInternal {
+            base_url: Some(base_url),
+            api_key: Some("test-key".into()),
+            model: Some("mock-model".into()),
+        };
+        let error = chat_completions(&config, &[json!({"role":"user","content":"hi"})], &[])
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "llm_image_unsupported");
     }
 }

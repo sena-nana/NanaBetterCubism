@@ -382,6 +382,7 @@ pub fn tool_access(name: &str) -> Option<ToolAccess> {
 pub fn tool_definitions(
     active_skills: &BTreeSet<String>,
     mode: AgentTurnMode,
+    image_supported: bool,
 ) -> Result<Vec<Value>, AgentError> {
     let allowed = skills::allowed_domain_tools(active_skills)?;
     let domain_tools = all_domain_tool_definitions();
@@ -402,8 +403,10 @@ pub fn tool_definitions(
         domain_tools
             .into_iter()
             .filter(|tool| {
-                tool_name(&tool.schema).is_some_and(|name| allowed.contains(name))
+                let name = tool_name(&tool.schema);
+                name.is_some_and(|name| allowed.contains(name))
                     && (!mode.is_read_only() || tool.access == ToolAccess::ReadOnly)
+                    && (image_supported || name != Some("capture_cubism_editor_window"))
             })
             .map(|tool| tool.schema),
     );
@@ -853,6 +856,12 @@ async fn execute_tool_inner(
             Ok(tool_result(serde_json::to_string_pretty(&result)?))
         }
         "capture_cubism_editor_window" => {
+            if runtime.image_capability().is_unsupported() {
+                return Err(AgentError::new(
+                    "image_input_unsupported_by_model",
+                    "当前模型不支持图片输入，「查看 Editor 窗口」已禁用，请更换支持视觉的模型。",
+                ));
+            }
             let needle = args
                 .get("titleSubstring")
                 .and_then(|v| v.as_str())
@@ -1254,7 +1263,7 @@ mod tests {
 
     #[test]
     fn initial_tool_set_only_contains_core_tools() {
-        let definitions = tool_definitions(&BTreeSet::new(), AgentTurnMode::Default).unwrap();
+        let definitions = tool_definitions(&BTreeSet::new(), AgentTurnMode::Default, true).unwrap();
         assert_eq!(
             names(&definitions),
             BTreeSet::from([
@@ -1273,6 +1282,7 @@ mod tests {
         let parameter = tool_definitions(
             &BTreeSet::from(["parameter-editing".into()]),
             AgentTurnMode::Default,
+            true,
         )
         .unwrap();
         let parameter_names = names(&parameter);
@@ -1285,6 +1295,7 @@ mod tests {
         let object = tool_definitions(
             &BTreeSet::from(["object-editing".into()]),
             AgentTurnMode::Default,
+            true,
         )
         .unwrap();
         assert!(!names(&object).contains("get_parameter_batch_result"));
@@ -1292,6 +1303,7 @@ mod tests {
         let combined = tool_definitions(
             &BTreeSet::from(["parameter-editing".into(), "object-editing".into()]),
             AgentTurnMode::Default,
+            true,
         )
         .unwrap();
         let combined_names = names(&combined);
@@ -1311,6 +1323,7 @@ mod tests {
         let recall_definitions = tool_definitions(
             &BTreeSet::from(["memory-recall".into()]),
             AgentTurnMode::Default,
+            true,
         )
         .unwrap();
         let recall_names = names(&recall_definitions);
@@ -1335,6 +1348,7 @@ mod tests {
         let definitions = tool_definitions(
             &BTreeSet::from(["project-memory".into()]),
             AgentTurnMode::Default,
+            true,
         )
         .unwrap();
         let memory_names = names(&definitions);
@@ -1386,6 +1400,15 @@ mod tests {
     }
 
     #[test]
+    fn capture_tool_is_hidden_when_image_input_unsupported() {
+        let active = BTreeSet::from(["editor-context".into()]);
+        let with_images = tool_definitions(&active, AgentTurnMode::Default, true).unwrap();
+        assert!(names(&with_images).contains("capture_cubism_editor_window"));
+        let without_images = tool_definitions(&active, AgentTurnMode::Default, false).unwrap();
+        assert!(!names(&without_images).contains("capture_cubism_editor_window"));
+    }
+
+    #[test]
     fn read_only_modes_never_advertise_mutating_tools() {
         let active = skills::all()
             .unwrap()
@@ -1393,16 +1416,16 @@ mod tests {
             .map(|skill| skill.name.clone())
             .collect::<BTreeSet<_>>();
         for mode in [AgentTurnMode::ConversationOnly, AgentTurnMode::Plan] {
-            let definitions = tool_definitions(&active, mode).unwrap();
+            let definitions = tool_definitions(&active, mode, true).unwrap();
             assert!(names(&definitions)
                 .iter()
                 .all(|name| tool_access(name) == Some(ToolAccess::ReadOnly)));
         }
         assert!(
-            names(&tool_definitions(&active, AgentTurnMode::Plan).unwrap()).contains("submit_plan")
+            names(&tool_definitions(&active, AgentTurnMode::Plan, true).unwrap()).contains("submit_plan")
         );
         assert!(
-            !names(&tool_definitions(&active, AgentTurnMode::ConversationOnly).unwrap())
+            !names(&tool_definitions(&active, AgentTurnMode::ConversationOnly, true).unwrap())
                 .contains("submit_plan")
         );
     }

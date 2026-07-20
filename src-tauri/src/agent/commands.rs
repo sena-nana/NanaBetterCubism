@@ -1,5 +1,5 @@
 use crate::agent::computer_control::ComputerOperationStatus;
-use crate::agent::images::{ChatImageAttachment, ImagePrepareInput, ImagePrepareResult};
+use crate::agent::images::{ChatImageAttachment, ImagePrepareInput, ImagePrepareRejection, ImagePrepareResult};
 use crate::agent::llm::test_connection;
 use crate::agent::runtime::{continue_after_computer_approval, continue_after_question, run_turn};
 use crate::agent::store::{
@@ -23,6 +23,7 @@ pub struct LlmTestResult {
     pub ok: bool,
     pub message: String,
     pub models: Vec<String>,
+    pub image_supported: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -66,7 +67,14 @@ fn runtime(app: &AppHandle) -> Result<Arc<AgentRuntime>, AgentError> {
 
 #[tauri::command]
 pub async fn llm_get_config(app: AppHandle) -> Result<LlmConfigView, AgentError> {
-    runtime(&app)?.store.get_llm_config_view()
+    let runtime = runtime(&app)?;
+    let mut view = runtime.store.get_llm_config_view()?;
+    view.image_input_supported = match runtime.image_capability() {
+        crate::agent::ImageInputSupport::Supported => Some(true),
+        crate::agent::ImageInputSupport::Unsupported => Some(false),
+        crate::agent::ImageInputSupport::Unknown => None,
+    };
+    Ok(view)
 }
 
 #[tauri::command]
@@ -74,17 +82,30 @@ pub async fn llm_set_config(
     app: AppHandle,
     input: LlmConfigInput,
 ) -> Result<LlmConfigView, AgentError> {
-    runtime(&app)?.store.set_llm_config(input)
+    let runtime = runtime(&app)?;
+    let view = runtime.store.set_llm_config(input)?;
+    runtime.reset_image_capability(&app);
+    Ok(view)
 }
 
 #[tauri::command]
 pub async fn llm_test_connection(app: AppHandle) -> Result<LlmTestResult, AgentError> {
-    let config = runtime(&app)?.store.get_llm_config()?;
-    let (ok, message, models) = test_connection(&config).await?;
+    let runtime = runtime(&app)?;
+    let config = runtime.store.get_llm_config()?;
+    let (ok, message, models, image_supported) = test_connection(&config).await?;
+    if let Some(supported) = image_supported {
+        let capability = if supported {
+            crate::agent::ImageInputSupport::Supported
+        } else {
+            crate::agent::ImageInputSupport::Unsupported
+        };
+        runtime.set_image_capability(&app, capability, None);
+    }
     Ok(LlmTestResult {
         ok,
         message,
         models,
+        image_supported,
     })
 }
 
@@ -154,7 +175,35 @@ pub async fn agent_prepare_images(
     inputs: Vec<ImagePrepareInput>,
     remaining_slots: usize,
 ) -> Result<ImagePrepareResult, AgentError> {
-    Ok(runtime(&app)?.images.prepare(inputs, remaining_slots))
+    let runtime = runtime(&app)?;
+    if runtime.image_capability().is_unsupported() {
+        return Ok(ImagePrepareResult {
+            accepted: Vec::new(),
+            rejected: inputs
+                .into_iter()
+                .enumerate()
+                .map(|(index, input)| {
+                    let name = match &input {
+                        ImagePrepareInput::Path { path } => path
+                            .rsplit(['/', '\\'])
+                            .next()
+                            .unwrap_or(path)
+                            .to_string(),
+                        ImagePrepareInput::Bytes { name, .. } => name
+                            .clone()
+                            .unwrap_or_else(|| "image".into()),
+                    };
+                    ImagePrepareRejection {
+                        index,
+                        name,
+                        code: "image_input_unsupported_by_model".into(),
+                        message: "当前模型不支持图片输入，请前往设置更换支持视觉的模型。".into(),
+                    }
+                })
+                .collect(),
+        });
+    }
+    Ok(runtime.images.prepare(inputs, remaining_slots))
 }
 
 #[tauri::command]
@@ -178,6 +227,12 @@ pub async fn agent_send_message(
         return Err(AgentError::new("invalid_message", "消息不能为空。"));
     }
     let runtime = runtime(&app)?;
+    if !image_draft_ids.is_empty() && runtime.image_capability().is_unsupported() {
+        return Err(AgentError::new(
+            "image_input_unsupported_by_model",
+            "当前模型不支持图片输入，请前往设置更换支持视觉的模型。",
+        ));
+    }
     let cancel = runtime.begin_turn(&conversation_id).await?;
     let commit = match runtime.images.commit(&conversation_id, &image_draft_ids) {
         Ok(commit) => commit,
@@ -487,4 +542,55 @@ pub async fn memory_set_enabled(
     enabled: bool,
 ) -> Result<(), AgentError> {
     runtime(&app)?.store.set_memory_enabled(&id, enabled)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::ImageInputSupport;
+    use serde_json::json;
+
+    #[test]
+    fn llm_test_result_uses_camel_case_image_supported() {
+        let result = LlmTestResult {
+            ok: true,
+            message: "连接成功".into(),
+            models: vec!["mock".into()],
+            image_supported: Some(false),
+        };
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["message"], "连接成功");
+        assert_eq!(value["models"], json!(["mock"]));
+        assert_eq!(value["imageSupported"], false);
+        assert!(value.get("image_supported").is_none());
+    }
+
+    #[test]
+    fn llm_config_view_serializes_image_input_supported_camel_case() {
+        let view = LlmConfigView {
+            base_url: Some("https://example.com".into()),
+            model: Some("mock".into()),
+            has_api_key: true,
+            image_input_supported: Some(true),
+        };
+        let value = serde_json::to_value(&view).unwrap();
+        assert_eq!(value["imageInputSupported"], true);
+        assert!(value.get("image_input_supported").is_none());
+    }
+
+    #[test]
+    fn image_input_support_round_trips_through_atomic() {
+        for capability in [
+            ImageInputSupport::Unknown,
+            ImageInputSupport::Supported,
+            ImageInputSupport::Unsupported,
+        ] {
+            assert_eq!(ImageInputSupport::from_u8(capability.as_u8()), capability);
+        }
+        assert!(ImageInputSupport::Unsupported.is_unsupported());
+        assert!(ImageInputSupport::Supported.is_supported());
+        assert!(!ImageInputSupport::Unknown.is_supported());
+        assert!(!ImageInputSupport::Unknown.is_unsupported());
+    }
 }

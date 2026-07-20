@@ -78,6 +78,9 @@ const canCompose = computed(
   () => llm.state.config.hasApiKey && !turn.blocked.value && !runtime.value.pendingAction,
 );
 
+const imageInputDisabled = computed(() => llm.state.imageInputSupported === false);
+const canDropImages = computed(() => canCompose.value && !imageInputDisabled.value);
+
 const imageDraftController = useChatImageDrafts({
   drafts: imageDrafts,
   canInteract: () => canCompose.value,
@@ -252,7 +255,7 @@ async function onDecideComputerOperation(approved: boolean) {
 <template>
   <ConversationSurface
     data-agent-id="agent.chat"
-    :drop-enabled="canCompose"
+    :drop-enabled="canDropImages"
     @drop-paths="imageDraftController.addPaths"
   >
     <ConversationTranscript
@@ -273,6 +276,17 @@ async function onDecideComputerOperation(approved: boolean) {
     </template>
 
     <template #composer>
+      <p
+        v-if="imageInputDisabled"
+        class="chat-image-unsupported-banner"
+        role="alert"
+        data-agent-id="agent.chat.image-unsupported"
+      >
+        当前模型不支持图片输入，「查看 Editor 窗口」等能力已禁用。
+        <button type="button" class="chat-image-unsupported-banner__link" @click="router.push('/settings?tab=model-config')">
+          更换模型
+        </button>
+      </p>
       <ConversationComposer
         v-model="draft"
         v-model:ask-answer="askAnswer"
@@ -286,6 +300,7 @@ async function onDecideComputerOperation(approved: boolean) {
         :can-send="canSend"
         :images="imageDrafts"
         :error="runtime.error"
+        :image-input-disabled="imageInputDisabled"
         @send="onSend"
         @cancel="onCancel"
         @answer="onAnswerAsk"
@@ -305,3 +320,34 @@ async function onDecideComputerOperation(approved: boolean) {
     @close="viewingImage = null"
   />
 </template>
+
+<style scoped>
+.chat-image-unsupported-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0 3px 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.chat-image-unsupported-banner__link {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chat-image-unsupported-banner__link:hover {
+  border-color: var(--text);
+}
+</style>

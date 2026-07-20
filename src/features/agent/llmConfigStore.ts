@@ -1,5 +1,5 @@
 import { reactive } from "vue";
-import { getLlmConfig, testLlmConnection } from "./bridge";
+import { getLlmConfig, listenImageCapability, testLlmConnection } from "./bridge";
 import { publishModelFooter } from "../shell/footerSelfCheck";
 import type { LlmConfigView, LlmTestResult } from "./types";
 
@@ -15,6 +15,7 @@ interface LlmConfigState {
   initialized: boolean;
   loading: boolean;
   connectionStatus: LlmConnectionStatus;
+  imageInputSupported: boolean | null;
 }
 
 const defaultConfig: LlmConfigView = {
@@ -28,10 +29,20 @@ const state = reactive<LlmConfigState>({
   initialized: false,
   loading: false,
   connectionStatus: "unconfigured",
+  imageInputSupported: null,
 });
 
 let initializePromise: Promise<LlmConfigView> | null = null;
 let checkToken = 0;
+let capabilityInstalled = false;
+
+async function installImageCapabilityListener() {
+  if (capabilityInstalled) return;
+  capabilityInstalled = true;
+  await listenImageCapability((payload) => {
+    state.imageInputSupported = payload.supported ? true : payload.unsupported ? false : null;
+  });
+}
 
 async function initialize(): Promise<LlmConfigView> {
   if (state.initialized) return state.config;
@@ -46,6 +57,7 @@ async function initialize(): Promise<LlmConfigView> {
   initializePromise = getLlmConfig()
     .then(async (config) => {
       applyConfig(config);
+      void installImageCapabilityListener();
       if (hasCompleteConfig(config)) {
         await testConnection().catch(() => undefined);
       }
@@ -65,6 +77,7 @@ async function initialize(): Promise<LlmConfigView> {
 function applyConfig(config: LlmConfigView) {
   state.config = { ...config };
   state.initialized = true;
+  state.imageInputSupported = config.imageInputSupported ?? null;
   checkToken += 1;
   if (hasCompleteConfig(config)) publishStale();
   else publishUnconfigured();
@@ -94,6 +107,9 @@ export function useLlmConfigStore() {
 }
 
 function applyCheckResult(result: LlmTestResult) {
+  if (result.imageSupported !== undefined && result.imageSupported !== null) {
+    state.imageInputSupported = result.imageSupported;
+  }
   if (!result.ok) {
     publishFailed("模型连接异常", "最近一次模型连接测试失败。点击进入设置重试。");
   } else if (hasCompleteConfig(state.config)) {

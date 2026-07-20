@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { domainError, isTauriRuntime, normalizeCommandError } from "../editor/bridge";
 import type {
   AgentComputerOperationEvent,
+  AgentImageCapabilityEvent,
   AgentTurnMode,
   AgentPlanEvent,
   AgentToolEvent,
@@ -219,6 +220,15 @@ export async function listenComputerOperation(
 export async function listenPlan(handler: (payload: AgentPlanEvent) => void) {
   if (!isTauriRuntime()) return noopUnlisten;
   return listen<AgentPlanEvent>("agent://plan", (e) => handler(e.payload));
+}
+
+export async function listenImageCapability(
+  handler: (payload: AgentImageCapabilityEvent) => void,
+) {
+  if (!isTauriRuntime()) return noopUnlisten;
+  return listen<AgentImageCapabilityEvent>("agent://image-capability", (e) =>
+    handler(e.payload),
+  );
 }
 
 const noopUnlisten: UnlistenFn = () => {};

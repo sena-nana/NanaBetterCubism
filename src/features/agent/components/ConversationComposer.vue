@@ -29,6 +29,7 @@ const props = withDefaults(
     error?: string | null;
     placeholder?: string;
     agentIdPrefix?: string;
+    imageInputDisabled?: boolean;
   }>(),
   {
     askAnswer: "",
@@ -44,6 +45,7 @@ const props = withDefaults(
     error: null,
     placeholder: "描述你想在 Cubism Editor 中完成的事…",
     agentIdPrefix: "agent.chat",
+    imageInputDisabled: false,
   },
 );
 
@@ -298,9 +300,9 @@ function onPlanRevisionKeydown(event: KeyboardEvent) {
           <Button
             size="sm"
             variant="ghost"
-            title="添加图片"
+            :title="imageInputDisabled ? '当前模型不支持图片输入，请更换支持视觉的模型' : '添加图片'"
             aria-label="添加图片"
-            :disabled="disabled || running || cancelling || images.length >= MAX_CHAT_IMAGES"
+            :disabled="disabled || running || cancelling || images.length >= MAX_CHAT_IMAGES || imageInputDisabled"
             :agent-id="`${agentIdPrefix}.add-image`"
             @click="emit('pickImages')"
           >
