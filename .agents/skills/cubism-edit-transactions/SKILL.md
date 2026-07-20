@@ -1,15 +1,25 @@
 ---
 name: cubism-edit-transactions
-description: Design safe Cubism Editor model mutations. Use for edit approval, transaction begin/end, batch edits, progress, cancellation, rollback, undo cancellation, disconnect cleanup, mutation concurrency, or any API workflow that changes CMO3 model structure.
+description: Design safe Cubism Editor model mutations. Use for edit approval, transaction begin/end, batch edits, progress, cancellation, rollback, undo cancellation, disconnect cleanup, or mutation concurrency.
 ---
 
 # Cubism Edit Transactions
 
-1. Confirm every mutation and lifecycle method in the protocol capability matrix; otherwise disable the workflow.
-2. Build an idempotent edit plan with target document, stable IDs, preconditions, operations, and a user-readable preview.
-3. Allow one backend-owned transaction at a time. Begin before the first mutation, check cancellation between bounded operations, and report real progress.
-4. Commit only after all operations are acknowledged and local invariants pass. Do not assume uncommitted changes are readable.
-5. Cancel on user request, validation/RPC failure, timeout, or shutdown when the confirmed protocol permits it. On disconnect or uncertain completion, mark the outcome unknown and never retry automatically.
-6. Clear ownership in one cleanup path, then re-read affected objects and verify semantic postconditions before reporting success or rollback.
+## MUST
 
-Use `$cubism-model-editing` for operation order and `$nanabettercubism-validation` for failure paths.
+- MUST confirm every mutation and lifecycle method in the protocol capability matrix; otherwise disable the workflow.
+  - Reason: 未确认方法会让事务进入不可恢复状态。
+- MUST build an idempotent edit plan with target document, stable IDs, preconditions, operations, and a user-readable preview.
+  - Reason: 幂等计划让重试与回滚可判定，避免重复写入。
+- MUST allow one backend-owned transaction at a time. Begin before the first mutation, check cancellation between bounded operations, report real progress.
+  - Reason: 并发事务会让 Editor 状态与本地不变量冲突。
+- MUST commit only after all operations are acknowledged and local invariants pass. MUST NOT assume uncommitted changes are readable.
+  - Reason: 未 ack 的提交会留下半完成模型。
+- MUST cancel on user request, validation/RPC failure, timeout, or shutdown when the confirmed protocol permits it. On disconnect or uncertain completion, MUST mark the outcome unknown and never retry automatically.
+  - Reason: 不确定结果自动重试会重复写入或覆盖用户操作。
+- MUST clear ownership in one cleanup path, then re-read affected objects and verify semantic postconditions before reporting success or rollback.
+  - Reason: 未验证后置条件会伪报成功。
+
+## See also
+
+- `$cubism-model-editing` for operation order, `$nanabettercubism-validation` for failure paths.
