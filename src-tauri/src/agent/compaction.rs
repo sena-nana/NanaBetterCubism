@@ -17,16 +17,17 @@ const KEEP_RECENT_IMAGES: usize = 2;
 /// 摘要时保留的尾部消息条数。
 const KEEP_RECENT_TAIL: usize = 6;
 
-/// 解析输入 token 预算：优先 max_input_tokens，否则按 context_window 的 70% 估算。
-/// 两者均无则返回 None，表示不启用自动压缩。
+/// 未配置上下文窗口时的默认值（token）。
+const DEFAULT_CONTEXT_WINDOW: u32 = 256_000;
+
+/// 解析输入 token 预算：优先 max_input_tokens，否则按 context_window 的 70% 估算，
+/// context_window 未配置时按默认 256k 兜底。
 pub fn resolve_budget(config: &LlmConfigInternal) -> Option<usize> {
     if let Some(max_input) = config.max_input_tokens {
         return Some(max_input as usize);
     }
-    if let Some(window) = config.context_window {
-        return Some((window as usize * 7) / 10);
-    }
-    None
+    let window = config.context_window.unwrap_or(DEFAULT_CONTEXT_WINDOW);
+    Some((window as usize * 7) / 10)
 }
 
 /// 估算消息序列 + 工具定义的 token 数。保守偏高，宁可早压缩。
@@ -339,6 +340,17 @@ mod tests {
             "tool_call_id": id,
             "content": content
         })
+    }
+
+    #[test]
+    fn resolve_budget_defaults_to_256k_when_unconfigured() {
+        let mut config = config_with("http://unused/v1".into());
+        config.context_window = None;
+        config.max_input_tokens = None;
+        assert_eq!(
+            resolve_budget(&config),
+            Some((DEFAULT_CONTEXT_WINDOW as usize * 7) / 10)
+        );
     }
 
     #[test]
