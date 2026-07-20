@@ -1,11 +1,7 @@
 <script setup lang="ts">
 import { Button, Card, Input } from "../../../ui";
 import { computed, onMounted, ref } from "vue";
-import {
-  normalizeCommandError,
-  setLlmConfig,
-  testLlmConnection,
-} from "../bridge";
+import { normalizeCommandError, setLlmConfig } from "../bridge";
 import { useLlmConfigStore } from "../llmConfigStore";
 import type { LlmConfigView, LlmTestResult } from "../types";
 
@@ -88,12 +84,15 @@ async function test() {
   resetResult();
   try {
     await persistConfig();
-    testResult.value = await testLlmConnection();
-    if (testResult.value.ok) {
-      availableModels.value = testResult.value.models;
-      if (!model.value.trim() && availableModels.value[0]) {
-        model.value = availableModels.value[0];
-        await persistConfig();
+    testResult.value = await llmConfig.testConnection();
+    if (!testResult.value.ok) return;
+    availableModels.value = testResult.value.models;
+    if (!model.value.trim() && testResult.value.models[0]) {
+      model.value = testResult.value.models[0];
+      await persistConfig();
+      testResult.value = await llmConfig.testConnection();
+      if (testResult.value.models.length) {
+        availableModels.value = testResult.value.models;
       }
     }
   } catch (err) {
