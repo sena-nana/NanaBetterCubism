@@ -306,7 +306,9 @@ function onPlanRevisionKeydown(event: KeyboardEvent) {
             :agent-id="`${agentIdPrefix}.add-image`"
             @click="emit('pickImages')"
           >
-            <ImagePlus :size="15" aria-hidden="true" />
+            <template #icon>
+              <ImagePlus :size="15" aria-hidden="true" />
+            </template>
           </Button>
           <Button
             size="sm"
