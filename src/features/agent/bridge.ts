@@ -164,7 +164,7 @@ export async function setMemoryEnabled(id: string, enabled: boolean): Promise<vo
 
 export async function getLlmConfig(): Promise<LlmConfigView> {
   if (!isTauriRuntime()) {
-    return { baseUrl: null, model: null, hasApiKey: false };
+    return { baseUrl: null, model: null, hasApiKey: false, contextWindow: null, maxInputTokens: null };
   }
   return invoke<LlmConfigView>("llm_get_config");
 }

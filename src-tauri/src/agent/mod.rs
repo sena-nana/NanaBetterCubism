@@ -1,6 +1,7 @@
 mod capture;
 pub(crate) mod commands;
 pub(crate) mod computer_control;
+mod compaction;
 pub(crate) mod images;
 mod llm;
 mod memory_markdown;

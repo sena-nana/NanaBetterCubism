@@ -111,6 +111,10 @@ pub struct LlmConfigView {
     pub has_api_key: bool,
     #[serde(default)]
     pub image_input_supported: Option<bool>,
+    #[serde(default)]
+    pub context_window: Option<u32>,
+    #[serde(default)]
+    pub max_input_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +125,10 @@ pub struct LlmConfigInput {
     pub model: Option<String>,
     #[serde(default)]
     pub clear_api_key: bool,
+    #[serde(default)]
+    pub context_window: Option<u32>,
+    #[serde(default)]
+    pub max_input_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,6 +137,10 @@ pub struct LlmConfigInternal {
     pub base_url: Option<String>,
     pub model: Option<String>,
     pub api_key: Option<String>,
+    #[serde(default)]
+    pub context_window: Option<u32>,
+    #[serde(default)]
+    pub max_input_tokens: Option<u32>,
 }
 
 #[cfg(test)]
@@ -248,6 +260,8 @@ impl AgentStore {
             "attachments_json",
             "TEXT NOT NULL DEFAULT '[]'",
         )?;
+        ensure_column(&conn, "llm_config", "context_window", "INTEGER")?;
+        ensure_column(&conn, "llm_config", "max_input_tokens", "INTEGER")?;
         migrate_pending_asks(&conn)?;
         migrate_memory_bodies(&conn)?;
         conn.execute_batch(
@@ -1177,25 +1191,29 @@ impl AgentStore {
     }
 
     pub fn get_llm_config(&self) -> Result<LlmConfigInternal, AgentError> {
-        let (base_url, model) = self.with_conn(|conn| {
+        let (base_url, model, context_window, max_input_tokens) = self.with_conn(|conn| {
             let row = conn
                 .query_row(
-                    "SELECT base_url, model FROM llm_config WHERE id = 1",
+                    "SELECT base_url, model, context_window, max_input_tokens FROM llm_config WHERE id = 1",
                     [],
                     |row| {
                         Ok((
                             row.get::<_, Option<String>>(0)?,
                             row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
                         ))
                     },
                 )
                 .optional()?;
-            Ok(row.unwrap_or((None, None)))
+            Ok(row.unwrap_or((None, None, None, None)))
         })?;
         Ok(LlmConfigInternal {
             base_url,
             model,
             api_key: load_api_key(),
+            context_window: context_window.map(|value| value as u32),
+            max_input_tokens: max_input_tokens.map(|value| value as u32),
         })
     }
 
@@ -1210,18 +1228,26 @@ impl AgentStore {
                 .map(|value| !value.is_empty())
                 .unwrap_or(false),
             image_input_supported: None,
+            context_window: config.context_window,
+            max_input_tokens: config.max_input_tokens,
         })
     }
 
     pub fn set_llm_config(&self, input: LlmConfigInput) -> Result<LlmConfigView, AgentError> {
+        let context_window = input.context_window.map(|value| value as i64);
+        let max_input_tokens = input.max_input_tokens.map(|value| value as i64);
         self.with_conn(|conn| {
             conn.execute(
                 r#"
-                INSERT INTO llm_config (id, base_url, model)
-                VALUES (1, ?1, ?2)
-                ON CONFLICT(id) DO UPDATE SET base_url = excluded.base_url, model = excluded.model
+                INSERT INTO llm_config (id, base_url, model, context_window, max_input_tokens)
+                VALUES (1, ?1, ?2, ?3, ?4)
+                ON CONFLICT(id) DO UPDATE SET
+                  base_url = excluded.base_url,
+                  model = excluded.model,
+                  context_window = excluded.context_window,
+                  max_input_tokens = excluded.max_input_tokens
                 "#,
-                params![input.base_url, input.model],
+                params![input.base_url, input.model, context_window, max_input_tokens],
             )?;
             Ok(())
         })?;
@@ -2450,5 +2476,65 @@ mod tests {
         assert!(!store.get_messages(&conversation.id).unwrap()[0].attachments[0].available);
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn llm_config_context_window_round_trips() {
+        let store = AgentStore::default();
+        store.open(":memory:".into()).unwrap();
+        let initial = store.get_llm_config_view().unwrap();
+        assert!(initial.context_window.is_none());
+        assert!(initial.max_input_tokens.is_none());
+
+        let view = store
+            .set_llm_config(LlmConfigInput {
+                base_url: Some("https://example.com/v1".into()),
+                api_key: None,
+                model: Some("mock".into()),
+                clear_api_key: false,
+                context_window: Some(128000),
+                max_input_tokens: Some(100000),
+            })
+            .unwrap();
+        assert_eq!(view.context_window, Some(128000));
+        assert_eq!(view.max_input_tokens, Some(100000));
+
+        let internal = store.get_llm_config().unwrap();
+        assert_eq!(internal.context_window, Some(128000));
+        assert_eq!(internal.max_input_tokens, Some(100000));
+
+        // 清空字段后持久化并重新读取
+        let cleared = store
+            .set_llm_config(LlmConfigInput {
+                base_url: Some("https://example.com/v1".into()),
+                api_key: None,
+                model: Some("mock".into()),
+                clear_api_key: false,
+                context_window: None,
+                max_input_tokens: None,
+            })
+            .unwrap();
+        assert!(cleared.context_window.is_none());
+        assert!(cleared.max_input_tokens.is_none());
+        let internal_after = store.get_llm_config().unwrap();
+        assert!(internal_after.context_window.is_none());
+        assert!(internal_after.max_input_tokens.is_none());
+    }
+
+    #[test]
+    fn llm_config_view_serializes_budget_fields_camel_case() {
+        let view = LlmConfigView {
+            base_url: None,
+            model: None,
+            has_api_key: false,
+            image_input_supported: None,
+            context_window: Some(64000),
+            max_input_tokens: Some(50000),
+        };
+        let value = serde_json::to_value(&view).unwrap();
+        assert_eq!(value["contextWindow"], 64000);
+        assert_eq!(value["maxInputTokens"], 50000);
+        assert!(value.get("context_window").is_none());
+        assert!(value.get("max_input_tokens").is_none());
     }
 }

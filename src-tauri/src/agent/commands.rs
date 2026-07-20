@@ -573,6 +573,8 @@ mod tests {
             model: Some("mock".into()),
             has_api_key: true,
             image_input_supported: Some(true),
+            context_window: None,
+            max_input_tokens: None,
         };
         let value = serde_json::to_value(&view).unwrap();
         assert_eq!(value["imageInputSupported"], true);
