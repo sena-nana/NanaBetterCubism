@@ -3,7 +3,7 @@ use crate::agent::llm::{
     chat_completions_stream, content_to_text, image_file_to_data_url, ToolCallPayload,
 };
 use crate::agent::plan::{PendingPlanApproval, PlanApprovalAction};
-use crate::agent::skills::{self, MAX_SKILL_LOAD_STEPS, READ_SKILL_TOOL_NAME};
+use crate::agent::skills::{self, READ_SKILL_TOOL_NAME};
 use crate::agent::tools::{
     advertised_tool_names, emit_tool, execute_tool, tool_definitions, ToolExecutionContext,
     ToolOutcome,
@@ -19,9 +19,6 @@ use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
-
-const MAX_ACTION_STEPS: usize = 12;
-const MAX_COMPUTER_ACTION_STEPS: usize = 36;
 
 pub async fn run_turn(
     app: AppHandle,
@@ -378,36 +375,7 @@ async fn run_turn_inner(
             return Ok(TurnEnd::Finished);
         }
 
-        let batch = validate_tool_call_batch(&tool_calls, &advertised)?;
-        if batch.includes_skill_load && state.skill_load_steps >= MAX_SKILL_LOAD_STEPS {
-            return Err(AgentError::new(
-                "step_limit",
-                "达到 SKILL 读取步数上限，已停止。",
-            ));
-        }
-        if batch.action_kind == Some(ActionKind::Domain) && state.action_steps >= MAX_ACTION_STEPS {
-            return Err(AgentError::new(
-                "step_limit",
-                "达到工具调用步数上限，已停止。",
-            ));
-        }
-        if batch.action_kind == Some(ActionKind::Computer)
-            && state.computer_action_steps >= MAX_COMPUTER_ACTION_STEPS
-        {
-            return Err(AgentError::new(
-                "step_limit",
-                "达到电脑代理操作步数上限，已停止。",
-            ));
-        }
-
-        if batch.includes_skill_load {
-            state.skill_load_steps += 1;
-        }
-        match batch.action_kind {
-            Some(ActionKind::Domain) => state.action_steps += 1,
-            Some(ActionKind::Computer) => state.computer_action_steps += 1,
-            None => {}
-        }
+        let includes_skill_load = validate_tool_call_batch(&tool_calls, &advertised)?;
 
         state.messages.push(json!({
             "role": "assistant",
@@ -422,7 +390,7 @@ async fn run_turn_inner(
             })).collect::<Vec<_>>(),
         }));
 
-        if batch.includes_skill_load {
+        if includes_skill_load {
             let skill_calls = skill_load_calls(&tool_calls);
             for call in &skill_calls {
                 emit_tool(
@@ -496,7 +464,10 @@ async fn run_turn_inner(
                 }));
             }
         }
-        if batch.action_kind.is_none() {
+        if tool_calls
+            .iter()
+            .all(|call| call.function.name == READ_SKILL_TOOL_NAME)
+        {
             continue;
         }
 
@@ -671,22 +642,10 @@ fn tool_error_content(error: &AgentError) -> String {
     .to_string()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ActionKind {
-    Domain,
-    Computer,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ToolCallBatch {
-    includes_skill_load: bool,
-    action_kind: Option<ActionKind>,
-}
-
 fn validate_tool_call_batch(
     calls: &[ToolCallPayload],
     advertised: &BTreeSet<&str>,
-) -> Result<ToolCallBatch, AgentError> {
+) -> Result<bool, AgentError> {
     if let Some(call) = calls
         .iter()
         .find(|call| !advertised.contains(call.function.name.as_str()))
@@ -697,31 +656,9 @@ fn validate_tool_call_batch(
         ));
     }
 
-    let skill_calls = calls
+    Ok(calls
         .iter()
-        .filter(|call| call.function.name == READ_SKILL_TOOL_NAME)
-        .count();
-    let computer_calls = calls
-        .iter()
-        .filter(|call| crate::agent::tools::is_computer_tool(&call.function.name))
-        .count();
-    if computer_calls > 0 && (skill_calls > 0 || computer_calls != 1 || calls.len() != 1) {
-        Err(AgentError::new(
-            "mixed_computer_action",
-            "电脑代理工具每次只能调用一个，且不能与其他工具混用。",
-        ))
-    } else {
-        Ok(ToolCallBatch {
-            includes_skill_load: skill_calls > 0,
-            action_kind: if computer_calls == 1 {
-                Some(ActionKind::Computer)
-            } else if skill_calls < calls.len() {
-                Some(ActionKind::Domain)
-            } else {
-                None
-            },
-        })
-    }
+        .any(|call| call.function.name == READ_SKILL_TOOL_NAME))
 }
 
 fn skill_load_calls(calls: &[ToolCallPayload]) -> Vec<&ToolCallPayload> {
@@ -788,10 +725,7 @@ mod tests {
                 &advertised,
             )
             .unwrap(),
-            ToolCallBatch {
-                includes_skill_load: true,
-                action_kind: Some(ActionKind::Domain),
-            }
+            true
         );
         assert_eq!(
             validate_tool_call_batch(
@@ -799,42 +733,38 @@ mod tests {
                 &advertised,
             )
             .unwrap(),
-            ToolCallBatch {
-                includes_skill_load: true,
-                action_kind: None,
-            }
+            true
         );
 
         let computer = BTreeSet::from(["perform_computer_action"]);
         assert_eq!(
             validate_tool_call_batch(&[call("1", "perform_computer_action", "{}")], &computer,)
                 .unwrap(),
-            ToolCallBatch {
-                includes_skill_load: false,
-                action_kind: Some(ActionKind::Computer),
-            }
+            false
         );
         let mixed_computer = BTreeSet::from(["read_skill", "perform_computer_action"]);
-        assert!(matches!(
+        assert_eq!(
             validate_tool_call_batch(
                 &[
                     call("1", "read_skill", r#"{"name":"computer-operation"}"#),
                     call("2", "perform_computer_action", "{}"),
                 ],
                 &mixed_computer,
-            ),
-            Err(error) if error.code == "mixed_computer_action"
-        ));
-        assert!(matches!(
+            )
+            .unwrap(),
+            true
+        );
+        assert_eq!(
             validate_tool_call_batch(
                 &[
                     call("1", "perform_computer_action", "{}"),
                     call("2", "perform_computer_action", "{}"),
                 ],
                 &computer,
-            ),
-            Err(error) if error.code == "mixed_computer_action"
-        ));
+            )
+            .unwrap(),
+            false
+        );
     }
 
     #[test]

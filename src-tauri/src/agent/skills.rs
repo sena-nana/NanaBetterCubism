@@ -4,7 +4,6 @@ use std::collections::BTreeSet;
 use std::sync::LazyLock;
 
 pub const READ_SKILL_TOOL_NAME: &str = "read_skill";
-pub const MAX_SKILL_LOAD_STEPS: usize = 7;
 
 const CORE_DOMAIN_TOOLS: &[&str] = &[
     "get_editor_snapshot",
@@ -287,7 +286,7 @@ mod tests {
     #[test]
     fn runtime_skills_have_valid_unique_metadata() {
         let skills = all().unwrap();
-        assert_eq!(skills.len(), MAX_SKILL_LOAD_STEPS);
+        assert_eq!(skills.len(), 7);
         let names = skills
             .iter()
             .map(|skill| skill.name.as_str())
