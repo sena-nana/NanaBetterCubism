@@ -80,9 +80,6 @@ pub struct AgentTurnState {
     pub mode: AgentTurnMode,
     pub messages: Vec<serde_json::Value>,
     pub active_skills: BTreeSet<String>,
-    pub action_steps: usize,
-    pub computer_action_steps: usize,
-    pub skill_load_steps: usize,
 }
 
 impl AgentTurnState {
@@ -91,9 +88,6 @@ impl AgentTurnState {
             mode,
             messages,
             active_skills: BTreeSet::new(),
-            action_steps: 0,
-            computer_action_steps: 0,
-            skill_load_steps: 0,
         }
     }
 }
@@ -349,8 +343,6 @@ mod tests {
             AgentTurnMode::Plan,
         );
         state.active_skills.insert("parameter-editing".into());
-        state.action_steps = 3;
-        state.skill_load_steps = 1;
 
         let resumed = PendingContinuation {
             conversation_id: "conversation".into(),
@@ -363,8 +355,6 @@ mod tests {
             resumed.active_skills,
             BTreeSet::from(["parameter-editing".into()])
         );
-        assert_eq!(resumed.action_steps, 3);
-        assert_eq!(resumed.skill_load_steps, 1);
         assert_eq!(resumed.mode, AgentTurnMode::Plan);
         assert_eq!(
             resumed.messages.last().unwrap(),
@@ -450,9 +440,6 @@ mod tests {
                     mode: AgentTurnMode::Default,
                     messages: Vec::new(),
                     active_skills: BTreeSet::new(),
-                    action_steps: 0,
-                    computer_action_steps: 0,
-                    skill_load_steps: 0,
                 },
             },
         );
