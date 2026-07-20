@@ -300,16 +300,13 @@ function onPlanRevisionKeydown(event: KeyboardEvent) {
           <Button
             size="sm"
             variant="ghost"
+            :icon="ImagePlus"
             :title="imageInputDisabled ? '当前模型不支持图片输入，请更换支持视觉的模型' : '添加图片'"
             aria-label="添加图片"
             :disabled="disabled || running || cancelling || images.length >= MAX_CHAT_IMAGES || imageInputDisabled"
             :agent-id="`${agentIdPrefix}.add-image`"
             @click="emit('pickImages')"
-          >
-            <template #icon>
-              <ImagePlus :size="15" aria-hidden="true" />
-            </template>
-          </Button>
+          />
           <Button
             size="sm"
             :variant="mode === 'conversation_only' ? 'primary' : 'ghost'"
@@ -322,15 +319,13 @@ function onPlanRevisionKeydown(event: KeyboardEvent) {
           </Button>
           <Button
             size="sm"
+            :icon="ListChecks"
             :variant="mode === 'plan' ? 'primary' : 'ghost'"
             :aria-pressed="mode === 'plan'"
             :disabled="disabled || running || cancelling"
             :agent-id="`${agentIdPrefix}.plan-mode`"
             @click="emit('update:mode', mode === 'plan' ? 'default' : 'plan')"
           >
-            <template #icon>
-              <ListChecks :size="15" aria-hidden="true" />
-            </template>
             计划
           </Button>
         </div>
