@@ -44,10 +44,7 @@ watch(
       </button>
     </header>
 
-    <p v-if="!visibleSteps.length" class="plan-todo-panel__complete" role="status">
-      当前计划已完成。
-    </p>
-    <ol v-else class="plan-todo-panel__list">
+    <ol v-if="visibleSteps.length" class="plan-todo-panel__list">
       <li
         v-for="step in visibleSteps"
         :key="step.id"
@@ -107,5 +104,4 @@ watch(
 .plan-todo-panel__step.is-completed .plan-todo-panel__text,
 .plan-todo-panel__step.is-cancelled .plan-todo-panel__text { color: var(--text-muted); text-decoration: line-through; }
 .plan-todo-panel__label { flex: 0 0 auto; color: var(--text-faint); font-size: 10px; }
-.plan-todo-panel__complete { margin: 0; padding: 4px; color: var(--ok); font-size: 12px; }
 </style>
