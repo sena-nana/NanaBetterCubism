@@ -9,7 +9,6 @@ import {
   createSettingsModel,
   type LiliaUiConfig,
 } from "./ui";
-import ConversationSidebarTop from "./features/agent/components/ConversationSidebarTop.vue";
 import { editorFooterStatus, modelFooterStatus } from "./features/shell/footerSelfCheck";
 
 export const appConfig = {
@@ -21,14 +20,6 @@ export const appConfig = {
     backdropTarget: "sidebar",
   },
   sidebar: {
-    topContent: ConversationSidebarTop,
-    nav: [
-      { key: "home", to: "/", label: "首页", icon: "home" },
-      { key: "memory", to: "/memory", label: "记忆", icon: "brain" },
-    ],
-    groups: [
-      { key: "conversations", title: appConfigJson.shell.workspaceSectionTitle, emptyText: "暂无对话", items: [] },
-    ],
     footerLinks: [
       { key: "settings", to: "/settings", label: "设置", icon: "settings" },
     ],
