@@ -382,7 +382,7 @@ Read-only: do not edit the model, run previews/executes, or use computer-operati
 pub const PLAN_MODE_PROMPT: &str = "\
 ## Plan mode
 This turn is strictly read-only. Inspect the current Editor and model state with available read-only tools before planning. Do not connect or disconnect Editor, preview or execute edits, change temporary values, write memory, or operate the computer.
-Finish by calling submit_plan exactly once with a complete structured plan. Include a concise title and summary, ordered production steps, Mermaid diagram source, acceptance checks, assumptions, and risks. The diagram must contain Mermaid source only: no Markdown fence, HTML, or external links. A plan-mode turn that ends without submit_plan is an error. Plan approval only starts execution; every concrete Cubism edit still requires its normal preview, confirmation, transaction, and verification.";
+Finish by calling submit_plan exactly once with a complete structured plan. Include a concise title and summary, ordered production steps, Mermaid diagram source, acceptance checks, assumptions, and risks. The diagram must contain Mermaid source only: no Markdown fence, HTML, or external links. A plan-mode turn that ends without submit_plan is an error. Plan approval only starts execution; every concrete Cubism edit still requires its normal preview, transaction, and verification, with edit confirmation consolidated into one round approval per turn.";
 
 #[cfg(test)]
 mod tests {
@@ -405,6 +405,26 @@ mod tests {
                 json!({ "state": serialized })
             );
         }
+    }
+
+    #[test]
+    fn prompts_describe_round_approval_for_cubism_edits() {
+        assert!(
+            SYSTEM_PROMPT.contains("round approval"),
+            "system prompt must declare round-approval semantics"
+        );
+        assert!(
+            !SYSTEM_PROMPT.contains("explicit user confirmation"),
+            "legacy per-edit confirmation wording must be removed from the system prompt"
+        );
+        assert!(
+            PLAN_MODE_PROMPT.contains("one round approval per turn"),
+            "plan-mode prompt must consolidate edit confirmation into one round approval per turn"
+        );
+        assert!(
+            SYSTEM_PROMPT.contains("plan changes mid-round"),
+            "system prompt must require re-confirmation when the plan changes mid-round"
+        );
     }
 
     #[test]

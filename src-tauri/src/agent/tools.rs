@@ -217,8 +217,8 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
         ),
         read_tool(
             "ask_user",
-            "等待确认",
-            "向用户提问并暂停，等待回答后继续。",
+            "请求本轮操作授权",
+            "提交本轮所有要做的 Cubism 编辑操作并请求用户允许。须把本轮全部操作（含各 preview 摘要）在 question 中一起说明；用户允许后整轮执行不再逐次询问。歧义消解请在调用前单独提问。",
             json!({
                 "type": "object",
                 "properties": {
@@ -1595,5 +1595,26 @@ mod tests {
                 "unexpected eligibility for {outcome:?}",
             );
         }
+    }
+
+    #[test]
+    fn ask_user_advertises_round_approval_semantics() {
+        let definitions = tool_definitions(&BTreeSet::new(), AgentTurnMode::Default, true).unwrap();
+        let ask = definitions
+            .iter()
+            .find(|definition| tool_name(definition) == Some("ask_user"))
+            .unwrap();
+        assert_eq!(tool_display_name("ask_user"), Some("请求本轮操作授权"));
+        let description = ask["function"]["description"]
+            .as_str()
+            .expect("ask_user must carry a description");
+        assert!(
+            description.contains("本轮") && description.contains("不再逐次询问"),
+            "ask_user description must declare round-approval semantics: {description}"
+        );
+        let parameters = &ask["function"]["parameters"];
+        assert_eq!(parameters["required"], json!(["question"]));
+        assert!(parameters["properties"]["question"].is_object());
+        assert!(parameters["properties"]["options"].is_object());
     }
 }
