@@ -91,7 +91,7 @@ fn catalog_covers_every_official_method_without_exposing_session_primitives() {
         "DeleteParameterGroup",
         "MoveParameter",
         "MoveParameterGroup",
-        "GetSelectedObjecs",
+        "GetSelectedObjects",
         "AddSelectedObjects",
         "ClearSelectedObjects",
         "GetPartStructure",
@@ -196,6 +196,26 @@ async fn sends_exact_stable_api_payload_with_backend_owned_model_uid() {
     .await
     .unwrap();
     assert_eq!(response, json!({}));
+}
+
+#[tokio::test]
+async fn get_selected_objects_uses_official_method_name_and_returns_ids() {
+    let port = sequence_server(vec![(
+        "GetSelectedObjects",
+        json!({"ModelUID": "private-model"}),
+        json!({"Ids": ["PartFace", "ArtOutside"]}),
+    )])
+    .await;
+    let service = connected_service(port).await;
+    let response = call_tool(&service, "get_selected_objects", json!({}))
+        .await
+        .unwrap();
+    let ids = response["ids"].as_array().expect("sanitized ids array");
+    let ids = ids
+        .iter()
+        .map(|value| value.as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec!["PartFace".to_string(), "ArtOutside".to_string()]);
 }
 
 #[tokio::test]

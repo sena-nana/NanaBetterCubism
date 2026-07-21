@@ -54,7 +54,7 @@ pub(super) async fn find_selected(
     model_label: &str,
 ) -> Result<PartParameterQueryResult, CommandError> {
     let (selected_response, part_response, parameter_structure) = tokio::try_join!(
-        rpc.request("GetSelectedObjecs", json!({ "ModelUID": model_uid })),
+        rpc.request("GetSelectedObjects", json!({ "ModelUID": model_uid })),
         rpc.request("GetPartStructure", json!({ "ModelUID": model_uid })),
         fetch_structure(rpc, model_uid),
     )
@@ -186,13 +186,13 @@ fn parse_selected_ids(response: &Value) -> Result<BTreeSet<String>, RpcError> {
     response
         .get("Ids")
         .and_then(Value::as_array)
-        .ok_or_else(|| RpcError::Protocol("GetSelectedObjecs 缺少 Ids".into()))?
+        .ok_or_else(|| RpcError::Protocol("GetSelectedObjects 缺少 Ids".into()))?
         .iter()
         .map(|value| {
             value
                 .as_str()
                 .map(str::to_string)
-                .ok_or_else(|| RpcError::Protocol("GetSelectedObjecs 包含无效 ID".into()))
+                .ok_or_else(|| RpcError::Protocol("GetSelectedObjects 包含无效 ID".into()))
         })
         .collect()
 }
@@ -445,7 +445,7 @@ mod tests {
                     ("Error", json!({ "ErrorType": "InvalidData" }))
                 } else {
                     let data = match method {
-                        "GetSelectedObjecs" => json!({ "Ids": ["PartFace", "ArtOutside"] }),
+                        "GetSelectedObjects" => json!({ "Ids": ["PartFace", "ArtOutside"] }),
                         "GetPartStructure" => json!({
                             "PartStructure": part_response()["PartStructure"].clone()
                         }),

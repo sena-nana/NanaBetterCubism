@@ -36,7 +36,7 @@ pub(super) async fn verification_snapshot(
                 .await
         }
         "AddSelectedObjects" | "ClearSelectedObjects" => {
-            rpc.request("GetSelectedObjecs", json!({"ModelUID": model_uid}))
+            rpc.request("GetSelectedObjects", json!({"ModelUID": model_uid}))
                 .await
         }
         "DeleteObject" | "MoveObjectOnPartsPalette" => {
