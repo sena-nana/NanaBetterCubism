@@ -4,6 +4,7 @@ import { useRouter } from "vue-router";
 import UiImageViewer from "@lilia/image-viewer/components/ImageViewer";
 import {
   createConversation,
+  deleteConversation,
   normalizeCommandError,
   sendMessage,
 } from "../agent/bridge";
@@ -19,8 +20,14 @@ import {
   installConversationRuntimeStore,
 } from "../agent/conversationRuntimeStore";
 import { ensureSidebarConversationsLoaded } from "../agent/sidebarConversations";
-import type { AgentTurnMode, ChatImageDraft } from "../agent/types";
+import type {
+  AgentTurnMode,
+  ChatImageDraft,
+  ChatPsdDraft,
+  ConversationSummary,
+} from "../agent/types";
 import { useChatImageDrafts } from "../agent/useChatImageDrafts";
+import { useHomePsdDrafts } from "../agent/useHomePsdDrafts";
 
 const router = useRouter();
 const llm = useLlmConfigStore();
@@ -29,6 +36,7 @@ const sending = ref(false);
 const loading = ref(true);
 const error = ref<string | null>(null);
 const imageDrafts = ref<ChatImageDraft[]>([]);
+const psdDrafts = ref<ChatPsdDraft[]>([]);
 const composerMode = ref<AgentTurnMode>("default");
 const canCompose = computed(() => llm.state.config.hasApiKey && !sending.value);
 const imageDraftController = useChatImageDrafts({
@@ -39,6 +47,13 @@ const imageDraftController = useChatImageDrafts({
   },
 });
 const viewingImage = imageDraftController.viewingImage;
+const psdDraftController = useHomePsdDrafts({
+  drafts: psdDrafts,
+  canInteract: () => canCompose.value,
+  setError: (message) => {
+    error.value = message;
+  },
+});
 
 const canSend = computed(
   () => Boolean(draft.value.trim() || imageDrafts.value.length) && canCompose.value,
@@ -63,8 +78,15 @@ async function startConversation() {
   const images = [...imageDrafts.value];
   sending.value = true;
   error.value = null;
+  let created: ConversationSummary | null = null;
   try {
-    const created = await createConversation();
+    created = await createConversation();
+    try {
+      await psdDraftController.prepareAll(created.id);
+    } catch (err) {
+      await deleteConversation(created.id).catch(() => {});
+      throw err;
+    }
     getConversationRuntime(created.id).composerMode = composerMode.value;
     const optimisticId = beginConversationTurn(created.id, content, images);
     try {
@@ -87,6 +109,7 @@ async function startConversation() {
     }
     draft.value = "";
     imageDrafts.value = [];
+    psdDrafts.value = [];
     await ensureSidebarConversationsLoaded(true);
     await router.push(`/chats/${created.id}`);
   } catch (err) {
@@ -125,11 +148,13 @@ async function startConversation() {
           :running="sending"
           :can-send="canSend"
           :images="imageDrafts"
+          :psd-drafts="psdDrafts"
           :error="error"
-          :psd-available="false"
           @send="startConversation"
           @pick-images="imageDraftController.pickImages"
+          @pick-psd="psdDraftController.pickPsd"
           @remove-image="imageDraftController.removeImage"
+          @remove-psd-draft="psdDraftController.removePsdDraft"
           @view-image="imageDraftController.viewImage"
           @paste="imageDraftController.pasteImages"
         />

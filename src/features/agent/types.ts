@@ -61,6 +61,12 @@ export interface ChatPsdDocument {
   available: boolean;
 }
 
+export interface ChatPsdDraft {
+  id: string;
+  name: string;
+  path: string;
+}
+
 export interface PsdBounds {
   x: number;
   y: number;
