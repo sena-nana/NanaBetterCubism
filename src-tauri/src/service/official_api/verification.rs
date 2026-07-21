@@ -253,13 +253,30 @@ pub(super) fn verify_postcondition(plan: &StoredEditorEditPlan, snapshot: &Value
                         .any(|value| (value - to).abs() <= 1e-7),
             )
         }
-        "AddPart" | "AddRotationDeformer" | "AddWarpDeformer" => {
+        "AddPart" => {
             let id = data.get("Id")?.as_str()?;
             let actual = snapshot.get("Data")?.as_object()?;
             Some(
                 actual.get("Id").and_then(Value::as_str) == Some(id)
                     && verify_fields(data, actual, &["ModelUID", "TargetObjectIds", "Mode"]),
             )
+        }
+        "AddRotationDeformer" | "AddWarpDeformer" => {
+            let id = data.get("Id")?.as_str()?;
+            let actual = snapshot.get("Data")?.as_object()?;
+            let base = actual.get("Id").and_then(Value::as_str) == Some(id)
+                && verify_fields(data, actual, &["ModelUID", "TargetObjectIds", "Mode"]);
+            if !base {
+                return Some(false);
+            }
+            // GetObject's deformer Data shape for TargetObjectIds/Mode is not confirmed
+            // in the capability matrix, so we cannot reliably verify those structural
+            // fields. Admit Unknown rather than falsely reporting Committed.
+            if data.get("TargetObjectIds").is_some() || data.get("Mode").is_some() {
+                None
+            } else {
+                Some(true)
+            }
         }
         "MoveParameter" => {
             let group = find_id(snapshot, data.get("GroupId")?.as_str()?)?;
@@ -415,5 +432,70 @@ mod tests {
     fn add_parameter_absent_from_snapshot_returns_none() {
         let snapshot = structure(json!([parameter("Other", "其他", true)]));
         assert_eq!(verify(snapshot, Some("FaceGroup")), None);
+    }
+
+    fn object_snapshot(data: Value) -> Value {
+        json!({ "Data": data })
+    }
+
+    fn deformer_plan(method: &str, extras: Value) -> StoredEditorEditPlan {
+        let mut data = json!({ "ModelUID": "model", "Id": "Rotator", "Name": "旋转" });
+        if let Some(object) = extras.as_object() {
+            for (key, value) in object {
+                data[key] = value.clone();
+            }
+        }
+        plan(method, data)
+    }
+
+    #[test]
+    fn add_rotation_deformer_with_target_object_ids_reports_unknown() {
+        let snapshot = object_snapshot(json!({ "Id": "Rotator", "Name": "旋转" }));
+        let plan = deformer_plan(
+            "AddRotationDeformer",
+            json!({ "TargetObjectIds": ["ArtMesh1"] }),
+        );
+        assert_eq!(verify_postcondition(&plan, &snapshot), None);
+    }
+
+    #[test]
+    fn add_rotation_deformer_with_mode_reports_unknown() {
+        let snapshot = object_snapshot(json!({ "Id": "Rotator", "Name": "旋转" }));
+        let plan = deformer_plan("AddRotationDeformer", json!({ "Mode": "AsChild" }));
+        assert_eq!(verify_postcondition(&plan, &snapshot), None);
+    }
+
+    #[test]
+    fn add_rotation_deformer_without_structural_fields_passes() {
+        let snapshot = object_snapshot(json!({ "Id": "Rotator", "Name": "旋转" }));
+        let plan = deformer_plan("AddRotationDeformer", json!({}));
+        assert_eq!(verify_postcondition(&plan, &snapshot), Some(true));
+    }
+
+    #[test]
+    fn add_rotation_deformer_id_mismatch_reports_false() {
+        let snapshot = object_snapshot(json!({ "Id": "Other", "Name": "旋转" }));
+        let plan = deformer_plan("AddRotationDeformer", json!({}));
+        assert_eq!(verify_postcondition(&plan, &snapshot), Some(false));
+    }
+
+    #[test]
+    fn add_warp_deformer_with_target_object_ids_reports_unknown() {
+        let snapshot = object_snapshot(json!({ "Id": "Rotator", "Name": "旋转", "WarpDivH": 2, "WarpDivV": 2 }));
+        let plan = deformer_plan(
+            "AddWarpDeformer",
+            json!({ "TargetObjectIds": ["ArtMesh1"], "WarpDivH": 2, "WarpDivV": 2 }),
+        );
+        assert_eq!(verify_postcondition(&plan, &snapshot), None);
+    }
+
+    #[test]
+    fn add_part_with_ids_still_verifies_fields() {
+        let snapshot = object_snapshot(json!({ "Id": "PartA", "Name": "头部", "Ids": ["ArtMesh1"] }));
+        let plan = plan(
+            "AddPart",
+            json!({ "ModelUID": "model", "Id": "PartA", "Name": "头部", "Ids": ["ArtMesh1"] }),
+        );
+        assert_eq!(verify_postcondition(&plan, &snapshot), Some(true));
     }
 }
