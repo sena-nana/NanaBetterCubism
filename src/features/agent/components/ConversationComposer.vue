@@ -459,13 +459,13 @@ function onPlanRevisionKeydown(event: KeyboardEvent) {
 .conversation-composer__psd-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .conversation-composer__psd-remove { display: grid; place-items: center; width: 16px; height: 16px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--text-muted); cursor: pointer; }
 .conversation-composer__psd-remove:hover { background: var(--lilia-state-layer-hover); color: var(--text); }
-.conversation-composer__add-menu { display: flex; flex-direction: column; min-width: 160px; padding: 4px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-elev); box-shadow: var(--shadow-menu); }
+.conversation-composer__add-menu { display: flex; flex-direction: column; min-width: 160px; }
 .conversation-composer :deep(.ui-textarea) { display: block; width: 100%; min-height: 48px; max-height: 180px; resize: none; overflow-y: auto; border: 0; background: transparent; box-shadow: none; line-height: 1.55; }
 .conversation-composer :deep(.ui-textarea:focus) { outline: none; }
 .conversation-composer__actions { justify-content: flex-end; min-height: 30px; padding: 6px 1px 0; }
 .conversation-composer__mode { margin-right: auto; min-width: 0; }
 .conversation-composer__permission--auto { color: #d4a017; }
-.conversation-composer__permission-menu { display: flex; flex-direction: column; min-width: 140px; padding: 4px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-elev); box-shadow: var(--shadow-menu); }
+.conversation-composer__permission-menu { display: flex; flex-direction: column; min-width: 140px; }
 .conversation-composer__hint { color: var(--text-faint); font-size: 11px; }
 .conversation-composer__pending { min-height: 108px; padding: 3px; }
 .conversation-composer__plan-approval { min-height: 0; }
