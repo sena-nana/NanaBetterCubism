@@ -42,6 +42,8 @@ const bridge = vi.hoisted(() => ({
     { id: "b", title: "会话 B", projectId: null, projectName: null, updatedAt: "", pinned: false },
   ]),
   listProjects: vi.fn(async () => []),
+  listPsds: vi.fn(async () => []),
+  listenImageCapability: vi.fn(async () => () => {}),
   listenComputerOperation: vi.fn(async (handler) => {
     listeners.computerOperation = handler;
     return () => undefined;

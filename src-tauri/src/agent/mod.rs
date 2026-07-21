@@ -7,6 +7,7 @@ mod llm;
 mod memory_markdown;
 mod memory_recall;
 mod plan;
+pub(crate) mod psd;
 mod runtime;
 mod skills;
 pub(crate) mod store;
@@ -100,6 +101,7 @@ impl From<serde_json::Error> for AgentError {
 pub struct AgentRuntime {
     pub store: AgentStore,
     pub images: images::ImageService,
+    pub psd: psd::PsdService,
     pub computer_control: computer_control::ComputerControlService,
     pub cancel_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub pending_continuations: Mutex<HashMap<String, PendingContinuation>>,
@@ -180,9 +182,11 @@ pub struct CancelTurnResult {
 impl AgentRuntime {
     pub fn new(store: AgentStore, coordinator: crate::service::OperationCoordinator) -> Self {
         let images = images::ImageService::new(store.data_dir());
+        let psd = psd::PsdService::new(store.data_dir());
         Self {
             store,
             images,
+            psd,
             computer_control: computer_control::ComputerControlService::new(coordinator),
             cancel_flags: Mutex::new(HashMap::new()),
             pending_continuations: Mutex::new(HashMap::new()),
@@ -262,7 +266,8 @@ impl AgentRuntime {
             ));
         }
         self.store.delete_conversation(conversation_id)?;
-        self.images.delete_conversation_images(conversation_id)
+        self.images.delete_conversation_images(conversation_id)?;
+        self.psd.delete_conversation_psds(conversation_id)
     }
 
     pub async fn begin_question_answer(

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const bridge = vi.hoisted(() => ({
   getLlmConfig: vi.fn(),
   testLlmConnection: vi.fn(),
+  listenImageCapability: vi.fn().mockResolvedValue(() => {}),
 }));
 
 vi.mock("../src/features/agent/bridge", () => bridge);

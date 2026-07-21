@@ -600,7 +600,7 @@ async fn run_turn_inner(
                         if runtime.image_capability() == ImageInputSupport::Unsupported {
                             state.messages.push(json!({
                                 "role": "user",
-                                "content": "已截取 Cubism Editor 窗口，但当前模型不支持图片输入，无法查看该图像。请基于工具返回的文本结果继续，并提示用户更换支持视觉的模型。"
+                                "content": "工具返回了图像，但当前模型不支持图片输入，无法查看该图像。请基于工具返回的文本结果继续，并提示用户更换支持视觉的模型。"
                             }));
                             continue;
                         }
@@ -611,7 +611,7 @@ async fn run_turn_inner(
                                     "content": [
                                         {
                                             "type": "text",
-                                            "text": "以下是刚才截屏得到的 Cubism Editor 窗口图像，请结合工具返回继续分析。"
+                                            "text": "以下是工具返回的图像，请结合工具返回的文本结果继续分析。"
                                         },
                                         {
                                             "type": "image_url",
@@ -623,7 +623,7 @@ async fn run_turn_inner(
                             Err(error) => {
                                 state.messages.push(json!({
                                     "role": "user",
-                                    "content": format!("截屏文件无法作为图像注入：{}", error.message),
+                                    "content": format!("图像文件无法作为图像注入：{}", error.message),
                                 }));
                             }
                         }

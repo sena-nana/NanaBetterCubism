@@ -1,6 +1,7 @@
 use crate::agent::computer_control::ComputerOperationStatus;
 use crate::agent::images::{ChatImageAttachment, ImagePrepareInput, ImagePrepareRejection, ImagePrepareResult};
 use crate::agent::llm::test_connection;
+use crate::agent::psd::{ChatPsdDocument, PsdStructure};
 use crate::agent::runtime::{continue_after_computer_approval, continue_after_question, run_turn};
 use crate::agent::store::{
     ChatMessage, ConversationPlan, ConversationSummary, LlmConfigInput, LlmConfigView,
@@ -212,6 +213,70 @@ pub async fn agent_discard_image_drafts(
     draft_ids: Vec<String>,
 ) -> Result<(), AgentError> {
     runtime(&app)?.images.discard(&draft_ids)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PsdPrepareResult {
+    pub document: ChatPsdDocument,
+    pub structure: PsdStructure,
+}
+
+#[tauri::command]
+pub async fn agent_prepare_psd(
+    app: AppHandle,
+    conversation_id: String,
+    path: String,
+) -> Result<PsdPrepareResult, AgentError> {
+    let runtime = runtime(&app)?;
+    runtime
+        .store
+        .ensure_active_conversation(&conversation_id)?;
+    let existing = runtime.store.list_psd_documents(&conversation_id)?;
+    if existing.len() >= crate::agent::psd::MAX_PSD_DOCUMENTS_PER_CONVERSATION {
+        return Err(AgentError::new(
+            "psd_limit",
+            format!(
+                "每个对话最多附加 {} 个 PSD 文件。",
+                crate::agent::psd::MAX_PSD_DOCUMENTS_PER_CONVERSATION
+            ),
+        ));
+    }
+    let (document, structure) = runtime.psd.load(&conversation_id, &path)?;
+    runtime
+        .store
+        .upsert_psd_document(&conversation_id, &document)?;
+    emit_conversations_changed(&app);
+    Ok(PsdPrepareResult { document, structure })
+}
+
+#[tauri::command]
+pub async fn agent_discard_psd(
+    app: AppHandle,
+    conversation_id: String,
+    psd_id: String,
+) -> Result<Vec<ChatPsdDocument>, AgentError> {
+    let runtime = runtime(&app)?;
+    runtime
+        .store
+        .ensure_active_conversation(&conversation_id)?;
+    runtime.psd.discard(&psd_id, &conversation_id)?;
+    let documents = runtime.store.remove_psd_document(&conversation_id, &psd_id)?;
+    emit_conversations_changed(&app);
+    Ok(documents)
+}
+
+#[tauri::command]
+pub async fn agent_list_psds(
+    app: AppHandle,
+    conversation_id: String,
+) -> Result<Vec<ChatPsdDocument>, AgentError> {
+    let runtime = runtime(&app)?;
+    runtime
+        .store
+        .ensure_active_conversation(&conversation_id)?;
+    let documents = runtime.store.list_psd_documents(&conversation_id)?;
+    Ok(documents)
 }
 
 #[tauri::command]

@@ -262,6 +262,12 @@ impl AgentStore {
         )?;
         ensure_column(&conn, "llm_config", "context_window", "INTEGER")?;
         ensure_column(&conn, "llm_config", "max_input_tokens", "INTEGER")?;
+        ensure_column(
+            &conn,
+            "conversations",
+            "psd_documents_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )?;
         migrate_pending_asks(&conn)?;
         migrate_memory_bodies(&conn)?;
         conn.execute_batch(
@@ -435,6 +441,87 @@ impl AgentStore {
                 return Err(AgentError::new("not_found", "对话不存在。"));
             }
             Ok(())
+        })
+    }
+
+    pub fn list_psd_documents(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Vec<crate::agent::psd::ChatPsdDocument>, AgentError> {
+        self.with_conn(|conn| {
+            let json: Option<String> = conn
+                .query_row(
+                    "SELECT psd_documents_json FROM conversations WHERE id = ?1",
+                    params![conversation_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let mut documents: Vec<crate::agent::psd::ChatPsdDocument> =
+                serde_json::from_str(json.as_deref().unwrap_or("[]")).unwrap_or_default();
+            for document in &mut documents {
+                document.available = PathBuf::from(&document.path).is_file();
+            }
+            Ok(documents)
+        })
+    }
+
+    pub fn upsert_psd_document(
+        &self,
+        conversation_id: &str,
+        document: &crate::agent::psd::ChatPsdDocument,
+    ) -> Result<Vec<crate::agent::psd::ChatPsdDocument>, AgentError> {
+        self.with_conn(|conn| {
+            let transaction = conn.unchecked_transaction()?;
+            let json: String = transaction
+                .query_row(
+                    "SELECT psd_documents_json FROM conversations WHERE id = ?1",
+                    params![conversation_id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or_else(|| AgentError::new("not_found", "对话不存在。"))?;
+            let mut documents: Vec<crate::agent::psd::ChatPsdDocument> =
+                serde_json::from_str(&json).unwrap_or_default();
+            if let Some(existing) = documents.iter_mut().find(|item| item.id == document.id) {
+                *existing = document.clone();
+            } else {
+                documents.push(document.clone());
+            }
+            let serialized = serde_json::to_string(&documents)?;
+            transaction.execute(
+                "UPDATE conversations SET psd_documents_json = ?1, updated_at = ?2 WHERE id = ?3",
+                params![serialized, Utc::now().to_rfc3339(), conversation_id],
+            )?;
+            transaction.commit()?;
+            Ok(documents)
+        })
+    }
+
+    pub fn remove_psd_document(
+        &self,
+        conversation_id: &str,
+        psd_id: &str,
+    ) -> Result<Vec<crate::agent::psd::ChatPsdDocument>, AgentError> {
+        self.with_conn(|conn| {
+            let transaction = conn.unchecked_transaction()?;
+            let json: String = transaction
+                .query_row(
+                    "SELECT psd_documents_json FROM conversations WHERE id = ?1",
+                    params![conversation_id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or_else(|| AgentError::new("not_found", "对话不存在。"))?;
+            let mut documents: Vec<crate::agent::psd::ChatPsdDocument> =
+                serde_json::from_str(&json).unwrap_or_default();
+            documents.retain(|item| item.id != psd_id);
+            let serialized = serde_json::to_string(&documents)?;
+            transaction.execute(
+                "UPDATE conversations SET psd_documents_json = ?1, updated_at = ?2 WHERE id = ?3",
+                params![serialized, Utc::now().to_rfc3339(), conversation_id],
+            )?;
+            transaction.commit()?;
+            Ok(documents)
         })
     }
 
@@ -2474,6 +2561,65 @@ mod tests {
 
         std::fs::remove_file(image_path).unwrap();
         assert!(!store.get_messages(&conversation.id).unwrap()[0].attachments[0].available);
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn psd_documents_roundtrip_report_availability_and_remove() {
+        let dir = std::env::temp_dir().join(format!("nbc-psd-docs-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let psd_path = dir.join("doc.psd");
+        std::fs::write(&psd_path, b"psd").unwrap();
+        let store = AgentStore::default();
+        store.open(dir.join("agent.db")).unwrap();
+        let conversation = store.create_conversation(None, None).unwrap();
+
+        let document = crate::agent::psd::ChatPsdDocument {
+            id: new_id(),
+            name: "doc.psd".into(),
+            path: psd_path.to_string_lossy().into_owned(),
+            width: 1024,
+            height: 768,
+            color_mode: "rgb".into(),
+            layer_count: 3,
+            available: true,
+        };
+        let listed = store
+            .upsert_psd_document(&conversation.id, &document)
+            .unwrap();
+        assert_eq!(listed, vec![document.clone()]);
+        assert_eq!(
+            store.list_psd_documents(&conversation.id).unwrap(),
+            vec![document.clone()]
+        );
+
+        let updated = crate::agent::psd::ChatPsdDocument {
+            layer_count: 5,
+            ..document.clone()
+        };
+        let after_update = store
+            .upsert_psd_document(&conversation.id, &updated)
+            .unwrap();
+        assert_eq!(after_update, vec![updated.clone()]);
+        assert_eq!(
+            store.list_psd_documents(&conversation.id).unwrap(),
+            vec![updated.clone()]
+        );
+
+        std::fs::remove_file(&psd_path).unwrap();
+        let reloaded = store.list_psd_documents(&conversation.id).unwrap();
+        assert_eq!(reloaded.len(), 1);
+        assert!(
+            !reloaded[0].available,
+            "missing PSD file should be reported as unavailable"
+        );
+
+        let remaining = store
+            .remove_psd_document(&conversation.id, &updated.id)
+            .unwrap();
+        assert!(remaining.is_empty());
+        assert!(store.list_psd_documents(&conversation.id).unwrap().is_empty());
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }

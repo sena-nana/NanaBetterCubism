@@ -111,6 +111,33 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
             }),
         ),
         read_tool(
+            "read_psd_structure",
+            "读取 PSD 结构",
+            "读取用户已附加的 PSD 文件的图层树、蒙版、混合模式、不透明度、可见性与边界，返回 JSON，不含像素。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "psdId": { "type": "string", "minLength": 1, "description": "PSD 文档 ID" }
+                },
+                "required": ["psdId"],
+                "additionalProperties": false
+            }),
+        ),
+        read_tool(
+            "read_psd_layer_image",
+            "查看 PSD 图层画面",
+            "提取用户已附加 PSD 中单个图层的像素画面并作为图像返回，需要支持视觉的模型。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "psdId": { "type": "string", "minLength": 1, "description": "PSD 文档 ID" },
+                    "layerId": { "type": "string", "minLength": 1, "description": "图层 ID（来自 read_psd_structure）" }
+                },
+                "required": ["psdId", "layerId"],
+                "additionalProperties": false
+            }),
+        ),
+        read_tool(
             "recall_memory",
             "召回相关记忆",
             "按当前任务语义召回已启用的项目阶段记忆与全局 Live2D 经验；代码自动匹配记忆与分层。",
@@ -406,7 +433,9 @@ pub fn tool_definitions(
                 let name = tool_name(&tool.schema);
                 name.is_some_and(|name| allowed.contains(name))
                     && (!mode.is_read_only() || tool.access == ToolAccess::ReadOnly)
-                    && (image_supported || name != Some("capture_cubism_editor_window"))
+                    && (image_supported
+                        || (name != Some("capture_cubism_editor_window")
+                            && name != Some("read_psd_layer_image")))
             })
             .map(|tool| tool.schema),
     );
@@ -874,6 +903,32 @@ async fn execute_tool_inner(
             Ok(ToolOutcome::Result {
                 content: serde_json::to_string_pretty(&captured)?,
                 image_path: Some(captured.path),
+            })
+        }
+        "read_psd_structure" => {
+            let psd_id = required_string(&args, "psdId")?;
+            let structure = runtime.psd.read_structure(psd_id, conversation_id)?;
+            Ok(tool_result(serde_json::to_string_pretty(&structure)?))
+        }
+        "read_psd_layer_image" => {
+            if runtime.image_capability().is_unsupported() {
+                return Err(AgentError::new(
+                    "image_input_unsupported_by_model",
+                    "当前模型不支持图片输入，「查看 PSD 图层画面」已禁用，请更换支持视觉的模型。",
+                ));
+            }
+            let psd_id = required_string(&args, "psdId")?;
+            let layer_id = required_string(&args, "layerId")?;
+            let path = runtime
+                .psd
+                .extract_layer_image(psd_id, conversation_id, layer_id)?;
+            Ok(ToolOutcome::Result {
+                content: serde_json::to_string_pretty(&json!({
+                    "psdId": psd_id,
+                    "layerId": layer_id,
+                    "imagePath": path,
+                }))?,
+                image_path: Some(path),
             })
         }
         "recall_memory" => {
@@ -1406,6 +1461,51 @@ mod tests {
         assert!(names(&with_images).contains("capture_cubism_editor_window"));
         let without_images = tool_definitions(&active, AgentTurnMode::Default, false).unwrap();
         assert!(!names(&without_images).contains("capture_cubism_editor_window"));
+    }
+
+    #[test]
+    fn psd_inspection_skill_gates_tools_and_hides_layer_image_without_image_input() {
+        let active = BTreeSet::from(["psd-inspection".into()]);
+        let with_images = tool_definitions(&active, AgentTurnMode::Default, true).unwrap();
+        let with_names = names(&with_images);
+        assert!(with_names.contains("read_psd_structure"));
+        assert!(with_names.contains("read_psd_layer_image"));
+
+        let without_images = tool_definitions(&active, AgentTurnMode::Default, false).unwrap();
+        let without_names = names(&without_images);
+        assert!(without_names.contains("read_psd_structure"));
+        assert!(
+            !without_names.contains("read_psd_layer_image"),
+            "read_psd_layer_image must be hidden when the model lacks image input"
+        );
+
+        let inactive = BTreeSet::<String>::new();
+        let empty = tool_definitions(&inactive, AgentTurnMode::Default, true).unwrap();
+        let empty_names = names(&empty);
+        assert!(!empty_names.contains("read_psd_structure"));
+        assert!(!empty_names.contains("read_psd_layer_image"));
+
+        for name in ["read_psd_structure", "read_psd_layer_image"] {
+            assert_eq!(
+                tool_access(name),
+                Some(ToolAccess::ReadOnly),
+                "{name} must be read-only so it stays available in conversation/plan modes"
+            );
+        }
+        let structure = with_images
+            .iter()
+            .find(|definition| tool_name(definition) == Some("read_psd_structure"))
+            .unwrap();
+        let parameters = &structure["function"]["parameters"];
+        assert_eq!(parameters["required"], json!(["psdId"]));
+        assert_eq!(parameters["additionalProperties"], false);
+        let layer = with_images
+            .iter()
+            .find(|definition| tool_name(definition) == Some("read_psd_layer_image"))
+            .unwrap();
+        let layer_parameters = &layer["function"]["parameters"];
+        assert_eq!(layer_parameters["required"], json!(["psdId", "layerId"]));
+        assert_eq!(layer_parameters["additionalProperties"], false);
     }
 
     #[test]

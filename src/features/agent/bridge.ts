@@ -12,6 +12,7 @@ import type {
   AgentUserActionEvent,
   CancelTurnResult,
   ChatMessage,
+  ChatPsdDocument,
   ConversationPlan,
   ConversationSummary,
   LlmConfigInput,
@@ -25,6 +26,7 @@ import type {
   ProjectRecord,
   ImagePrepareInput,
   ImagePrepareResult,
+  PsdPrepareResult,
 } from "./types";
 
 export { normalizeCommandError };
@@ -91,6 +93,29 @@ export async function prepareImages(
 export async function discardImageDrafts(draftIds: string[]): Promise<void> {
   if (!isTauriRuntime() || draftIds.length === 0) return;
   await invoke("agent_discard_image_drafts", { draftIds });
+}
+
+export async function preparePsd(
+  conversationId: string,
+  path: string,
+): Promise<PsdPrepareResult> {
+  if (!isTauriRuntime()) {
+    throw domainError("desktop_required", "请在桌面应用中添加 PSD。");
+  }
+  return invoke<PsdPrepareResult>("agent_prepare_psd", { conversationId, path });
+}
+
+export async function discardPsd(
+  conversationId: string,
+  psdId: string,
+): Promise<ChatPsdDocument[]> {
+  if (!isTauriRuntime()) return [];
+  return invoke<ChatPsdDocument[]>("agent_discard_psd", { conversationId, psdId });
+}
+
+export async function listPsds(conversationId: string): Promise<ChatPsdDocument[]> {
+  if (!isTauriRuntime()) return [];
+  return invoke<ChatPsdDocument[]>("agent_list_psds", { conversationId });
 }
 
 export async function cancelTurn(conversationId: string): Promise<CancelTurnResult> {
