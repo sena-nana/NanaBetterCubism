@@ -10,7 +10,6 @@ import {
   LiliaSectionNavigation,
   LiliaSettingsSidebar,
   LiliaWorkspace,
-  SIDEBAR_CONFIG,
   normalizeSettingsTab,
   useNativeAppearance,
   usePersistentBoolean,
@@ -19,6 +18,7 @@ import {
   useTheme,
 } from "../../ui";
 import { appUIPreset } from "../../ui/preset";
+import { SIDEBAR_CONFIG } from "../../ui/shell-state";
 import AppSidebar from "./AppSidebar.vue";
 
 const AppProvider = appUIPreset.provider as Component;

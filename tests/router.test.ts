@@ -61,7 +61,7 @@ describe("Agent 壳层路由", () => {
     await fireEvent.click(screen.getByRole("button", { name: "收起侧栏" }));
     expect(localStorage.getItem(storageKey)).toBe("1");
     expect(screen.getByRole("button", { name: "展开侧栏" })).toBeTruthy();
-    expect(document.querySelector('[data-agent-id="workspace.region.navigation"]')?.hasAttribute("hidden")).toBe(true);
+    expect(document.querySelector('[data-agent-id="workspace.region.navigation"]')?.getAttribute("data-region-collapsed")).toBe("true");
 
     await fireEvent.click(screen.getByRole("button", { name: "展开侧栏" }));
     expect(localStorage.getItem(storageKey)).toBe("0");

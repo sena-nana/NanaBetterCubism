@@ -1,19 +1,26 @@
 <script setup lang="ts">
+import Brain from "@lucide/vue/dist/esm/icons/brain.mjs";
+import House from "@lucide/vue/dist/esm/icons/house.mjs";
+import ConversationSidebarTop from "../agent/components/ConversationSidebarTop.vue";
 import type { SurfaceMode } from "../../ui/contract";
 import {
   IconButton,
   LiliaSidebarFrame,
   LiliaSidebarNavRow,
   LiliaSidebarSection,
-  SIDEBAR_GROUPS,
-  SIDEBAR_NAV,
-  SIDEBAR_TOP_CONTENT,
   type SidebarActionItem,
+  type SidebarNavItem,
 } from "../../ui";
+import { SIDEBAR_GROUPS } from "../../ui/shell-state";
 
 const { surfaceMode } = defineProps<{
   surfaceMode: SurfaceMode;
 }>();
+
+const navItems: SidebarNavItem[] = [
+  { key: "home", to: "/", label: "首页", icon: House },
+  { key: "memory", to: "/memory", label: "记忆", icon: Brain },
+];
 
 function selectAction(action: SidebarActionItem) {
   if (action.disabled || !action.onSelect) return;
@@ -25,10 +32,10 @@ function selectAction(action: SidebarActionItem) {
   <LiliaSidebarFrame aria-label="主导航" :surface-mode="surfaceMode">
     <template #top>
       <div class="app-sidebar__top">
-        <component v-if="SIDEBAR_TOP_CONTENT" :is="SIDEBAR_TOP_CONTENT" />
-        <nav v-if="SIDEBAR_NAV.length" class="app-sidebar__navigation" aria-label="主导航">
+        <ConversationSidebarTop />
+        <nav class="app-sidebar__navigation" aria-label="主导航">
           <LiliaSidebarNavRow
-            v-for="item in SIDEBAR_NAV"
+            v-for="item in navItems"
             :key="item.key"
             :item="item"
             :agent-id="`sidebar.nav.${item.key}`"

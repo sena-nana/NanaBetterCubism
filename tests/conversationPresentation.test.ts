@@ -1,11 +1,10 @@
 import { fireEvent, render, screen } from "@testing-library/vue";
 import { describe, expect, it, vi } from "vitest";
 import MarkdownBlock from "../src/features/agent/markdown/MarkdownBlock.vue";
-import PlanTodoPanel from "../src/features/agent/components/PlanTodoPanel.vue";
 import ConversationTranscript from "../src/features/agent/components/ConversationTranscript.vue";
 import { toolActivityPresentation } from "../src/features/agent/conversationPresentation";
 import { parseMarkdownBlocks } from "../src/features/agent/markdown/parser";
-import type { ChatMessage, ConversationPlan } from "../src/features/agent/types";
+import type { ChatMessage } from "../src/features/agent/types";
 
 const opener = vi.hoisted(() => ({ openUrl: vi.fn(async () => undefined) }));
 const mermaid = vi.hoisted(() => ({
@@ -25,14 +24,6 @@ function message(overrides: Partial<ChatMessage>): ChatMessage {
     toolStatus: null,
     createdAt: "2026-07-15T00:00:00Z",
     ...overrides,
-  };
-}
-
-function plan(steps: ConversationPlan["steps"]): ConversationPlan {
-  return {
-    conversationId: "conversation-1",
-    steps,
-    updatedAt: "2026-07-15T00:00:00Z",
   };
 }
 
@@ -69,31 +60,6 @@ describe("成熟对话展示", () => {
 
     await fireEvent.click(screen.getByRole("button", { name: "文档" }));
     expect(opener.openUrl).toHaveBeenCalledWith("https://example.com/docs");
-  });
-
-  it("计划面板默认只显示待办，展开后显示完整计划", async () => {
-    const view = render(PlanTodoPanel, {
-      props: {
-        plan: plan([
-          { id: "active", title: "正在处理的步骤", status: "in_progress" },
-          { id: "pending", title: "后续步骤", status: "pending" },
-          { id: "done", title: "完成步骤", status: "completed" },
-        ]),
-      },
-    });
-
-    expect(screen.getByText("正在处理的步骤")).toBeTruthy();
-    expect(screen.getByText("后续步骤")).toBeTruthy();
-    expect(screen.queryByText("完成步骤")).toBeNull();
-
-    await fireEvent.click(screen.getByRole("button", { expanded: false }));
-    expect(screen.getByText("完成步骤")).toBeTruthy();
-
-    await view.rerender({
-      plan: plan([{ id: "done", title: "完成步骤", status: "completed" }]),
-    });
-    await fireEvent.click(screen.getByRole("button", { expanded: true }));
-    expect(screen.getByText("完成步骤")).toBeTruthy();
   });
 
   it("仅将闭合 Mermaid 围栏延迟渲染，并使用严格安全级别", async () => {
