@@ -240,21 +240,46 @@ describe("对话工作区", () => {
     ]);
   });
 
-  it("计划与仅对话互斥，并按对话保留模式", async () => {
+  it("计划与权限下拉互斥，并按对话保留模式", async () => {
     const router = await renderChat("a");
     const planButton = await screen.findByRole("button", { name: "计划" });
     await fireEvent.click(planButton);
     expect(planButton.getAttribute("aria-pressed")).toBe("true");
-    expect(screen.getByRole("button", { name: "仅对话" }).getAttribute("aria-pressed")).toBe("false");
+    // 计划模式下权限下拉触发器显示基线"询问"
+    expect(screen.getByRole("button", { name: "询问" })).toBeTruthy();
 
     await router.push("/chats/b");
     await waitForConversationLoad("b");
     expect(screen.getByRole("button", { name: "计划" }).getAttribute("aria-pressed")).toBe("false");
-    await fireEvent.click(screen.getByRole("button", { name: "仅对话" }));
+    await fireEvent.click(screen.getByRole("button", { name: "询问" }));
+    await fireEvent.click(await screen.findByRole("menuitem", { name: "仅读取" }));
+    expect(getConversationRuntime("b").composerMode).toBe("conversation_only");
+    expect(screen.getByRole("button", { name: "仅读取" })).toBeTruthy();
 
     await router.push("/chats/a");
     expect((await screen.findByRole("button", { name: "计划" })).getAttribute("aria-pressed")).toBe("true");
-    expect(screen.getByRole("button", { name: "仅对话" }).getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("自动批准模式以黄色字体发送 auto_approve 模式", async () => {
+    await renderChat("a");
+    const trigger = await screen.findByRole("button", { name: "询问" });
+    await fireEvent.click(trigger);
+    await fireEvent.click(await screen.findByRole("menuitem", { name: "自动批准" }));
+    expect(getConversationRuntime("a").composerMode).toBe("auto_approve");
+    const autoTrigger = screen.getByRole("button", { name: "自动批准" });
+    expect(autoTrigger.className).toContain("conversation-composer__permission--auto");
+
+    const input = screen.getByPlaceholderText("描述你想在 Cubism Editor 中完成的事…");
+    await fireEvent.update(input, "自主整理参数");
+    await fireEvent.keyDown(input, { key: "Enter" });
+    await vi.waitFor(() =>
+      expect(bridge.sendMessage).toHaveBeenCalledWith(
+        "a",
+        "自主整理参数",
+        [],
+        "auto_approve",
+      ),
+    );
   });
 
   it("计划决策失败时保留待确认状态，成功后按真实结果切换模式", async () => {

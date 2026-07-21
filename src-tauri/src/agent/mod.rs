@@ -138,11 +138,16 @@ pub enum AgentTurnMode {
     Default,
     ConversationOnly,
     Plan,
+    AutoApprove,
 }
 
 impl AgentTurnMode {
     pub fn is_read_only(self) -> bool {
         matches!(self, Self::ConversationOnly | Self::Plan)
+    }
+
+    pub fn is_auto_approve(self) -> bool {
+        matches!(self, Self::AutoApprove)
     }
 }
 
@@ -375,6 +380,16 @@ pub fn new_id() -> String {
 
 pub const SYSTEM_PROMPT: &str = include_str!("prompt.txt");
 
+pub const COLLABORATION_PROMPT: &str = "\
+## Collaboration
+- Resolve ambiguity (naming, group choice, whether to create BlendShape/Repeat, which Parts) with ask_user before gathering previews.
+- For Cubism edits, gather every preview needed this turn, then call ask_user once describing all operations together and request round approval. After approval, execute all confirmed edits without further per-edit ask; skip the round approval only if the current user message already authorizes that exact set of changes. If the plan changes mid-round, stop and re-confirm via ask_user before proceeding.
+- For multi-step work, maintain update_plan with clear step statuses.";
+
+pub const AUTO_APPROVE_PROMPT: &str = "\
+## Auto-approve mode
+Operate autonomously this turn. Do not request user confirmation or per-turn approval before acting. The backend has pre-approved every tool call and computer-operation request for this turn. Gather previews and execute confirmed Cubism edits directly, and proceed with request_computer_operation / capture / perform / finish without waiting for user authorization. Still honor every preview, transaction, cancellation, disconnect cleanup, and reread-verification rule from the base prompt. If a step fails, report the real state and stop; never claim success without a committed result.";
+
 pub const CONVERSATION_ONLY_PROMPT: &str = "\
 ## Conversation-only mode
 Read-only: do not edit the model, run previews/executes, or use computer-operation tools. You may inspect Editor/model state and answer questions. Do not read editing or computer-operation SKILLs. If the user asks for edits, tell them to turn off conversation-only mode.";
@@ -410,8 +425,8 @@ mod tests {
     #[test]
     fn prompts_describe_round_approval_for_cubism_edits() {
         assert!(
-            SYSTEM_PROMPT.contains("round approval"),
-            "system prompt must declare round-approval semantics"
+            COLLABORATION_PROMPT.contains("round approval"),
+            "collaboration prompt must declare round-approval semantics"
         );
         assert!(
             !SYSTEM_PROMPT.contains("explicit user confirmation"),
@@ -422,8 +437,28 @@ mod tests {
             "plan-mode prompt must consolidate edit confirmation into one round approval per turn"
         );
         assert!(
-            SYSTEM_PROMPT.contains("plan changes mid-round"),
-            "system prompt must require re-confirmation when the plan changes mid-round"
+            COLLABORATION_PROMPT.contains("plan changes mid-round"),
+            "collaboration prompt must require re-confirmation when the plan changes mid-round"
+        );
+    }
+
+    #[test]
+    fn auto_approve_prompt_omits_collaboration_instructions() {
+        assert!(
+            !AUTO_APPROVE_PROMPT.contains("round approval"),
+            "auto-approve prompt must not request round approval"
+        );
+        assert!(
+            !AUTO_APPROVE_PROMPT.contains("ask_user"),
+            "auto-approve prompt must not instruct the model to call ask_user"
+        );
+        assert!(
+            AUTO_APPROVE_PROMPT.contains("Auto-approve mode"),
+            "auto-approve prompt must declare its mode"
+        );
+        assert!(
+            !AUTO_APPROVE_PROMPT.contains("plan changes mid-round"),
+            "auto-approve prompt must not carry collaboration re-confirmation wording"
         );
     }
 

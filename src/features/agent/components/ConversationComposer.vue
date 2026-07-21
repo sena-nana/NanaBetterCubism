@@ -76,6 +76,25 @@ const inputRef = ref<TextareaRef>(null);
 const askRef = ref<TextareaRef>(null);
 const planRevisionRef = ref<TextareaRef>(null);
 const addMenuOpen = ref(false);
+const permissionMenuOpen = ref(false);
+
+const permissionLabel = computed<string>(() => {
+  switch (props.mode) {
+    case "conversation_only":
+      return "仅读取";
+    case "auto_approve":
+      return "自动批准";
+    default:
+      return "询问";
+  }
+});
+
+const permissionIsAuto = computed(() => props.mode === "auto_approve");
+
+function selectPermission(next: AgentTurnMode) {
+  permissionMenuOpen.value = false;
+  if (props.mode !== next) emit("update:mode", next);
+}
 
 function closeAddMenu() {
   addMenuOpen.value = false;
@@ -390,16 +409,49 @@ function onPlanRevisionKeydown(event: KeyboardEvent) {
               </ActionMenuItem>
             </div>
           </Popover>
-          <Button
-            size="sm"
-            :variant="mode === 'conversation_only' ? 'primary' : 'ghost'"
-            :aria-pressed="mode === 'conversation_only'"
-            :disabled="disabled || running || cancelling"
-            :agent-id="`${agentIdPrefix}.conversation-only`"
-            @click="emit('update:mode', mode === 'conversation_only' ? 'default' : 'conversation_only')"
+          <Popover
+            :open="permissionMenuOpen"
+            placement="top"
+            aria-label="权限模式"
+            :agent-id="`${agentIdPrefix}.permission-toggle`"
+            @update:open="permissionMenuOpen = $event"
           >
-            仅对话
-          </Button>
+            <template #trigger>
+              <Button
+                size="sm"
+                variant="ghost"
+                :class="permissionIsAuto ? 'conversation-composer__permission--auto' : ''"
+                :aria-haspopup="true"
+                :disabled="disabled || running || cancelling"
+                :agent-id="`${agentIdPrefix}.permission-toggle`"
+              >
+                {{ permissionLabel }}
+              </Button>
+            </template>
+            <div class="conversation-composer__permission-menu">
+              <ActionMenuItem
+                :active="mode === 'conversation_only'"
+                :agent-id="`${agentIdPrefix}.permission.read-only`"
+                @click="selectPermission('conversation_only')"
+              >
+                仅读取
+              </ActionMenuItem>
+              <ActionMenuItem
+                :active="mode === 'default'"
+                :agent-id="`${agentIdPrefix}.permission.ask`"
+                @click="selectPermission('default')"
+              >
+                询问
+              </ActionMenuItem>
+              <ActionMenuItem
+                :active="mode === 'auto_approve'"
+                :agent-id="`${agentIdPrefix}.permission.auto-approve`"
+                @click="selectPermission('auto_approve')"
+              >
+                自动批准
+              </ActionMenuItem>
+            </div>
+          </Popover>
           <Button
             size="sm"
             :icon="ListChecks"
@@ -475,6 +527,8 @@ function onPlanRevisionKeydown(event: KeyboardEvent) {
 .conversation-composer :deep(.ui-textarea:focus) { outline: none; }
 .conversation-composer__actions { justify-content: flex-end; min-height: 30px; padding: 6px 1px 0; }
 .conversation-composer__mode { margin-right: auto; min-width: 0; }
+.conversation-composer__permission--auto { color: #d4a017; }
+.conversation-composer__permission-menu { display: flex; flex-direction: column; min-width: 140px; padding: 4px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-elev); box-shadow: var(--shadow-menu); }
 .conversation-composer__hint { color: var(--text-faint); font-size: 11px; }
 .conversation-composer__pending { min-height: 108px; padding: 3px; }
 .conversation-composer__plan-approval { min-height: 0; }
