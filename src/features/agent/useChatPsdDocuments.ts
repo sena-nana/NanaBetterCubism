@@ -3,6 +3,8 @@ import type { Ref } from "vue";
 import { discardPsd, normalizeCommandError, preparePsd } from "./bridge";
 import type { ChatPsdDocument } from "./types";
 
+export const MAX_CHAT_PSD = 8;
+
 export function useChatPsdDocuments(options: {
   conversationId: () => string;
   documents: Ref<ChatPsdDocument[]>;

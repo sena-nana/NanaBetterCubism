@@ -3,10 +3,12 @@ import { computed, nextTick, ref, watch } from "vue";
 import { ActionMenuItem, Button, Popover, Textarea } from "../../../ui";
 import { ImagePlus, Layers, ListChecks, Plus, X } from "@lucide/vue";
 import { chatImageSrc, MAX_CHAT_IMAGES } from "../useChatImageDrafts";
+import { MAX_CHAT_PSD } from "../useChatPsdDocuments";
 import type {
   AgentTurnMode,
   ChatImageDraft,
   ChatPsdDocument,
+  ChatPsdDraft,
   ComputerOperationStatus,
   PendingUserAction,
 } from "../types";
@@ -27,6 +29,7 @@ const props = withDefaults(
     canSend?: boolean;
     images?: ChatImageDraft[];
     psdDocuments?: ChatPsdDocument[];
+    psdDrafts?: ChatPsdDraft[];
     error?: string | null;
     placeholder?: string;
     agentIdPrefix?: string;
@@ -45,6 +48,7 @@ const props = withDefaults(
     canSend: false,
     images: () => [],
     psdDocuments: () => [],
+    psdDrafts: () => [],
     error: null,
     placeholder: "描述你想在 Cubism Editor 中完成的事…",
     agentIdPrefix: "agent.chat",
@@ -66,6 +70,7 @@ const emit = defineEmits<{
   pickPsd: [];
   removeImage: [draftId: string];
   removePsd: [psdId: string];
+  removePsdDraft: [psdId: string];
   viewImage: [image: ChatImageDraft];
   paste: [event: ClipboardEvent];
 }>();
@@ -117,7 +122,12 @@ const canAddImage = computed(
     !props.imageInputDisabled,
 );
 const canAddPsd = computed(
-  () => props.psdAvailable && !props.disabled && !props.running && !props.cancelling,
+  () =>
+    props.psdAvailable &&
+    !props.disabled &&
+    !props.running &&
+    !props.cancelling &&
+    props.psdDocuments.length + props.psdDrafts.length < MAX_CHAT_PSD,
 );
 
 function textareaElement(value: TextareaRef) {
@@ -286,7 +296,26 @@ function onPlanRevisionKeydown(event: KeyboardEvent) {
           </button>
         </div>
       </div>
-      <div v-if="psdDocuments.length" class="conversation-composer__psds">
+      <div v-if="psdDocuments.length || psdDrafts.length" class="conversation-composer__psds">
+        <div
+          v-for="(psd, index) in psdDrafts"
+          :key="psd.id"
+          class="conversation-composer__psd"
+          :data-agent-id="`${agentIdPrefix}.draft-psd-draft.${index}`"
+          :title="psd.name"
+        >
+          <Layers :size="13" aria-hidden="true" />
+          <span class="conversation-composer__psd-name">{{ psd.name }}</span>
+          <button
+            type="button"
+            class="conversation-composer__psd-remove"
+            :aria-label="`移除 ${psd.name}`"
+            :data-agent-id="`${agentIdPrefix}.draft-psd-draft.${index}.remove`"
+            @click="emit('removePsdDraft', psd.id)"
+          >
+            <X :size="12" aria-hidden="true" />
+          </button>
+        </div>
         <div
           v-for="(psd, index) in psdDocuments"
           :key="psd.id"
