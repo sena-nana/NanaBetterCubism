@@ -50,6 +50,61 @@ export interface ImagePrepareResult {
   rejected: ImagePrepareRejection[];
 }
 
+export interface ChatPsdDocument {
+  id: string;
+  name: string;
+  path: string;
+  width: number;
+  height: number;
+  colorMode: string;
+  layerCount: number;
+  available: boolean;
+}
+
+export interface PsdBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface PsdMaskInfo {
+  present: boolean;
+  disabled: boolean;
+  invert: boolean;
+  defaultColor: number;
+  bounds: PsdBounds | null;
+}
+
+export interface PsdLayerNode {
+  id: string;
+  name: string;
+  kind: "group" | "group_end" | "layer";
+  visible: boolean;
+  opacity: number;
+  blendMode: string;
+  isClipped: boolean;
+  hasMask: boolean;
+  mask: PsdMaskInfo;
+  bounds: PsdBounds;
+  children: PsdLayerNode[];
+}
+
+export interface PsdStructure {
+  width: number;
+  height: number;
+  colorMode: string;
+  depth: number;
+  channelCount: number;
+  layerCount: number;
+  layers: PsdLayerNode[];
+}
+
+export interface PsdPrepareResult {
+  document: ChatPsdDocument;
+  structure: PsdStructure;
+}
+
 export interface PlanStep {
   id: string;
   title: string;

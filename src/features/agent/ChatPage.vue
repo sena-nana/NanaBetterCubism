@@ -31,6 +31,7 @@ import {
 } from "./sidebarConversations";
 import type { ConversationSummary, PlanDecision } from "./types";
 import { useChatImageDrafts } from "./useChatImageDrafts";
+import { useChatPsdDocuments } from "./useChatPsdDocuments";
 
 const route = useRoute();
 const router = useRouter();
@@ -89,6 +90,21 @@ const imageDraftController = useChatImageDrafts({
   },
 });
 const viewingImage = imageDraftController.viewingImage;
+
+const psdDocuments = computed({
+  get: () => runtime.value.psdDocuments,
+  set: (value) => {
+    runtime.value.psdDocuments = value;
+  },
+});
+const psdController = useChatPsdDocuments({
+  conversationId: () => conversationId.value,
+  documents: psdDocuments,
+  canInteract: () => canCompose.value,
+  setError: (message) => {
+    runtime.value.error = message;
+  },
+});
 
 const canSend = computed(
   () =>
@@ -299,6 +315,7 @@ async function onDecideComputerOperation(approved: boolean) {
         :cancelling="turn.cancelling.value"
         :can-send="canSend"
         :images="imageDrafts"
+        :psd-documents="psdDocuments"
         :error="runtime.error"
         :image-input-disabled="imageInputDisabled"
         @send="onSend"
@@ -307,7 +324,9 @@ async function onDecideComputerOperation(approved: boolean) {
         @decide="onDecideComputerOperation"
         @decide-plan="onDecidePlan"
         @pick-images="imageDraftController.pickImages"
+        @pick-psd="psdController.pickPsd"
         @remove-image="imageDraftController.removeImage"
+        @remove-psd="psdController.removePsd"
         @view-image="imageDraftController.viewImage"
         @paste="imageDraftController.pasteImages"
       />

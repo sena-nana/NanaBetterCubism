@@ -126,6 +126,7 @@ async function startConversation() {
           :can-send="canSend"
           :images="imageDrafts"
           :error="error"
+          :psd-available="false"
           @send="startConversation"
           @pick-images="imageDraftController.pickImages"
           @remove-image="imageDraftController.removeImage"

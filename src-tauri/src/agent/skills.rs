@@ -97,6 +97,8 @@ const COMPUTER_OPERATION_TOOLS: &[&str] = &[
     "finish_computer_operation",
 ];
 
+const PSD_INSPECTION_TOOLS: &[&str] = &["read_psd_structure", "read_psd_layer_image"];
+
 struct SkillSource {
     content: &'static str,
     tools: &'static [&'static str],
@@ -139,6 +141,10 @@ static SKILLS: LazyLock<Result<Vec<RuntimeSkill>, AgentError>> = LazyLock::new(|
         SkillSource {
             content: include_str!("skills/computer-operation/SKILL.md"),
             tools: COMPUTER_OPERATION_TOOLS,
+        },
+        SkillSource {
+            content: include_str!("skills/psd-inspection/SKILL.md"),
+            tools: PSD_INSPECTION_TOOLS,
         },
     ]
     .into_iter()
@@ -286,7 +292,7 @@ mod tests {
     #[test]
     fn runtime_skills_have_valid_unique_metadata() {
         let skills = all().unwrap();
-        assert_eq!(skills.len(), 7);
+        assert_eq!(skills.len(), 8);
         let names = skills
             .iter()
             .map(|skill| skill.name.as_str())

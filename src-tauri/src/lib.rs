@@ -6,10 +6,11 @@ mod service;
 use agent::{
     agent_answer_question, agent_cancel_turn, agent_create_conversation,
     agent_decide_computer_operation, agent_decide_plan, agent_delete_conversation,
-    agent_discard_image_drafts, agent_get_messages, agent_get_pending_user_action, agent_get_plan,
-    agent_list_conversations, agent_list_projects, agent_prepare_images, agent_send_message,
-    agent_set_conversation_pinned, llm_get_config, llm_set_config, llm_test_connection,
-    memory_list, memory_set_enabled, AgentRuntime, AgentStore,
+    agent_discard_image_drafts, agent_discard_psd, agent_get_messages, agent_get_pending_user_action,
+    agent_get_plan, agent_list_conversations, agent_list_projects, agent_list_psds,
+    agent_prepare_images, agent_prepare_psd, agent_send_message, agent_set_conversation_pinned,
+    llm_get_config, llm_set_config, llm_test_connection, memory_list, memory_set_enabled,
+    AgentRuntime, AgentStore,
 };
 use service::{
     cancel_parameter_batch, connect_editor, disconnect_editor, execute_parameter_batch,
@@ -72,6 +73,9 @@ pub fn run() {
             agent_get_messages,
             agent_prepare_images,
             agent_discard_image_drafts,
+            agent_prepare_psd,
+            agent_discard_psd,
+            agent_list_psds,
             agent_send_message,
             agent_cancel_turn,
             agent_answer_question,

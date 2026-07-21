@@ -3,6 +3,7 @@ import {
   getMessages,
   getPendingUserAction,
   getPlan,
+  listPsds,
   listenComputerOperation,
   listenPlan,
   listenToolEvent,
@@ -16,6 +17,7 @@ import type {
   AgentTurnMode,
   ChatMessage,
   ChatImageDraft,
+  ChatPsdDocument,
   ComputerOperationStatus,
   ConversationPlan,
   PendingUserAction,
@@ -32,6 +34,7 @@ export interface ConversationRuntimeState {
   computerStatus: ComputerOperationStatus;
   draft: string;
   imageDrafts: ChatImageDraft[];
+  psdDocuments: ChatPsdDocument[];
   askAnswer: string;
   planRevision: string;
   composerMode: AgentTurnMode;
@@ -126,10 +129,11 @@ export async function loadConversationRuntime(
   state.loading = true;
   if (!options.preserveError) state.error = null;
   try {
-    const [messages, plan, pendingAction] = await Promise.all([
+    const [messages, plan, pendingAction, psdDocuments] = await Promise.all([
       getMessages(conversationId),
       getPlan(conversationId),
       getPendingUserAction(conversationId),
+      listPsds(conversationId),
     ]);
     if (epoch !== state.loadEpoch) return state;
 
@@ -141,6 +145,7 @@ export async function loadConversationRuntime(
     if (!changedWhileLoading) {
       state.plan = plan;
       state.pendingAction = pendingAction;
+      state.psdDocuments = psdDocuments;
       if (pendingAction?.kind === "plan_approval") state.composerMode = "plan";
       if (pendingAction?.kind === "computer_approval") {
         state.computerStatus = "awaiting_approval";
@@ -245,6 +250,7 @@ function runtimeState(conversationId: string) {
       computerStatus: "idle",
       draft: "",
       imageDrafts: [],
+      psdDocuments: [],
       askAnswer: "",
       planRevision: "",
       composerMode: "default",

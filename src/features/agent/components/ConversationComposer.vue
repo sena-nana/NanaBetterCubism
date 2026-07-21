@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import { Button, Textarea } from "../../../ui";
-import { ImagePlus, ListChecks, X } from "@lucide/vue";
+import { ActionMenuItem, Button, Popover, Textarea } from "../../../ui";
+import { ImagePlus, Layers, ListChecks, Plus, X } from "@lucide/vue";
 import { chatImageSrc, MAX_CHAT_IMAGES } from "../useChatImageDrafts";
 import type {
   AgentTurnMode,
   ChatImageDraft,
+  ChatPsdDocument,
   ComputerActionKind,
   ComputerOperationStatus,
   PendingUserAction,
@@ -26,10 +27,12 @@ const props = withDefaults(
     cancelling?: boolean;
     canSend?: boolean;
     images?: ChatImageDraft[];
+    psdDocuments?: ChatPsdDocument[];
     error?: string | null;
     placeholder?: string;
     agentIdPrefix?: string;
     imageInputDisabled?: boolean;
+    psdAvailable?: boolean;
   }>(),
   {
     askAnswer: "",
@@ -42,10 +45,12 @@ const props = withDefaults(
     cancelling: false,
     canSend: false,
     images: () => [],
+    psdDocuments: () => [],
     error: null,
     placeholder: "描述你想在 Cubism Editor 中完成的事…",
     agentIdPrefix: "agent.chat",
     imageInputDisabled: false,
+    psdAvailable: true,
   },
 );
 
@@ -60,7 +65,9 @@ const emit = defineEmits<{
   decide: [approved: boolean];
   decidePlan: [decision: "approve" | "revise" | "cancel", revision?: string];
   pickImages: [];
+  pickPsd: [];
   removeImage: [draftId: string];
+  removePsd: [psdId: string];
   viewImage: [image: ChatImageDraft];
   paste: [event: ClipboardEvent];
 }>();
@@ -68,6 +75,33 @@ const emit = defineEmits<{
 const inputRef = ref<TextareaRef>(null);
 const askRef = ref<TextareaRef>(null);
 const planRevisionRef = ref<TextareaRef>(null);
+const addMenuOpen = ref(false);
+
+function closeAddMenu() {
+  addMenuOpen.value = false;
+}
+
+function onPickImages() {
+  closeAddMenu();
+  emit("pickImages");
+}
+
+function onPickPsd() {
+  closeAddMenu();
+  emit("pickPsd");
+}
+
+const canAddImage = computed(
+  () =>
+    !props.disabled &&
+    !props.running &&
+    !props.cancelling &&
+    props.images.length < MAX_CHAT_IMAGES &&
+    !props.imageInputDisabled,
+);
+const canAddPsd = computed(
+  () => props.psdAvailable && !props.disabled && !props.running && !props.cancelling,
+);
 
 function textareaElement(value: TextareaRef) {
   if (value instanceof HTMLTextAreaElement) return value;
@@ -295,18 +329,67 @@ function onPlanRevisionKeydown(event: KeyboardEvent) {
           </button>
         </div>
       </div>
+      <div v-if="psdDocuments.length" class="conversation-composer__psds">
+        <div
+          v-for="(psd, index) in psdDocuments"
+          :key="psd.id"
+          class="conversation-composer__psd"
+          :class="{ 'is-unavailable': !psd.available }"
+          :data-agent-id="`${agentIdPrefix}.draft-psd.${index}`"
+          :title="psd.available ? `${psd.name} · ${psd.width}×${psd.height} · ${psd.layerCount} 个图层` : `${psd.name}（文件已失效）`"
+        >
+          <Layers :size="13" aria-hidden="true" />
+          <span class="conversation-composer__psd-name">{{ psd.name }}</span>
+          <button
+            type="button"
+            class="conversation-composer__psd-remove"
+            :aria-label="`移除 ${psd.name}`"
+            :data-agent-id="`${agentIdPrefix}.draft-psd.${index}.remove`"
+            @click="emit('removePsd', psd.id)"
+          >
+            <X :size="12" aria-hidden="true" />
+          </button>
+        </div>
+      </div>
       <div class="conversation-composer__actions">
         <div class="conversation-composer__mode">
-          <Button
-            size="sm"
-            variant="ghost"
-            :icon="ImagePlus"
-            :title="imageInputDisabled ? '当前模型不支持图片输入，请更换支持视觉的模型' : '添加图片'"
-            aria-label="添加图片"
-            :disabled="disabled || running || cancelling || images.length >= MAX_CHAT_IMAGES || imageInputDisabled"
-            :agent-id="`${agentIdPrefix}.add-image`"
-            @click="emit('pickImages')"
-          />
+          <Popover
+            :open="addMenuOpen"
+            placement="top"
+            :aria-label="`添加附件`"
+            :agent-id="`${agentIdPrefix}.add-menu`"
+            @update:open="addMenuOpen = $event"
+          >
+            <template #trigger>
+              <Button
+                size="sm"
+                variant="ghost"
+                :icon="Plus"
+                title="添加附件"
+                aria-label="添加附件"
+                :disabled="disabled || running || cancelling"
+                :agent-id="`${agentIdPrefix}.add`"
+              />
+            </template>
+            <div class="conversation-composer__add-menu">
+              <ActionMenuItem
+                :icon="ImagePlus"
+                :disabled="!canAddImage"
+                :agent-id="`${agentIdPrefix}.add-image`"
+                @click="onPickImages"
+              >
+                添加参考图
+              </ActionMenuItem>
+              <ActionMenuItem
+                :icon="Layers"
+                :disabled="!canAddPsd"
+                :agent-id="`${agentIdPrefix}.add-psd`"
+                @click="onPickPsd"
+              >
+                添加 PSD
+              </ActionMenuItem>
+            </div>
+          </Popover>
           <Button
             size="sm"
             :variant="mode === 'conversation_only' ? 'primary' : 'ghost'"
@@ -381,6 +464,13 @@ function onPlanRevisionKeydown(event: KeyboardEvent) {
 .conversation-composer__image-open { width: 100%; height: 100%; padding: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-subtle); cursor: zoom-in; }
 .conversation-composer__image-open img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .conversation-composer__image-remove { position: absolute; top: -5px; right: -5px; display: grid; place-items: center; width: 18px; height: 18px; padding: 0; border: 1px solid var(--border); border-radius: 50%; background: var(--bg-elev); color: var(--text); cursor: pointer; }
+.conversation-composer__psds { display: flex; flex-wrap: wrap; gap: 6px; padding: 5px 1px 1px; }
+.conversation-composer__psd { display: inline-flex; align-items: center; gap: 5px; max-width: 220px; padding: 4px 6px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-subtle); color: var(--text); font-size: 12px; }
+.conversation-composer__psd.is-unavailable { opacity: 0.55; }
+.conversation-composer__psd-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conversation-composer__psd-remove { display: grid; place-items: center; width: 16px; height: 16px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--text-muted); cursor: pointer; }
+.conversation-composer__psd-remove:hover { background: var(--lilia-state-layer-hover); color: var(--text); }
+.conversation-composer__add-menu { display: flex; flex-direction: column; min-width: 160px; padding: 4px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-elev); box-shadow: var(--shadow-menu); }
 .conversation-composer :deep(.ui-textarea) { display: block; width: 100%; min-height: 48px; max-height: 180px; resize: none; overflow-y: auto; border: 0; background: transparent; box-shadow: none; line-height: 1.55; }
 .conversation-composer :deep(.ui-textarea:focus) { outline: none; }
 .conversation-composer__actions { justify-content: flex-end; min-height: 30px; padding: 6px 1px 0; }
