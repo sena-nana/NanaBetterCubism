@@ -210,12 +210,13 @@ async fn get_selected_objects_uses_official_method_name_and_returns_ids() {
     let response = call_tool(&service, "get_selected_objects", json!({}))
         .await
         .unwrap();
-    let ids = response["ids"].as_array().expect("sanitized ids array");
-    let ids = ids
+    let ids: Vec<&str> = response["ids"]
+        .as_array()
+        .expect("sanitized ids array")
         .iter()
-        .map(|value| value.as_str().unwrap().to_string())
-        .collect::<Vec<_>>();
-    assert_eq!(ids, vec!["PartFace".to_string(), "ArtOutside".to_string()]);
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["PartFace", "ArtOutside"]);
 }
 
 #[tokio::test]

@@ -79,11 +79,8 @@ successful `EditEnd`. All model-scoped methods require `ModelUID`.
 
 ## API 1.1.0 selection, Part, and object editing
 
-The official method name is `GetSelectedObjects` (correctly spelled). An earlier
-note here claimed the official name was misspelled `GetSelectedObjecs`; that was
-wrong — real-Editor verification returned `MethodNotFound` for `GetSelectedObjecs`
-and `{"Ids": [...]}` for `GetSelectedObjects`. Confirmed by real-Editor probe
-(2026-07-21, Cubism Editor 5.4 Alpha1, API 1.1.0, Windows).
+The official method name is `GetSelectedObjects` (confirmed by real-Editor probe,
+2026-07-21, Cubism Editor 5.4 Alpha1, API 1.1.0, Windows).
 
 | Method | Request fields after `ModelUID` | Response |
 | --- | --- | --- |
