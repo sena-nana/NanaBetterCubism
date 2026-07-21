@@ -93,7 +93,7 @@ describe("成熟对话展示", () => {
       plan: plan([{ id: "done", title: "完成步骤", status: "completed" }]),
     });
     await fireEvent.click(screen.getByRole("button", { expanded: true }));
-    expect(screen.getByRole("status")).toBeTruthy();
+    expect(screen.getByText("完成步骤")).toBeTruthy();
   });
 
   it("仅将闭合 Mermaid 围栏延迟渲染，并使用严格安全级别", async () => {
