@@ -742,7 +742,7 @@ async fn execute_tool_inner(
         conversation_id,
         tool_call_id,
         cancel,
-        mode: _,
+        mode,
     } = context;
     let args: Value = serde_json::from_str(arguments)
         .map_err(|error| AgentError::new("invalid_arguments", error.to_string()))?;
@@ -1014,15 +1014,27 @@ async fn execute_tool_inner(
                 includes_file_dialogs,
                 document_instance_key,
             )?;
-            emit_computer_status(
-                app,
-                conversation_id,
-                ComputerOperationStatus::AwaitingApproval,
-            );
-            Ok(ToolOutcome::AwaitUser {
-                action: approval.into(),
-                tool_call_id: tool_call_id.into(),
-            })
+            if mode.is_auto_approve() {
+                let grant = runtime
+                    .computer_control
+                    .decide(&approval.action_id, true)?;
+                emit_computer_status(
+                    app,
+                    conversation_id,
+                    ComputerOperationStatus::Authorized,
+                );
+                Ok(tool_result(serde_json::to_string_pretty(&grant)?))
+            } else {
+                emit_computer_status(
+                    app,
+                    conversation_id,
+                    ComputerOperationStatus::AwaitingApproval,
+                );
+                Ok(ToolOutcome::AwaitUser {
+                    action: approval.into(),
+                    tool_call_id: tool_call_id.into(),
+                })
+            }
         }
         "capture_computer_operation_frame" => {
             let grant_id = required_string(&args, "grantId")?;
@@ -1116,29 +1128,38 @@ async fn execute_tool_inner(
             if question.trim().is_empty() {
                 return Err(AgentError::new("invalid_arguments", "question 不能为空"));
             }
-            let options = args
-                .get("options")
-                .and_then(|v| v.as_array())
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(|item| item.as_str().map(str::to_string))
-                        .collect::<Vec<_>>()
+            if mode.is_auto_approve() {
+                Ok(tool_result(
+                    serde_json::to_string(&json!({
+                        "auto_approved": true,
+                        "message": "自动批准模式：已跳过用户确认，请直接继续执行本轮操作。"
+                    }))?,
+                ))
+            } else {
+                let options = args
+                    .get("options")
+                    .and_then(|v| v.as_array())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| item.as_str().map(str::to_string))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let question = PendingQuestion {
+                    action_id: new_id(),
+                    conversation_id: conversation_id.into(),
+                    question,
+                    options,
+                };
+                runtime
+                    .store
+                    .set_pending_question(&question, tool_call_id)?;
+                Ok(ToolOutcome::AwaitUser {
+                    action: question.into(),
+                    tool_call_id: tool_call_id.into(),
                 })
-                .unwrap_or_default();
-            let question = PendingQuestion {
-                action_id: new_id(),
-                conversation_id: conversation_id.into(),
-                question,
-                options,
-            };
-            runtime
-                .store
-                .set_pending_question(&question, tool_call_id)?;
-            Ok(ToolOutcome::AwaitUser {
-                action: question.into(),
-                tool_call_id: tool_call_id.into(),
-            })
+            }
         }
         "update_plan" => {
             let steps = args
@@ -1616,5 +1637,43 @@ mod tests {
         assert_eq!(parameters["required"], json!(["question"]));
         assert!(parameters["properties"]["question"].is_object());
         assert!(parameters["properties"]["options"].is_object());
+    }
+
+    #[test]
+    fn auto_approve_mode_is_not_read_only() {
+        assert!(!AgentTurnMode::AutoApprove.is_read_only());
+        assert!(AgentTurnMode::AutoApprove.is_auto_approve());
+        for mode in [AgentTurnMode::Default, AgentTurnMode::ConversationOnly, AgentTurnMode::Plan] {
+            assert!(!mode.is_auto_approve(), "{mode:?} must not be auto-approve");
+        }
+    }
+
+    #[test]
+    fn auto_approve_advertises_mutating_tools_like_default() {
+        let active = skills::all()
+            .unwrap()
+            .iter()
+            .map(|skill| skill.name.clone())
+            .collect::<BTreeSet<_>>();
+        let auto = tool_definitions(&active, AgentTurnMode::AutoApprove, true).unwrap();
+        let default = tool_definitions(&active, AgentTurnMode::Default, true).unwrap();
+        assert_eq!(names(&auto), names(&default));
+        assert!(
+            names(&auto)
+                .iter()
+                .any(|name| tool_access(name) == Some(ToolAccess::Mutating)),
+            "auto-approve mode must advertise mutating tools"
+        );
+        assert!(
+            !names(&auto).contains("submit_plan"),
+            "submit_plan must stay plan-mode only"
+        );
+        for name in ["preview_parameter_batch", "execute_editor_edit", "set_parameter_values"] {
+            assert!(
+                ensure_tool_access(AgentTurnMode::AutoApprove, name).is_ok(),
+                "auto-approve must allow mutating tool {name}"
+            );
+        }
+        assert!(ensure_tool_access(AgentTurnMode::AutoApprove, "submit_plan").is_err());
     }
 }

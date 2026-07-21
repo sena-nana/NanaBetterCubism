@@ -10,8 +10,8 @@ use crate::agent::tools::{
 };
 use crate::agent::{
     emit_conversations_changed, new_id, AgentError, AgentRuntime, AgentTurnMode, AgentTurnState,
-    ImageInputSupport, PendingContinuation, PendingUserAction, CONVERSATION_ONLY_PROMPT,
-    PLAN_MODE_PROMPT, SYSTEM_PROMPT,
+    ImageInputSupport, PendingContinuation, PendingUserAction, AUTO_APPROVE_PROMPT,
+    COLLABORATION_PROMPT, CONVERSATION_ONLY_PROMPT, PLAN_MODE_PROMPT, SYSTEM_PROMPT,
 };
 use crate::service::EditorService;
 use serde_json::{json, Value};
@@ -302,17 +302,13 @@ async fn run_turn_inner(
                 "content": skills::catalog_prompt()?
             }),
         ];
-        if mode == AgentTurnMode::ConversationOnly {
-            seeded.push(json!({
-                "role": "system",
-                "content": CONVERSATION_ONLY_PROMPT
-            }));
-        } else if mode == AgentTurnMode::Plan {
-            seeded.push(json!({
-                "role": "system",
-                "content": PLAN_MODE_PROMPT
-            }));
-        }
+        let mode_prompt = match mode {
+            AgentTurnMode::ConversationOnly => CONVERSATION_ONLY_PROMPT,
+            AgentTurnMode::Plan => PLAN_MODE_PROMPT,
+            AgentTurnMode::AutoApprove => AUTO_APPROVE_PROMPT,
+            AgentTurnMode::Default => COLLABORATION_PROMPT,
+        };
+        seeded.push(json!({ "role": "system", "content": mode_prompt }));
         if let Some(prompt) = additional_prompt {
             seeded.push(json!({
                 "role": "system",

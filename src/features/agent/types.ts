@@ -1,5 +1,5 @@
 export type MessageRole = "user" | "assistant" | "tool" | "system";
-export type AgentTurnMode = "default" | "conversation_only" | "plan";
+export type AgentTurnMode = "default" | "conversation_only" | "plan" | "auto_approve";
 
 export interface ConversationSummary {
   id: string;
