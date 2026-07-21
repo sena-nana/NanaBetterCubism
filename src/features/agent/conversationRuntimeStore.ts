@@ -78,9 +78,6 @@ export function installConversationRuntimeStore() {
         state.composerMode = "plan";
         state.planRevision = "";
       }
-      if (payload.action.kind === "computer_approval") {
-        state.computerStatus = "awaiting_approval";
-      }
       setConversationTurnPhase(payload.conversationId, "awaiting_input");
       touch(state);
     }),
@@ -147,9 +144,6 @@ export async function loadConversationRuntime(
       state.pendingAction = pendingAction;
       state.psdDocuments = psdDocuments;
       if (pendingAction?.kind === "plan_approval") state.composerMode = "plan";
-      if (pendingAction?.kind === "computer_approval") {
-        state.computerStatus = "awaiting_approval";
-      }
     }
     if (pendingAction) setConversationTurnPhase(conversationId, "awaiting_input");
     state.loaded = true;

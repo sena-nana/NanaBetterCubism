@@ -259,10 +259,6 @@ impl AgentRuntime {
             || self
                 .store
                 .get_pending_plan_approval(conversation_id)?
-                .is_some()
-            || self
-                .computer_control
-                .pending_approval_for_conversation(conversation_id)
                 .is_some();
         if running || awaiting_input {
             return Err(AgentError::new(
@@ -297,21 +293,6 @@ impl AgentRuntime {
         Ok((conversation_id, cancel))
     }
 
-    pub async fn begin_user_action(
-        &self,
-        action_id: &str,
-    ) -> Result<(String, Arc<AtomicBool>), AgentError> {
-        let conversation_id = self
-            .pending_continuations
-            .lock()
-            .await
-            .get(action_id)
-            .map(|continuation| continuation.conversation_id.clone())
-            .ok_or_else(|| AgentError::new("user_action_not_found", "待处理操作已失效。"))?;
-        let cancel = self.begin_turn(&conversation_id).await?;
-        Ok((conversation_id, cancel))
-    }
-
     pub async fn finish_turn(&self, conversation_id: &str, cancel: &Arc<AtomicBool>) -> bool {
         let mut flags = self.cancel_flags.lock().await;
         if flags
@@ -331,15 +312,12 @@ impl AgentRuntime {
         conversation_id: &str,
     ) -> Result<bool, AgentError> {
         let question_cleared = self.store.clear_pending_user_action(conversation_id)?;
-        let approval_cleared = self
-            .computer_control
-            .pending_approval_for_conversation(conversation_id)
-            .is_some();
+        let grant_cleared = self.computer_control.has_active_grant(conversation_id);
         self.computer_control.cancel_conversation(conversation_id);
         let mut pending = self.pending_continuations.lock().await;
         let previous_len = pending.len();
         pending.retain(|_, value| value.conversation_id != conversation_id);
-        Ok(question_cleared || approval_cleared || pending.len() != previous_len)
+        Ok(question_cleared || grant_cleared || pending.len() != previous_len)
     }
 
     pub async fn request_cancel(

@@ -147,16 +147,6 @@ export async function answerQuestion(actionId: string, answer: string): Promise<
   await invoke("agent_answer_question", { actionId, answer });
 }
 
-export async function decideComputerOperation(
-  actionId: string,
-  approved: boolean,
-): Promise<void> {
-  if (!isTauriRuntime()) {
-    throw domainError("desktop_required", "请在桌面应用中处理电脑代理授权。");
-  }
-  await invoke("agent_decide_computer_operation", { actionId, approved });
-}
-
 export async function getPlan(conversationId: string): Promise<ConversationPlan | null> {
   if (!isTauriRuntime()) return null;
   return invoke<ConversationPlan | null>("agent_get_plan", { conversationId });

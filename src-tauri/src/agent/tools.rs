@@ -254,7 +254,7 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
         mutating_tool(
             "list_cubism_windows",
             "查找 Cubism 窗口",
-            "列出可供电脑代理操作选择的 Cubism 窗口；授权后可列出同进程随后打开的窗口。",
+            "列出可供电脑代理操作选择的 Cubism 窗口；获得 grant 后可列出同进程随后打开的窗口。",
             json!({
                 "type": "object",
                 "properties": { "grantId": { "type": "string" } },
@@ -263,8 +263,8 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
         ),
         mutating_tool(
             "request_computer_operation",
-            "请求电脑操作授权",
-            "仅当能力矩阵确认官方 API 缺失时，提交完整计划并请求用户授权。",
+            "请求电脑操作",
+            "仅当能力矩阵确认官方 API 缺失时，提交完整计划以获得操作 grant。",
             json!({
                 "type": "object",
                 "properties": {
@@ -306,7 +306,7 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
         mutating_tool(
             "capture_computer_operation_frame",
             "查看最新 Cubism 画面",
-            "获取当前授权窗口的最新画面；每个手势前都必须调用。",
+            "获取当前操作窗口的最新画面；每个手势前都必须调用。",
             json!({
                 "type": "object",
                 "properties": {
@@ -320,7 +320,7 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
         mutating_tool(
             "perform_computer_action",
             "操作 Cubism 窗口",
-            "基于最新 frameId 执行一个已授权手势，并立即返回新画面。",
+            "基于最新 frameId 执行一个手势，并立即返回新画面。",
             json!({
                 "type": "object",
                 "properties": {
@@ -337,7 +337,7 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
         mutating_tool(
             "finish_computer_operation",
             "结束电脑操作",
-            "以真实结果结束电脑代理操作并立即销毁授权。",
+            "以真实结果结束电脑代理操作并立即销毁本次操作 grant。",
             json!({
                 "type": "object",
                 "properties": {
@@ -1004,7 +1004,7 @@ async fn execute_tool_inner(
                 crate::service::official_api::current_modeling_document(editor)
                 .await
                 .map(|document| document.document_instance_key);
-            let approval = runtime.computer_control.request_approval(
+            let grant = runtime.computer_control.grant(
                 conversation_id,
                 window_id,
                 capability,
@@ -1014,27 +1014,12 @@ async fn execute_tool_inner(
                 includes_file_dialogs,
                 document_instance_key,
             )?;
-            if mode.is_auto_approve() {
-                let grant = runtime
-                    .computer_control
-                    .decide(&approval.action_id, true)?;
-                emit_computer_status(
-                    app,
-                    conversation_id,
-                    ComputerOperationStatus::Authorized,
-                );
-                Ok(tool_result(serde_json::to_string_pretty(&grant)?))
-            } else {
-                emit_computer_status(
-                    app,
-                    conversation_id,
-                    ComputerOperationStatus::AwaitingApproval,
-                );
-                Ok(ToolOutcome::AwaitUser {
-                    action: approval.into(),
-                    tool_call_id: tool_call_id.into(),
-                })
-            }
+            emit_computer_status(
+                app,
+                conversation_id,
+                ComputerOperationStatus::Authorized,
+            );
+            Ok(tool_result(serde_json::to_string_pretty(&grant)?))
         }
         "capture_computer_operation_frame" => {
             let grant_id = required_string(&args, "grantId")?;
@@ -1289,9 +1274,9 @@ fn computer_tool_summary(name: &str, result: &str) -> String {
             .and_then(|value| value.as_array().map(Vec::len))
             .map(|count| format!("发现 {count} 个 Cubism 窗口"))
             .unwrap_or_else(|| "已检查 Cubism 窗口".into()),
-        "request_computer_operation" => "等待用户授权电脑代理操作".into(),
+        "request_computer_operation" => "已发起电脑代理操作".into(),
         "capture_computer_operation_frame" => "已获取最新 Cubism 画面".into(),
-        "perform_computer_action" => "已执行一个授权手势并获取新画面".into(),
+        "perform_computer_action" => "已执行一个手势并获取新画面".into(),
         "finish_computer_operation" => "电脑代理操作已结束".into(),
         _ => "电脑代理操作状态已更新".into(),
     }
