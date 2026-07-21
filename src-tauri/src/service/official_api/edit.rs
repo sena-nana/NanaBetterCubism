@@ -58,7 +58,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "preview_add_parameter",
             "预览添加参数",
             "AddParameter",
-            "预览添加参数。",
+            "预览添加参数。仅用于新建参数；若参数已存在并需迁入参数组，必须改用 preview_move_parameter。",
             false,
             vec![
                 string("name", "Name", false),
@@ -128,7 +128,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "preview_move_parameter",
             "预览移动参数",
             "MoveParameter",
-            "预览移动参数到参数组及指定位置。",
+            "预览移动参数到参数组及指定位置。用于把已存在的参数迁入或迁出参数组。",
             true,
             vec![
                 string("id", "Id", true),
@@ -377,6 +377,20 @@ fn validate_constraints(method: &str, data: &Value) -> Result<(), CommandError> 
     Ok(())
 }
 
+fn group_exists_in_structure(snapshot: &Value, group_id: &str) -> bool {
+    let Some(entries) = snapshot
+        .get("ParameterStructure")
+        .and_then(|value| value.get("Entries"))
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+    entries.iter().any(|entry| {
+        entry.get("EntryType").and_then(Value::as_str) == Some("ParameterGroup")
+            && entry.get("Id").and_then(Value::as_str) == Some(group_id)
+    })
+}
+
 pub(super) async fn preview_edit(
     service: &EditorService,
     spec: &ToolSpec,
@@ -391,6 +405,16 @@ pub(super) async fn preview_edit(
     let precondition = verification_snapshot(&rpc, spec.method, &data)
         .await
         .map_err(CommandError::from)?;
+    if spec.method == "AddParameter" {
+        if let Some(group_id) = data.get("GroupId").and_then(Value::as_str) {
+            if !group_exists_in_structure(&precondition, group_id) {
+                return Err(CommandError::new(
+                    "invalid_arguments",
+                    format!("参数组 {group_id} 不存在，请先创建并提交参数组。"),
+                ));
+            }
+        }
+    }
     let preview_id = Uuid::new_v4().simple().to_string();
     let summary = format!(
         "{} {}",

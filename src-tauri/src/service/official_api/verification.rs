@@ -135,10 +135,52 @@ fn find_child_position<'a>(value: &'a Value, id: &str) -> Option<(&'a Map<String
         .find_map(|value| find_child_position(value, id))
 }
 
+/// Returns the parent group id of a parameter in `GetParameterStructure`:
+/// `Some(None)` at root, `Some(Some(group_id))` nested under a group, `None` if absent.
+fn find_parameter_parent<'a>(snapshot: &'a Value, id: &str) -> Option<Option<&'a str>> {
+    let entries = snapshot
+        .get("ParameterStructure")
+        .and_then(|value| value.get("Entries"))
+        .and_then(Value::as_array)?;
+    for entry in entries {
+        match entry.get("EntryType").and_then(Value::as_str) {
+            Some("ParameterGroup") => {
+                if let Some(parameters) = entry.get("Parameters").and_then(Value::as_array) {
+                    if parameters
+                        .iter()
+                        .any(|p| p.get("Id").and_then(Value::as_str) == Some(id))
+                    {
+                        return Some(entry.get("Id").and_then(Value::as_str));
+                    }
+                }
+            }
+            Some("Parameter") if entry.get("Id").and_then(Value::as_str) == Some(id) => {
+                return Some(None);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 pub(super) fn verify_postcondition(plan: &StoredEditorEditPlan, snapshot: &Value) -> Option<bool> {
     let data = &plan.data;
     match plan.method.as_str() {
-        "AddParameter" | "AddParameterGroup" => {
+        "AddParameter" => {
+            let id = data.get("Id")?.as_str()?;
+            let parent = find_parameter_parent(snapshot, id)?;
+            let expected_group = data.get("GroupId").and_then(Value::as_str);
+            let group_ok = match expected_group {
+                Some(expected) => parent == Some(expected),
+                None => parent.is_none(),
+            };
+            if !group_ok {
+                return Some(false);
+            }
+            let actual = find_id(snapshot, id)?;
+            Some(verify_fields(data, actual, &["ModelUID", "GroupId"]))
+        }
+        "AddParameterGroup" => {
             let id = data.get("Id")?.as_str()?;
             let actual = find_id(snapshot, id)?;
             Some(verify_fields(data, actual, &["ModelUID", "GroupId"]))
@@ -260,5 +302,118 @@ pub(super) fn verify_postcondition(plan: &StoredEditorEditPlan, snapshot: &Value
             ))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::StoredEditorEditPlan;
+    use serde_json::{json, Value};
+
+    fn plan(method: &str, data: Value) -> StoredEditorEditPlan {
+        StoredEditorEditPlan {
+            preview_id: "preview".into(),
+            generation: 1,
+            model_uid: "model".into(),
+            method: method.into(),
+            data,
+            precondition: Value::Null,
+        }
+    }
+
+    fn structure(entries: Value) -> Value {
+        json!({ "ParameterStructure": { "Entries": entries } })
+    }
+
+    fn group(id: &str, name: &str, parameters: Vec<Value>) -> Value {
+        json!({ "EntryType": "ParameterGroup", "Id": id, "Name": name, "Parameters": parameters })
+    }
+
+    fn parameter(id: &str, name: &str, root: bool) -> Value {
+        let mut entry = json!({
+            "Id": id,
+            "Name": name,
+            "Min": 0.0,
+            "Default": 0.0,
+            "Max": 1.0,
+            "IsBlendShape": false,
+        });
+        if root {
+            entry["EntryType"] = json!("Parameter");
+        }
+        entry
+    }
+
+    fn add_parameter_plan(group_id: Option<&str>) -> StoredEditorEditPlan {
+        let mut data = json!({
+            "ModelUID": "model",
+            "Id": "ParamAngleX",
+            "Name": "角度X",
+            "Min": 0.0,
+            "Default": 0.0,
+            "Max": 1.0,
+            "IsBlendShape": false,
+        });
+        if let Some(group_id) = group_id {
+            data["GroupId"] = json!(group_id);
+        }
+        plan("AddParameter", data)
+    }
+
+    fn verify(snapshot: Value, group_id: Option<&str>) -> Option<bool> {
+        verify_postcondition(&add_parameter_plan(group_id), &snapshot)
+    }
+
+    #[test]
+    fn add_parameter_with_group_id_matches_parent() {
+        let snapshot = structure(json!([group("FaceGroup", "脸部", vec![parameter("ParamAngleX", "角度X", false)])]));
+        assert_eq!(verify(snapshot, Some("FaceGroup")), Some(true));
+    }
+
+    #[test]
+    fn add_parameter_with_group_id_lands_at_root_reports_mismatch() {
+        let snapshot = structure(json!([
+            group("FaceGroup", "脸部", vec![]),
+            parameter("ParamAngleX", "角度X", true),
+        ]));
+        assert_eq!(verify(snapshot, Some("FaceGroup")), Some(false));
+    }
+
+    #[test]
+    fn add_parameter_with_group_id_in_wrong_group_reports_mismatch() {
+        let snapshot = structure(json!([
+            group("FaceGroup", "脸部", vec![]),
+            group("BodyGroup", "身体", vec![parameter("ParamAngleX", "角度X", false)]),
+        ]));
+        assert_eq!(verify(snapshot, Some("FaceGroup")), Some(false));
+    }
+
+    #[test]
+    fn add_parameter_without_group_id_at_root_passes() {
+        let snapshot = structure(json!([parameter("ParamAngleX", "角度X", true)]));
+        assert_eq!(verify(snapshot, None), Some(true));
+    }
+
+    #[test]
+    fn add_parameter_without_group_id_but_nested_reports_mismatch() {
+        let snapshot = structure(json!([group("FaceGroup", "脸部", vec![parameter("ParamAngleX", "角度X", false)])]));
+        assert_eq!(verify(snapshot, None), Some(false));
+    }
+
+    #[test]
+    fn add_parameter_group_ignores_group_id_field() {
+        let snapshot = structure(json!([group("FaceGroup", "脸部", vec![])]));
+        let plan = plan(
+            "AddParameterGroup",
+            json!({ "ModelUID": "model", "Id": "FaceGroup", "Name": "脸部" }),
+        );
+        assert_eq!(verify_postcondition(&plan, &snapshot), Some(true));
+    }
+
+    #[test]
+    fn add_parameter_absent_from_snapshot_returns_none() {
+        let snapshot = structure(json!([parameter("Other", "其他", true)]));
+        assert_eq!(verify(snapshot, Some("FaceGroup")), None);
     }
 }
