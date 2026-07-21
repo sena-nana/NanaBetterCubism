@@ -235,7 +235,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         query(
             "get_selected_objects",
             "读取已选对象",
-            "GetSelectedObjecs",
+            "GetSelectedObjects",
             "读取当前模型已选择的对象 ID。",
             true,
             vec![],
