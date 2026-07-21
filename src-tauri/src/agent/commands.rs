@@ -2,7 +2,7 @@ use crate::agent::computer_control::ComputerOperationStatus;
 use crate::agent::images::{ChatImageAttachment, ImagePrepareInput, ImagePrepareRejection, ImagePrepareResult};
 use crate::agent::llm::test_connection;
 use crate::agent::psd::{ChatPsdDocument, PsdStructure};
-use crate::agent::runtime::{continue_after_computer_approval, continue_after_question, run_turn};
+use crate::agent::runtime::{continue_after_question, run_turn};
 use crate::agent::store::{
     ChatMessage, ConversationPlan, ConversationSummary, LlmConfigInput, LlmConfigView,
     MemoryViewRecord, ProjectRecord,
@@ -466,12 +466,9 @@ pub async fn agent_cancel_turn(
     conversation_id: String,
 ) -> Result<CancelTurnResult, AgentError> {
     let runtime = runtime(&app)?;
-    let awaiting_computer_approval = runtime
-        .computer_control
-        .pending_approval_for_conversation(&conversation_id)
-        .is_some();
+    let had_active_grant = runtime.computer_control.has_active_grant(&conversation_id);
     let result = runtime.request_cancel(&conversation_id).await?;
-    if awaiting_computer_approval {
+    if had_active_grant {
         let _ = app.emit(
             "agent://computer-operation",
             serde_json::json!({
@@ -520,41 +517,6 @@ pub async fn agent_answer_question(
 }
 
 #[tauri::command]
-pub async fn agent_decide_computer_operation(
-    app: AppHandle,
-    action_id: String,
-    approved: bool,
-) -> Result<(), AgentError> {
-    let runtime = runtime(&app)?;
-    let approval = runtime
-        .computer_control
-        .pending_approval(&action_id)
-        .ok_or_else(|| AgentError::new("approval_not_found", "电脑代理授权请求已失效。"))?;
-    let (conversation_id, cancel) = runtime.begin_user_action(&action_id).await?;
-    if approval.conversation_id != conversation_id {
-        runtime.finish_turn(&conversation_id, &cancel).await;
-        return Err(AgentError::new(
-            "approval_not_found",
-            "电脑代理授权请求不属于当前对话。",
-        ));
-    }
-    let app_clone = app.clone();
-    let runtime_clone = runtime.clone();
-    tauri::async_runtime::spawn(async move {
-        let _ = continue_after_computer_approval(
-            app_clone,
-            runtime_clone,
-            action_id,
-            conversation_id,
-            approved,
-            cancel,
-        )
-        .await;
-    });
-    Ok(())
-}
-
-#[tauri::command]
 pub async fn agent_get_plan(
     app: AppHandle,
     conversation_id: String,
@@ -571,12 +533,6 @@ pub async fn agent_get_pending_user_action(
 ) -> Result<Option<PendingUserAction>, AgentError> {
     let runtime = runtime(&app)?;
     runtime.store.ensure_active_conversation(&conversation_id)?;
-    if let Some(approval) = runtime
-        .computer_control
-        .pending_approval_for_conversation(&conversation_id)
-    {
-        return Ok(Some(approval.into()));
-    }
     if let Some(approval) = runtime.store.get_pending_plan_approval(&conversation_id)? {
         return Ok(Some(approval.action.into()));
     }

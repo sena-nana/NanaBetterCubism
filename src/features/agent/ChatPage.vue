@@ -5,7 +5,6 @@ import UiImageViewer from "@lilia/image-viewer/components/ImageViewer";
 import {
   answerQuestion,
   cancelTurn,
-  decideComputerOperation,
   decidePlan,
   listConversations,
   normalizeCommandError,
@@ -211,7 +210,6 @@ async function onCancel() {
   if (!id) return;
   const state = getConversationRuntime(id);
   const wasComputerOperation =
-    state.pendingAction?.kind === "computer_approval" ||
     !["idle", "completed", "cancelled", "failed"].includes(state.computerStatus);
   state.error = null;
   try {
@@ -244,24 +242,6 @@ async function onAnswerAsk(answer?: string) {
     setConversationTurnPhase(currentAsk.conversationId, "running");
   } catch (err) {
     setConversationTurnPhase(currentAsk.conversationId, "awaiting_input");
-    state.error = normalizeCommandError(err).message;
-  }
-}
-
-async function onDecideComputerOperation(approved: boolean) {
-  const approval = runtime.value.pendingAction?.kind === "computer_approval"
-    ? runtime.value.pendingAction
-    : null;
-  if (!approval) return;
-  const state = getConversationRuntime(approval.conversationId);
-  state.error = null;
-  try {
-    await decideComputerOperation(approval.actionId, approved);
-    state.pendingAction = null;
-    state.computerStatus = approved ? "authorized" : "cancelled";
-    setConversationTurnPhase(approval.conversationId, "running");
-  } catch (err) {
-    setConversationTurnPhase(approval.conversationId, "awaiting_input");
     state.error = normalizeCommandError(err).message;
   }
 }
@@ -321,7 +301,6 @@ async function onDecideComputerOperation(approved: boolean) {
         @send="onSend"
         @cancel="onCancel"
         @answer="onAnswerAsk"
-        @decide="onDecideComputerOperation"
         @decide-plan="onDecidePlan"
         @pick-images="imageDraftController.pickImages"
         @pick-psd="psdController.pickPsd"

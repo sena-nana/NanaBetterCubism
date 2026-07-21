@@ -3,7 +3,6 @@ mod windows;
 
 use crate::agent::{new_id, AgentError};
 use crate::service::{OperationCoordinator, OperationOwnerKind, OperationPermit};
-use chrono::{Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
@@ -34,21 +33,6 @@ pub enum UnsupportedCapability {
 }
 
 impl UnsupportedCapability {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::ArtMeshGeometry => "ArtMesh 几何编辑",
-            Self::ArtMeshUvTopology => "ArtMesh UV 与拓扑编辑",
-            Self::WarpControlPoints => "Warp Deformer 控制点编辑",
-            Self::AnimationEditing => "动画编辑",
-            Self::PhysicsEditing => "物理编辑",
-            Self::SaveExport => "保存或导出",
-            Self::TextureAtlas => "纹理图集操作",
-            Self::PsdOperations => "PSD 操作",
-            Self::GlueCreation => "Glue 创建",
-            Self::ArtPath => "ArtPath 创建或读取",
-        }
-    }
-
     fn available_in_first_release(self) -> bool {
         !matches!(
             self,
@@ -75,26 +59,9 @@ pub struct ComputerOperationStep {
     pub title: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ComputerApproval {
-    pub action_id: String,
-    pub conversation_id: String,
-    pub goal: String,
-    pub reason: String,
-    pub target_window_title: String,
-    pub steps: Vec<ComputerOperationStep>,
-    pub allowed_actions: Vec<ComputerActionKind>,
-    pub includes_file_dialogs: bool,
-    pub impact: String,
-    pub cannot_undo: bool,
-    pub expires_at: String,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ComputerOperationStatus {
-    AwaitingApproval,
     Authorized,
     Running,
     Completed,
@@ -219,7 +186,6 @@ pub struct ComputerControlService {
 #[derive(Default)]
 struct ComputerControlState {
     windows: HashMap<String, PlatformWindow>,
-    pending: HashMap<String, PendingOperation>,
     grant: Option<ComputerGrant>,
     frames: HashMap<String, FrameRecord>,
 }
@@ -230,17 +196,6 @@ impl Drop for ComputerControlState {
             let _ = std::fs::remove_dir_all(path);
         }
     }
-}
-
-struct PendingOperation {
-    approval: ComputerApproval,
-    target_window_id: String,
-    target: PlatformWindow,
-    capability: UnsupportedCapability,
-    allowed_actions: BTreeSet<ComputerActionKind>,
-    step_ids: BTreeSet<String>,
-    document_instance_key: Option<String>,
-    expires_at: Instant,
 }
 
 struct ComputerGrant {
@@ -336,7 +291,7 @@ impl ComputerControlService {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn request_approval(
+    pub fn grant(
         &self,
         conversation_id: &str,
         target_window_id: &str,
@@ -346,7 +301,7 @@ impl ComputerControlService {
         allowed_actions: Vec<ComputerActionKind>,
         includes_file_dialogs: bool,
         document_instance_key: Option<String>,
-    ) -> Result<ComputerApproval, AgentError> {
+    ) -> Result<Value, AgentError> {
         if !capability.available_in_first_release() {
             return Err(AgentError::new(
                 "computer_capability_not_validated",
@@ -356,10 +311,10 @@ impl ComputerControlService {
         validate_plan(&goal, &steps, &allowed_actions)?;
         let mut state = self.inner.lock().unwrap();
         expire_state(&mut state);
-        if state.grant.is_some() || !state.pending.is_empty() {
+        if state.grant.is_some() {
             return Err(AgentError::new(
                 "computer_operation_active",
-                "已有电脑代理操作正在等待授权或执行。",
+                "已有电脑代理操作正在执行。",
             ));
         }
         let target = state
@@ -369,64 +324,6 @@ impl ComputerControlService {
             .ok_or_else(|| AgentError::new("stale_window", "目标窗口已失效，请重新列出窗口。"))?;
         if !window_is_current(&target) {
             return Err(AgentError::new("stale_window", "目标窗口已经变化。"));
-        }
-        let action_id = new_id();
-        let expires_at = Instant::now() + GRANT_LIFETIME;
-        let approval = ComputerApproval {
-            action_id: action_id.clone(),
-            conversation_id: conversation_id.to_string(),
-            goal,
-            reason: format!(
-                "Cubism 没有可用于“{}”的官方 API，只能由 Agent 代理操作 Cubism 窗口。",
-                capability.label()
-            ),
-            target_window_title: target.title.clone(),
-            steps: steps.clone(),
-            allowed_actions: allowed_actions.clone(),
-            includes_file_dialogs,
-            impact: "Agent 将按上述步骤向这个 Cubism 进程注入鼠标或键盘输入。".into(),
-            cannot_undo: true,
-            expires_at: (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
-        };
-        state.pending.insert(
-            action_id,
-            PendingOperation {
-                approval: approval.clone(),
-                target_window_id: target_window_id.to_string(),
-                target,
-                capability,
-                allowed_actions: allowed_actions.into_iter().collect(),
-                step_ids: steps.into_iter().map(|step| step.id).collect(),
-                document_instance_key,
-                expires_at,
-            },
-        );
-        Ok(approval)
-    }
-
-    pub fn decide(&self, action_id: &str, approved: bool) -> Result<Value, AgentError> {
-        let mut state = self.inner.lock().unwrap();
-        expire_state(&mut state);
-        if !approved {
-            let pending = state
-                .pending
-                .remove(action_id)
-                .ok_or_else(|| AgentError::new("approval_not_found", "电脑代理授权请求已失效。"))?;
-            return Ok(json!({
-                "approved": false,
-                "capability": pending.capability,
-            }));
-        }
-        let pending = state
-            .pending
-            .get(action_id)
-            .ok_or_else(|| AgentError::new("approval_not_found", "电脑代理授权请求已失效。"))?;
-        if pending.expires_at <= Instant::now() || !window_is_current(&pending.target) {
-            state.pending.remove(action_id);
-            return Err(AgentError::new(
-                "approval_expired",
-                "目标窗口或授权请求已失效，请重新确认。",
-            ));
         }
         let grant_id = new_id();
         let permit = self
@@ -438,48 +335,24 @@ impl ComputerControlService {
                     "Editor 编辑事务或另一项电脑代理操作正在执行。",
                 )
             })?;
-        let pending = state.pending.remove(action_id).unwrap();
         state.grant = Some(ComputerGrant {
             id: grant_id.clone(),
-            conversation_id: pending.approval.conversation_id,
-            target_window_id: pending.target_window_id,
-            target: pending.target,
-            allowed_actions: pending.allowed_actions,
-            step_ids: pending.step_ids,
-            includes_file_dialogs: pending.approval.includes_file_dialogs,
-            document_instance_key: pending.document_instance_key,
+            conversation_id: conversation_id.to_string(),
+            target_window_id: target_window_id.to_string(),
+            target,
+            allowed_actions: allowed_actions.into_iter().collect(),
+            step_ids: steps.into_iter().map(|step| step.id).collect(),
+            includes_file_dialogs,
+            document_instance_key,
             expires_at: Instant::now() + GRANT_LIFETIME,
             action_count: 0,
             cache_dir: None,
             _permit: permit,
         });
         Ok(json!({
-            "approved": true,
             "grantId": grant_id,
             "maxActions": MAX_GESTURES,
         }))
-    }
-
-    pub fn pending_approval(&self, action_id: &str) -> Option<ComputerApproval> {
-        let mut state = self.inner.lock().unwrap();
-        expire_state(&mut state);
-        state
-            .pending
-            .get(action_id)
-            .map(|pending| pending.approval.clone())
-    }
-
-    pub fn pending_approval_for_conversation(
-        &self,
-        conversation_id: &str,
-    ) -> Option<ComputerApproval> {
-        let mut state = self.inner.lock().unwrap();
-        expire_state(&mut state);
-        state
-            .pending
-            .values()
-            .find(|pending| pending.approval.conversation_id == conversation_id)
-            .map(|pending| pending.approval.clone())
     }
 
     pub fn has_active_grant(&self, conversation_id: &str) -> bool {
@@ -717,9 +590,6 @@ impl ComputerControlService {
 
     pub fn cancel_conversation(&self, conversation_id: &str) {
         let mut state = self.inner.lock().unwrap();
-        state
-            .pending
-            .retain(|_, pending| pending.approval.conversation_id != conversation_id);
         if let Some(id) = state
             .grant
             .as_ref()
@@ -838,7 +708,6 @@ fn select_window(
 
 fn expire_state(state: &mut ComputerControlState) {
     let now = Instant::now();
-    state.pending.retain(|_, pending| pending.expires_at > now);
     if state
         .grant
         .as_ref()
@@ -947,25 +816,6 @@ mod tests {
         }
     }
 
-    fn approval(action_id: &str) -> ComputerApproval {
-        ComputerApproval {
-            action_id: action_id.into(),
-            conversation_id: "conversation".into(),
-            goal: "调整控制点".into(),
-            reason: "没有可用 API".into(),
-            target_window_title: "Cubism Editor".into(),
-            steps: vec![ComputerOperationStep {
-                id: "move".into(),
-                title: "拖动控制点".into(),
-            }],
-            allowed_actions: vec![ComputerActionKind::Drag],
-            includes_file_dialogs: false,
-            impact: "将注入输入".into(),
-            cannot_undo: true,
-            expires_at: Utc::now().to_rfc3339(),
-        }
-    }
-
     fn install_fake_grant_and_frame(
         service: &ComputerControlService,
         coordinator: &OperationCoordinator,
@@ -1022,9 +872,6 @@ mod tests {
             UnsupportedCapability::ArtPath,
         ];
         assert_eq!(categories.len(), 10);
-        assert!(categories
-            .iter()
-            .all(|category| !category.label().is_empty()));
         assert!(!UnsupportedCapability::SaveExport.available_in_first_release());
         assert!(!UnsupportedCapability::TextureAtlas.available_in_first_release());
         assert!(!UnsupportedCapability::PsdOperations.available_in_first_release());
@@ -1080,45 +927,36 @@ mod tests {
     }
 
     #[test]
-    fn rejection_and_expiration_never_create_a_grant() {
-        let service = ComputerControlService::new(OperationCoordinator::default());
-        {
-            let mut state = service.inner.lock().unwrap();
-            state.pending.insert(
-                "reject".into(),
-                PendingOperation {
-                    approval: approval("reject"),
-                    target_window_id: "window".into(),
-                    target: fake_window(),
-                    capability: UnsupportedCapability::WarpControlPoints,
-                    allowed_actions: BTreeSet::from([ComputerActionKind::Drag]),
-                    step_ids: BTreeSet::from(["move".into()]),
-                    document_instance_key: Some("document".into()),
-                    expires_at: Instant::now() + Duration::from_secs(10),
-                },
-            );
-        }
-        assert_eq!(service.decide("reject", false).unwrap()["approved"], false);
-        assert!(service.decide("reject", true).is_err());
-        assert!(!service.has_active_grant("conversation"));
+    fn second_grant_is_rejected_and_expired_grants_are_reaped() {
+        let coordinator = OperationCoordinator::default();
+        let service = ComputerControlService::new(coordinator.clone());
+        install_fake_grant_and_frame(&service, &coordinator, fake_window());
+        let error = service
+            .grant(
+                "conversation",
+                "window",
+                UnsupportedCapability::WarpControlPoints,
+                "调整控制点".into(),
+                vec![ComputerOperationStep {
+                    id: "move".into(),
+                    title: "拖动控制点".into(),
+                }],
+                vec![ComputerActionKind::Drag],
+                false,
+                None,
+            )
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "computer_operation_active");
+        assert!(service.has_active_grant("conversation"));
 
         {
             let mut state = service.inner.lock().unwrap();
-            state.pending.insert(
-                "expired".into(),
-                PendingOperation {
-                    approval: approval("expired"),
-                    target_window_id: "window".into(),
-                    target: fake_window(),
-                    capability: UnsupportedCapability::WarpControlPoints,
-                    allowed_actions: BTreeSet::from([ComputerActionKind::Drag]),
-                    step_ids: BTreeSet::from(["move".into()]),
-                    document_instance_key: None,
-                    expires_at: Instant::now() - Duration::from_secs(1),
-                },
-            );
+            if let Some(grant) = state.grant.as_mut() {
+                grant.expires_at = Instant::now() - Duration::from_secs(1);
+            }
         }
-        assert!(service.pending_approval("expired").is_none());
+        assert!(!service.has_active_grant("conversation"));
     }
 
     #[test]

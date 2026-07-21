@@ -204,21 +204,6 @@ export interface PendingQuestionAction {
   options: string[];
 }
 
-export interface ComputerApprovalAction {
-  kind: "computer_approval";
-  actionId: string;
-  conversationId: string;
-  goal: string;
-  reason: string;
-  targetWindowTitle: string;
-  steps: Array<{ id: string; title: string }>;
-  allowedActions: ComputerActionKind[];
-  includesFileDialogs: boolean;
-  impact: string;
-  cannotUndo: boolean;
-  expiresAt: string;
-}
-
 export interface PlanApprovalAction {
   kind: "plan_approval";
   actionId: string;
@@ -226,13 +211,12 @@ export interface PlanApprovalAction {
   title: string;
 }
 
-export type PendingUserAction = PendingQuestionAction | ComputerApprovalAction | PlanApprovalAction;
+export type PendingUserAction = PendingQuestionAction | PlanApprovalAction;
 export type PlanDecision = "approve" | "revise" | "cancel";
 export type PlanDecisionResult = "execution_started" | "revision_started" | "cancelled";
 
 export type ComputerOperationStatus =
   | "idle"
-  | "awaiting_approval"
   | "authorized"
   | "running"
   | "completed"

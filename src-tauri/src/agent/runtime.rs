@@ -101,99 +101,6 @@ pub async fn continue_after_question(
     result.map(|_| ())
 }
 
-pub async fn continue_after_computer_approval(
-    app: AppHandle,
-    runtime: Arc<AgentRuntime>,
-    action_id: String,
-    conversation_id: String,
-    approved: bool,
-    cancel: Arc<AtomicBool>,
-) -> Result<(), AgentError> {
-    let result = async {
-        let approval = runtime
-            .computer_control
-            .pending_approval(&action_id)
-            .filter(|approval| approval.conversation_id == conversation_id)
-            .ok_or_else(|| AgentError::new("approval_not_found", "电脑代理授权请求已失效。"))?;
-        let decision = runtime.computer_control.decide(&action_id, approved)?;
-        let continuation = runtime
-            .pending_continuations
-            .lock()
-            .await
-            .remove(&action_id)
-            .ok_or_else(|| AgentError::new("approval_not_found", "授权上下文已失效。"))?;
-        let tool_call_id = continuation.tool_call_id.clone();
-        let state = continuation.resume(decision);
-        let mode = state.mode;
-        runtime.store.append_tool_trace(
-            &approval.conversation_id,
-            &tool_call_id,
-            "request_computer_operation",
-            if approved {
-                r#"{"decision":"approved"}"#
-            } else {
-                r#"{"decision":"rejected"}"#
-            },
-            if approved {
-                r#"{"grantCreated":true}"#
-            } else {
-                r#"{"grantCreated":false}"#
-            },
-            if approved { "approved" } else { "rejected" },
-        )?;
-        runtime.store.append_message(
-            &approval.conversation_id,
-            "user",
-            if approved {
-                "已授权本次电脑代理操作。"
-            } else {
-                "已拒绝本次电脑代理操作。"
-            },
-            None,
-            None,
-        )?;
-        let _ = app.emit(
-            "agent://computer-operation",
-            json!({
-                "conversationId": conversation_id,
-                "status": if approved {
-                    ComputerOperationStatus::Authorized
-                } else {
-                    ComputerOperationStatus::Cancelled
-                }
-            }),
-        );
-        emit_conversations_changed(&app);
-
-        let editor = app.state::<EditorService>();
-        run_turn_inner(
-            &app,
-            &runtime,
-            editor.inner(),
-            &conversation_id,
-            Some(state),
-            mode,
-            None,
-            cancel.clone(),
-        )
-        .await
-    }
-    .await;
-
-    if approved && result.is_err() && !cancel.load(Ordering::SeqCst) {
-        let _ = app.emit(
-            "agent://computer-operation",
-            json!({
-                "conversationId": conversation_id,
-                "status": ComputerOperationStatus::Failed,
-            }),
-        );
-    }
-    let result = finalize_turn(&app, &runtime, &conversation_id, &cancel, result).await;
-    emit_finished(&app, &conversation_id, &result);
-    result.map(|_| ())
-}
-
 enum TurnEnd {
     Finished,
     WaitingUser,
@@ -208,11 +115,7 @@ async fn finalize_turn(
 ) -> Result<TurnEnd, AgentError> {
     let cancelled = runtime.finish_turn(conversation_id, cancel).await;
     if cancelled {
-        let had_computer_operation = runtime.computer_control.has_active_grant(conversation_id)
-            || runtime
-                .computer_control
-                .pending_approval_for_conversation(conversation_id)
-                .is_some();
+        let had_computer_operation = runtime.computer_control.has_active_grant(conversation_id);
         runtime.clear_pending_user_action(conversation_id).await?;
         if had_computer_operation {
             let _ = app.emit(

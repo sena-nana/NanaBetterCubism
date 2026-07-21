@@ -31,7 +31,6 @@ const bridge = vi.hoisted(() => ({
   answerQuestion: vi.fn(async () => undefined),
   deleteConversation: vi.fn(async () => undefined),
   cancelTurn: vi.fn(async () => ({ state: "idle" as const })),
-  decideComputerOperation: vi.fn(async () => undefined),
   decidePlan: vi.fn(async () => "execution_started" as const),
   getLlmConfig: vi.fn(async () => ({ baseUrl: null, model: "test-model", hasApiKey: true })),
   getMessages: vi.fn(),
@@ -89,7 +88,6 @@ beforeEach(() => {
   clearConversationTurnPhase("b");
   bridge.answerQuestion.mockClear();
   bridge.cancelTurn.mockClear();
-  bridge.decideComputerOperation.mockClear();
   bridge.decidePlan.mockReset().mockResolvedValue("execution_started");
   bridge.getMessages.mockReset().mockResolvedValue([]);
   bridge.getPendingUserAction.mockReset().mockResolvedValue(null);
@@ -186,33 +184,6 @@ describe("对话工作区", () => {
     expect(view.emitted().answer).toEqual([["保存到项目记忆"]]);
   });
 
-  it("电脑代理授权只能通过独立的批准或拒绝操作", async () => {
-    const view = render(ConversationComposer, {
-      props: {
-        modelValue: "",
-        pendingAction: {
-          kind: "computer_approval",
-          actionId: "approval-1",
-          conversationId: "a",
-          goal: "调整 Warp 控制点",
-          reason: "Cubism 没有可用于此操作的 API，只能由 Agent 代理操作 Cubism 窗口。",
-          targetWindowTitle: "Cubism Editor",
-          steps: [{ id: "move", title: "拖动控制点" }],
-          allowedActions: ["drag"],
-          includesFileDialogs: false,
-          impact: "Agent 将向 Cubism 注入鼠标输入。",
-          cannotUndo: true,
-          expiresAt: "2026-07-15T00:05:00Z",
-        },
-      },
-    });
-
-    expect(screen.queryByPlaceholderText("输入回答")).toBeNull();
-    await fireEvent.click(screen.getByRole("button", { name: "拒绝" }));
-    await fireEvent.click(screen.getByRole("button", { name: "授权本次操作" }));
-    expect(view.emitted().decide).toEqual([[false], [true]]);
-  });
-
   it("计划确认支持修改、取消和执行，Enter 只提交非空修改", async () => {
     const view = render(ConversationComposer, {
       props: {
@@ -300,46 +271,6 @@ describe("对话工作区", () => {
     expect(bridge.decidePlan).toHaveBeenLastCalledWith("plan-a", "approve", undefined);
     expect(getConversationRuntime("a").composerMode).toBe("default");
     expect(getConversationRuntime("a").phase).toBe("running");
-  });
-
-  it("授权事件绑定当前会话并调用独立授权命令", async () => {
-    bridge.getMessages.mockResolvedValue([]);
-    const router = createRouter({
-      history: createMemoryHistory(),
-      routes: [{ path: "/chats/:id", component: ChatPage }],
-    });
-    await router.push("/chats/a");
-    await router.isReady();
-    render({ template: "<RouterView />" }, { global: { plugins: [router] } });
-    await vi.waitFor(() => expect(listeners.userAction).not.toBeNull());
-
-    const approval = {
-      kind: "computer_approval" as const,
-      actionId: "approval-a",
-      conversationId: "a",
-      goal: "调整 Warp 控制点",
-      reason: "Cubism 没有可用于此操作的 API，只能由 Agent 代理操作 Cubism 窗口。",
-      targetWindowTitle: "Cubism Editor",
-      steps: [{ id: "move", title: "拖动控制点" }],
-      allowedActions: ["drag" as const],
-      includesFileDialogs: false,
-      impact: "Agent 将向 Cubism 注入鼠标输入。",
-      cannotUndo: true,
-      expiresAt: "2026-07-15T00:05:00Z",
-    };
-    listeners.userAction?.({
-      conversationId: "b",
-      action: { ...approval, actionId: "approval-b", conversationId: "b" },
-    });
-    expect(screen.queryByRole("button", { name: "授权本次操作" })).toBeNull();
-
-    await router.push("/chats/b");
-    expect(await screen.findByRole("button", { name: "授权本次操作" })).toBeTruthy();
-    await router.push("/chats/a");
-
-    listeners.userAction?.({ conversationId: "a", action: approval });
-    await fireEvent.click(await screen.findByRole("button", { name: "授权本次操作" }));
-    expect(bridge.decideComputerOperation).toHaveBeenCalledWith("approval-a", true);
   });
 
   it("快速切换会话时忽略旧会话迟到的加载结果", async () => {

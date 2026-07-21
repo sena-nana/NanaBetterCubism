@@ -7,7 +7,6 @@ import type {
   AgentTurnMode,
   ChatImageDraft,
   ChatPsdDocument,
-  ComputerActionKind,
   ComputerOperationStatus,
   PendingUserAction,
 } from "../types";
@@ -62,7 +61,6 @@ const emit = defineEmits<{
   send: [];
   cancel: [];
   answer: [answer?: string];
-  decide: [approved: boolean];
   decidePlan: [decision: "approve" | "revise" | "cancel", revision?: string];
   pickImages: [];
   pickPsd: [];
@@ -137,25 +135,12 @@ function resize(value: TextareaRef) {
 const pendingQuestion = computed(() =>
   props.pendingAction?.kind === "question" ? props.pendingAction : null,
 );
-const computerApproval = computed(() =>
-  props.pendingAction?.kind === "computer_approval" ? props.pendingAction : null,
-);
 const planApproval = computed(() =>
   props.pendingAction?.kind === "plan_approval" ? props.pendingAction : null,
 );
 
-const actionLabels: Record<ComputerActionKind, string> = {
-  click: "点击",
-  double_click: "双击",
-  drag: "拖动",
-  scroll: "滚动",
-  key: "快捷键",
-  type_text: "文本输入",
-};
-
 const statusLabels: Record<ComputerOperationStatus, string> = {
   idle: "",
-  awaiting_approval: "等待授权",
   authorized: "已授权",
   running: "正在操作 Cubism",
   completed: "操作完成",
@@ -164,13 +149,6 @@ const statusLabels: Record<ComputerOperationStatus, string> = {
   failed: "操作失败",
   unknown: "结果未知",
 };
-
-function expiryLabel(value: string) {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? "授权即将过期"
-    : `授权于 ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} 过期`;
-}
 
 watch(
   () => [props.modelValue, props.askAnswer, props.planRevision, props.pendingAction?.actionId],
@@ -264,46 +242,6 @@ function onPlanRevisionKeydown(event: KeyboardEvent) {
           <Button size="sm" :agent-id="`${agentIdPrefix}.cancel`" @click="emit('cancel')">取消</Button>
           <Button variant="primary" size="sm" :disabled="!askAnswer.trim()" :agent-id="`${agentIdPrefix}.ask-submit`" @click="emit('answer')">回答</Button>
         </div>
-      </div>
-    </div>
-
-    <div
-      v-else-if="computerApproval"
-      class="conversation-composer__approval"
-      :data-agent-id="`${agentIdPrefix}.computer-approval`"
-    >
-      <div class="conversation-composer__approval-heading">
-        <strong>授权 Agent 操作 Cubism</strong>
-        <span>{{ computerApproval.targetWindowTitle }}</span>
-      </div>
-      <p>{{ computerApproval.reason }}</p>
-      <p class="conversation-composer__approval-goal">{{ computerApproval.goal }}</p>
-      <p>{{ computerApproval.impact }}</p>
-      <ol>
-        <li v-for="step in computerApproval.steps" :key="step.id">{{ step.title }}</li>
-      </ol>
-      <div class="conversation-composer__approval-meta">
-        <span>{{ computerApproval.allowedActions.map((kind) => actionLabels[kind]).join("、") }}</span>
-        <span>{{ computerApproval.includesFileDialogs ? "包含 Cubism 文件对话框" : "不包含文件对话框" }}</span>
-        <span>{{ expiryLabel(computerApproval.expiresAt) }}</span>
-        <span v-if="computerApproval.cannotUndo">取消只会停止后续输入，无法保证自动撤销</span>
-      </div>
-      <div class="conversation-composer__approval-actions">
-        <Button
-          size="sm"
-          :agent-id="`${agentIdPrefix}.computer-approval.reject`"
-          @click="emit('decide', false)"
-        >
-          拒绝
-        </Button>
-        <Button
-          variant="primary"
-          size="sm"
-          :agent-id="`${agentIdPrefix}.computer-approval.approve`"
-          @click="emit('decide', true)"
-        >
-          授权本次操作
-        </Button>
       </div>
     </div>
 
@@ -508,7 +446,6 @@ function onPlanRevisionKeydown(event: KeyboardEvent) {
 .conversation-composer__mode,
 .conversation-composer__answer-actions,
 .conversation-composer__options,
-.conversation-composer__approval-actions,
 .conversation-composer__operation-status { display: flex; align-items: center; gap: 6px; }
 .conversation-composer__toolbar { min-height: 28px; padding: 0 1px 6px; overflow-x: auto; }
 .conversation-composer__images { flex-wrap: wrap; padding: 5px 1px 1px; }
@@ -538,16 +475,6 @@ function onPlanRevisionKeydown(event: KeyboardEvent) {
 .conversation-composer__answer { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 7px; }
 .conversation-composer__answer-actions { padding-bottom: 1px; }
 .conversation-composer__error { margin: 6px 3px 0; color: var(--err); font-size: 12px; }
-.conversation-composer__approval { padding: 3px; }
-.conversation-composer__approval-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
-.conversation-composer__approval-heading strong { font-size: 13px; }
-.conversation-composer__approval-heading span,
-.conversation-composer__approval-meta { color: var(--text-faint); font-size: 11px; }
-.conversation-composer__approval p { margin: 7px 0 0; font-size: 12px; line-height: 1.45; }
-.conversation-composer__approval-goal { color: var(--text); font-weight: 600; }
-.conversation-composer__approval ol { margin: 6px 0; padding-left: 20px; font-size: 12px; line-height: 1.5; }
-.conversation-composer__approval-meta { display: flex; flex-wrap: wrap; gap: 4px 12px; }
-.conversation-composer__approval-actions { justify-content: flex-end; margin-top: 9px; }
 .conversation-composer__operation-status { margin: 0 2px 6px; color: var(--text-muted); font-size: 11px; }
 .conversation-composer__status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 
