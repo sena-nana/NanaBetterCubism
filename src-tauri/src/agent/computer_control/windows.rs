@@ -14,7 +14,8 @@ use windows::Win32::Graphics::Gdi::{
     DIB_RGB_COLORS, HGDIOBJ, SRCCOPY,
 };
 use windows::Win32::System::Threading::{
-    GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    AttachThreadInput, GetCurrentThreadId, GetProcessTimes, OpenProcess,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -27,9 +28,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_LEFT, VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClientRect, GetForegroundWindow, GetSystemMetrics, GetWindowTextLengthW,
-    GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible, SetForegroundWindow,
-    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    BringWindowToTop, EnumWindows, GetClientRect, GetForegroundWindow, GetSystemMetrics,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
+    IsWindowVisible, SetForegroundWindow, ShowWindow, SystemParametersInfoW, SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETFOREGROUNDLOCKTIMEOUT,
+    SPI_SETFOREGROUNDLOCKTIMEOUT, SW_RESTORE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
 };
 
 struct EnumState {
@@ -246,17 +249,12 @@ pub(super) fn perform_action(
             "Cubism 窗口位置或大小已经变化，请重新获取画面。",
         ));
     }
-    unsafe {
-        if GetForegroundWindow() != hwnd {
-            let _ = SetForegroundWindow(hwnd);
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        if GetForegroundWindow() != hwnd {
-            return Err(AgentError::new(
-                "focus_required",
-                "无法确认 Cubism 窗口已位于前台，请切换到该窗口后重试。",
-            ));
-        }
+    ensure_foreground(hwnd)?;
+    if geometry(hwnd)? != expected_geometry {
+        return Err(AgentError::new(
+            "stale_frame",
+            "Cubism 窗口位置或大小已经变化，请重新获取画面。",
+        ));
     }
     if last_input_tick()? != expected_last_input {
         return Err(AgentError::new(
@@ -287,6 +285,68 @@ pub(super) fn perform_action(
         &action_inputs(action, expected_geometry)?,
         &SystemInputBackend,
     )
+}
+
+fn ensure_foreground(hwnd: HWND) -> Result<(), AgentError> {
+    unsafe {
+        if GetForegroundWindow() == hwnd {
+            return Ok(());
+        }
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+        if activate_window(hwnd) {
+            return Ok(());
+        }
+
+        let flags = SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0);
+        let mut timeout = 0u32;
+        if SystemParametersInfoW(
+            SPI_GETFOREGROUNDLOCKTIMEOUT,
+            0,
+            Some((&mut timeout as *mut u32).cast()),
+            flags,
+        )
+        .is_ok()
+        {
+            let mut zero = 0u32;
+            let _ = SystemParametersInfoW(
+                SPI_SETFOREGROUNDLOCKTIMEOUT,
+                0,
+                Some((&mut zero as *mut u32).cast()),
+                flags,
+            );
+            let ok = activate_window(hwnd);
+            let _ = SystemParametersInfoW(
+                SPI_SETFOREGROUNDLOCKTIMEOUT,
+                0,
+                Some((&mut timeout as *mut u32).cast()),
+                flags,
+            );
+            if ok {
+                return Ok(());
+            }
+        }
+
+        Err(AgentError::new(
+            "focus_required",
+            "无法确认 Cubism 窗口已位于前台，请切换到该窗口后重试。",
+        ))
+    }
+}
+
+unsafe fn activate_window(hwnd: HWND) -> bool {
+    let current = GetCurrentThreadId();
+    let foreground = GetWindowThreadProcessId(GetForegroundWindow(), None);
+    let attached =
+        foreground != 0 && foreground != current && AttachThreadInput(current, foreground, true).as_bool();
+    let _ = BringWindowToTop(hwnd);
+    let _ = SetForegroundWindow(hwnd);
+    if attached {
+        let _ = AttachThreadInput(current, foreground, false);
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    GetForegroundWindow() == hwnd
 }
 
 fn send_drag_with_backend(
