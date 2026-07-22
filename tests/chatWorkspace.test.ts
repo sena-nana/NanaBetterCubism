@@ -156,20 +156,24 @@ describe("对话工作区", () => {
     const Host = defineComponent({
       components: { ConversationComposer },
       setup() {
-        return { draft: ref("执行操作"), answer: ref("") };
+        return {
+          draft: ref("执行操作"),
+          answer: ref(""),
+          pendingAction: {
+            kind: "question",
+            actionId: "ask-1",
+            conversationId: "a",
+            question: "选择处理方式\n\n| 方式 | 影响 |\n| --- | --- |\n| 继续 | 保留当前进度 |",
+            options: ["继续"],
+          },
+        };
       },
       template: `
         <ConversationComposer
           v-model="draft"
           v-model:ask-answer="answer"
           :can-send="true"
-          :pending-action="{
-            kind: 'question',
-            actionId: 'ask-1',
-            conversationId: 'a',
-            question: '选择处理方式',
-            options: ['继续']
-          }"
+          :pending-action="pendingAction"
           @send="$emit('sent')"
           @answer="(value) => $emit('answered', value)"
         />
@@ -177,6 +181,7 @@ describe("对话工作区", () => {
     });
     const view = render(Host);
 
+    expect(view.container.querySelector("[data-agent-id='agent.chat.ask'] table")).toBeTruthy();
     const answerInput = screen.getByPlaceholderText("输入回答");
     await fireEvent.keyDown(answerInput, { key: "Enter", shiftKey: true });
     expect(view.emitted().answered).toBeUndefined();

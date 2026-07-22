@@ -124,7 +124,11 @@ onMounted(() => void scrollToBottom(true));
                 </div>
               </template>
             </div>
-            <p v-if="entry.message.content" class="timeline-entry__user-body">{{ entry.message.content }}</p>
+            <MarkdownBlock
+              v-if="entry.message.content"
+              :content="entry.message.content"
+              compact
+            />
           </div>
           <MarkdownBlock v-else-if="entry.message.role === 'assistant'" :content="entry.message.content" />
           <p v-else class="timeline-entry__system-body">{{ entry.message.content }}</p>
@@ -198,7 +202,7 @@ onMounted(() => void scrollToBottom(true));
 .timeline-entry--user { align-self: flex-end; max-width: min(680px, 78%); padding: 9px 12px; border-radius: 12px; background: var(--bg-active); }
 .timeline-entry--assistant { align-self: stretch; padding-inline: 2px; }
 .timeline-entry--tool, .timeline-entry--system { align-self: flex-start; max-width: min(680px, 92%); }
-.timeline-entry__user-body, .timeline-entry__system-body { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.6; }
+.timeline-entry__system-body { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; line-height: 1.6; }
 .timeline-entry__user { display: flex; flex-direction: column; gap: 7px; }
 .timeline-entry__images { display: grid; grid-template-columns: repeat(auto-fit, minmax(72px, 112px)); gap: 5px; }
 .timeline-entry__image { width: 100%; aspect-ratio: 1; padding: 0; overflow: hidden; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--bg-subtle); cursor: zoom-in; }
