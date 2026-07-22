@@ -21,6 +21,44 @@ pub struct ChatPsdDocument {
     pub available: bool,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PsdAttachmentSummary {
+    pub id: String,
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub color_mode: String,
+    pub layer_count: usize,
+    pub available: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PsdAttachmentManifest {
+    pub count: usize,
+    pub documents: Vec<PsdAttachmentSummary>,
+}
+
+pub(crate) fn attachment_manifest(documents: &[ChatPsdDocument]) -> PsdAttachmentManifest {
+    let documents = documents
+        .iter()
+        .map(|document| PsdAttachmentSummary {
+            id: document.id.clone(),
+            name: document.name.clone(),
+            width: document.width,
+            height: document.height,
+            color_mode: document.color_mode.clone(),
+            layer_count: document.layer_count,
+            available: document.available,
+        })
+        .collect::<Vec<_>>();
+    PsdAttachmentManifest {
+        count: documents.len(),
+        documents,
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PsdBounds {
@@ -370,5 +408,30 @@ fn color_mode_name(code: u16) -> String {
 
 fn psd_io_error(error: std::io::Error) -> AgentError {
     AgentError::new("psd_io_error", error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attachment_manifest_exposes_only_safe_conversation_metadata() {
+        let manifest = attachment_manifest(&[ChatPsdDocument {
+            id: "psd-1".into(),
+            name: "character.psd".into(),
+            path: "C:\\managed\\private\\psd-1.psd".into(),
+            width: 2048,
+            height: 4096,
+            color_mode: "rgb".into(),
+            layer_count: 42,
+            available: true,
+        }]);
+        let value = serde_json::to_value(&manifest).unwrap();
+
+        assert_eq!(value["count"], 1);
+        assert_eq!(value["documents"][0]["id"], "psd-1");
+        assert_eq!(value["documents"][0]["layerCount"], 42);
+        assert!(value["documents"][0].get("path").is_none());
+    }
 }
 

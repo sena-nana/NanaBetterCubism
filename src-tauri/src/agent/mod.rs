@@ -109,6 +109,17 @@ pub struct AgentRuntime {
     image_capability: AtomicU8,
 }
 
+impl AgentRuntime {
+    pub(crate) fn psd_attachment_manifest(
+        &self,
+        conversation_id: &str,
+    ) -> Result<psd::PsdAttachmentManifest, AgentError> {
+        self.store.ensure_active_conversation(conversation_id)?;
+        let documents = self.store.list_psd_documents(conversation_id)?;
+        Ok(psd::attachment_manifest(&documents))
+    }
+}
+
 pub struct PendingContinuation {
     pub conversation_id: String,
     pub tool_call_id: String,
