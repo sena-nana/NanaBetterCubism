@@ -3,6 +3,7 @@ use crate::agent::llm::{
     chat_completions_stream, content_to_text, image_file_to_data_url, ToolCallPayload,
 };
 use crate::agent::plan::{PendingPlanApproval, PlanApprovalAction};
+use crate::agent::psd::PsdAttachmentManifest;
 use crate::agent::skills::{self, READ_SKILL_TOOL_NAME};
 use crate::agent::tools::{
     advertised_tool_names, emit_tool, execute_tool, tool_definitions, ToolExecutionContext,
@@ -19,6 +20,8 @@ use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
+
+const PSD_CONTEXT_PREFIX: &str = "Current conversation PSD attachments. This is a compact, authoritative snapshot, not a full layer tree. Use the document id with PSD inspection tools. After loading psd-inspection, refresh with list_attached_psds before claiming that no PSD is attached or after user interaction. This local context does not imply Cubism Editor PSD operations. JSON:\n";
 
 pub async fn run_turn(
     app: AppHandle,
@@ -229,6 +232,7 @@ async fn run_turn_inner(
         }
         AgentTurnState::new(seeded, mode)
     };
+    refresh_conversation_psd_context(runtime, conversation_id, &mut state.messages)?;
 
     loop {
         if cancel.load(Ordering::SeqCst) {
@@ -533,6 +537,47 @@ async fn run_turn_inner(
     }
 }
 
+fn refresh_conversation_psd_context(
+    runtime: &AgentRuntime,
+    conversation_id: &str,
+    messages: &mut Vec<Value>,
+) -> Result<(), AgentError> {
+    replace_psd_context(
+        messages,
+        &runtime.psd_attachment_manifest(conversation_id)?,
+    )
+}
+
+fn replace_psd_context(
+    messages: &mut Vec<Value>,
+    manifest: &PsdAttachmentManifest,
+) -> Result<(), AgentError> {
+    messages.retain(|message| !is_psd_context(message));
+    let insert_at = messages
+        .iter()
+        .take_while(|message| message.get("role").and_then(Value::as_str) == Some("system"))
+        .count();
+    messages.insert(
+        insert_at,
+        json!({
+            "role": "system",
+            "content": format!(
+                "{PSD_CONTEXT_PREFIX}{}",
+                serde_json::to_string(manifest)?
+            ),
+        }),
+    );
+    Ok(())
+}
+
+fn is_psd_context(message: &Value) -> bool {
+    message.get("role").and_then(Value::as_str) == Some("system")
+        && message
+            .get("content")
+            .and_then(Value::as_str)
+            .is_some_and(|content| content.starts_with(PSD_CONTEXT_PREFIX))
+}
+
 fn message_content(message: &crate::agent::store::ChatMessage) -> Value {
     if message.attachments.is_empty() {
         return Value::String(message.content.clone());
@@ -661,6 +706,7 @@ fn load_skills(
 mod tests {
     use super::*;
     use crate::agent::llm::ToolFunctionPayload;
+    use crate::agent::psd::attachment_manifest;
 
     fn call(id: &str, name: &str, arguments: &str) -> ToolCallPayload {
         ToolCallPayload {
@@ -671,6 +717,15 @@ mod tests {
                 arguments: arguments.into(),
             },
         }
+    }
+
+    fn psd_context_payload(messages: &[Value]) -> Value {
+        let content = messages
+            .iter()
+            .find(|message| is_psd_context(message))
+            .and_then(|message| message["content"].as_str())
+            .unwrap();
+        serde_json::from_str(content.strip_prefix(PSD_CONTEXT_PREFIX).unwrap()).unwrap()
     }
 
     #[test]
@@ -775,6 +830,81 @@ mod tests {
         assert_eq!(value["ok"], false);
         assert_eq!(value["error"]["code"], "stale_preview");
         assert!(value["error"]["message"].as_str().is_some());
+    }
+
+    #[test]
+    fn psd_context_is_present_when_empty_and_replaced_when_documents_change() {
+        let mut messages = vec![
+            json!({ "role": "system", "content": "base" }),
+            json!({ "role": "user", "content": "inspect" }),
+        ];
+        replace_psd_context(&mut messages, &attachment_manifest(&[])).unwrap();
+        assert_eq!(psd_context_payload(&messages)["count"], 0);
+
+        let documents = [crate::agent::psd::ChatPsdDocument {
+            id: "psd-1".into(),
+            name: "character.psd".into(),
+            path: "C:\\managed\\private.psd".into(),
+            width: 1024,
+            height: 2048,
+            color_mode: "rgb".into(),
+            layer_count: 24,
+            available: true,
+        }];
+        replace_psd_context(&mut messages, &attachment_manifest(&documents)).unwrap();
+
+        assert_eq!(messages.iter().filter(|message| is_psd_context(message)).count(), 1);
+        let payload = psd_context_payload(&messages);
+        assert_eq!(payload["count"], 1);
+        assert_eq!(payload["documents"][0]["id"], "psd-1");
+        assert!(payload["documents"][0].get("path").is_none());
+        assert_eq!(messages[0]["content"], "base");
+        assert!(is_psd_context(&messages[1]));
+        assert_eq!(messages[2]["role"], "user");
+    }
+
+    #[test]
+    fn resumed_turn_refreshes_psd_context_from_conversation_state() {
+        let runtime = AgentRuntime::default();
+        runtime.store.open(":memory:".into()).unwrap();
+        let conversation = runtime.store.create_conversation(None, None).unwrap();
+        let mut state = AgentTurnState::new(
+            vec![json!({ "role": "system", "content": "base" })],
+            AgentTurnMode::Default,
+        );
+        refresh_conversation_psd_context(&runtime, &conversation.id, &mut state.messages).unwrap();
+        assert_eq!(psd_context_payload(&state.messages)["count"], 0);
+
+        runtime
+            .store
+            .upsert_psd_document(
+                &conversation.id,
+                &crate::agent::psd::ChatPsdDocument {
+                    id: "new-psd".into(),
+                    name: "new.psd".into(),
+                    path: "missing.psd".into(),
+                    width: 640,
+                    height: 480,
+                    color_mode: "rgb".into(),
+                    layer_count: 8,
+                    available: true,
+                },
+            )
+            .unwrap();
+        let mut resumed = crate::agent::PendingContinuation {
+            conversation_id: conversation.id.clone(),
+            tool_call_id: "ask-call".into(),
+            state,
+        }
+        .resume(Value::String("attached".into()));
+        refresh_conversation_psd_context(&runtime, &conversation.id, &mut resumed.messages)
+            .unwrap();
+
+        let payload = psd_context_payload(&resumed.messages);
+        assert_eq!(payload["count"], 1);
+        assert_eq!(payload["documents"][0]["id"], "new-psd");
+        assert_eq!(payload["documents"][0]["available"], false);
+        assert_eq!(resumed.messages.last().unwrap()["tool_call_id"], "ask-call");
     }
 
     #[test]

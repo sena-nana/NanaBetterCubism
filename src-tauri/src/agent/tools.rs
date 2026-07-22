@@ -111,6 +111,16 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
             }),
         ),
         read_tool(
+            "list_attached_psds",
+            "列出会话 PSD",
+            "列出当前对话已附加的 PSD 文档摘要，返回文档 ID、名称、尺寸、色彩模式、图层数与可用状态，不返回本地路径。",
+            json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        ),
+        read_tool(
             "read_psd_structure",
             "读取 PSD 结构",
             "读取用户已附加的 PSD 文件的图层树、蒙版、混合模式、不透明度、可见性与边界，返回 JSON，不含像素。",
@@ -905,6 +915,10 @@ async fn execute_tool_inner(
                 image_path: Some(captured.path),
             })
         }
+        "list_attached_psds" => {
+            let manifest = runtime.psd_attachment_manifest(conversation_id)?;
+            Ok(tool_result(serde_json::to_string_pretty(&manifest)?))
+        }
         "read_psd_structure" => {
             let psd_id = required_string(&args, "psdId")?;
             let structure = runtime.psd.read_structure(psd_id, conversation_id)?;
@@ -1474,11 +1488,13 @@ mod tests {
         let active = BTreeSet::from(["psd-inspection".into()]);
         let with_images = tool_definitions(&active, AgentTurnMode::Default, true).unwrap();
         let with_names = names(&with_images);
+        assert!(with_names.contains("list_attached_psds"));
         assert!(with_names.contains("read_psd_structure"));
         assert!(with_names.contains("read_psd_layer_image"));
 
         let without_images = tool_definitions(&active, AgentTurnMode::Default, false).unwrap();
         let without_names = names(&without_images);
+        assert!(without_names.contains("list_attached_psds"));
         assert!(without_names.contains("read_psd_structure"));
         assert!(
             !without_names.contains("read_psd_layer_image"),
@@ -1488,16 +1504,28 @@ mod tests {
         let inactive = BTreeSet::<String>::new();
         let empty = tool_definitions(&inactive, AgentTurnMode::Default, true).unwrap();
         let empty_names = names(&empty);
+        assert!(!empty_names.contains("list_attached_psds"));
         assert!(!empty_names.contains("read_psd_structure"));
         assert!(!empty_names.contains("read_psd_layer_image"));
 
-        for name in ["read_psd_structure", "read_psd_layer_image"] {
+        for name in [
+            "list_attached_psds",
+            "read_psd_structure",
+            "read_psd_layer_image",
+        ] {
             assert_eq!(
                 tool_access(name),
                 Some(ToolAccess::ReadOnly),
                 "{name} must be read-only so it stays available in conversation/plan modes"
             );
         }
+        let list = with_images
+            .iter()
+            .find(|definition| tool_name(definition) == Some("list_attached_psds"))
+            .unwrap();
+        let list_parameters = &list["function"]["parameters"];
+        assert_eq!(list_parameters["properties"], json!({}));
+        assert_eq!(list_parameters["additionalProperties"], false);
         let structure = with_images
             .iter()
             .find(|definition| tool_name(definition) == Some("read_psd_structure"))
@@ -1512,6 +1540,65 @@ mod tests {
         let layer_parameters = &layer["function"]["parameters"];
         assert_eq!(layer_parameters["required"], json!(["psdId", "layerId"]));
         assert_eq!(layer_parameters["additionalProperties"], false);
+    }
+
+    #[test]
+    fn attached_psd_list_is_conversation_scoped_and_reports_current_availability() {
+        let runtime = AgentRuntime::default();
+        runtime.store.open(":memory:".into()).unwrap();
+        let first = runtime.store.create_conversation(None, None).unwrap();
+        let second = runtime.store.create_conversation(None, None).unwrap();
+        let dir = std::env::temp_dir().join(format!("nbc-psd-list-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let available_path = dir.join("available.psd");
+        std::fs::write(&available_path, b"psd").unwrap();
+
+        runtime
+            .store
+            .upsert_psd_document(
+                &first.id,
+                &crate::agent::psd::ChatPsdDocument {
+                    id: "first-psd".into(),
+                    name: "first.psd".into(),
+                    path: available_path.to_string_lossy().into_owned(),
+                    width: 100,
+                    height: 200,
+                    color_mode: "rgb".into(),
+                    layer_count: 3,
+                    available: true,
+                },
+            )
+            .unwrap();
+        runtime
+            .store
+            .upsert_psd_document(
+                &second.id,
+                &crate::agent::psd::ChatPsdDocument {
+                    id: "second-psd".into(),
+                    name: "second.psd".into(),
+                    path: dir.join("missing.psd").to_string_lossy().into_owned(),
+                    width: 300,
+                    height: 400,
+                    color_mode: "grayscale".into(),
+                    layer_count: 5,
+                    available: true,
+                },
+            )
+            .unwrap();
+
+        let first_manifest = runtime.psd_attachment_manifest(&first.id).unwrap();
+        assert_eq!(first_manifest.count, 1);
+        assert_eq!(first_manifest.documents[0].id, "first-psd");
+        assert!(first_manifest.documents[0].available);
+        let second_manifest = runtime.psd_attachment_manifest(&second.id).unwrap();
+        assert_eq!(second_manifest.documents[0].id, "second-psd");
+        assert!(!second_manifest.documents[0].available);
+        assert!(matches!(
+            runtime.psd_attachment_manifest("missing-conversation"),
+            Err(error) if error.code == "not_found"
+        ));
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

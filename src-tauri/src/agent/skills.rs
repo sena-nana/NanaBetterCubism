@@ -97,7 +97,11 @@ const COMPUTER_OPERATION_TOOLS: &[&str] = &[
     "finish_computer_operation",
 ];
 
-const PSD_INSPECTION_TOOLS: &[&str] = &["read_psd_structure", "read_psd_layer_image"];
+const PSD_INSPECTION_TOOLS: &[&str] = &[
+    "list_attached_psds",
+    "read_psd_structure",
+    "read_psd_layer_image",
+];
 
 struct SkillSource {
     content: &'static str,
