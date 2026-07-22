@@ -1,4 +1,3 @@
-mod capture;
 pub(crate) mod commands;
 pub(crate) mod computer_control;
 mod compaction;

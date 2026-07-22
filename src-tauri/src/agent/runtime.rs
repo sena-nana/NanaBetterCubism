@@ -301,6 +301,7 @@ async fn run_turn_inner(
         AgentTurnState::new(seeded, mode)
     };
     refresh_conversation_psd_context(runtime, conversation_id, &mut state.messages)?;
+    let mut tool_sequence_corrections = 0_u8;
 
     loop {
         if cancel.load(Ordering::SeqCst) {
@@ -365,13 +366,6 @@ async fn run_turn_inner(
                 Err(error) => return Err(error),
             }
         };
-        let text = content_to_text(&assistant.content);
-        if !text.is_empty() {
-            let _ = runtime
-                .store
-                .append_message(conversation_id, "assistant", &text, None, None);
-        }
-
         let tool_calls = assistant.tool_calls.clone().unwrap_or_default();
         if ask_draft_streamed
             && !tool_calls
@@ -382,6 +376,12 @@ async fn run_turn_inner(
             ask_draft_streamed = false;
         }
         if tool_calls.is_empty() {
+            let text = content_to_text(&assistant.content);
+            if !text.is_empty() {
+                let _ = runtime
+                    .store
+                    .append_message(conversation_id, "assistant", &text, None, None);
+            }
             if state.mode == AgentTurnMode::Plan {
                 return Err(AgentError::new(
                     "plan_not_submitted",
@@ -400,22 +400,37 @@ async fn run_turn_inner(
             return Ok(TurnEnd::Finished);
         }
 
-        let includes_skill_load = validate_tool_call_batch(&tool_calls, &advertised)?;
+        let validation = validate_tool_call_batch(&tool_calls, &advertised)?;
+        if validation.requires_sequence_retry {
+            if ask_draft_streamed {
+                emit_ask_draft(app, conversation_id, None);
+            }
+            let error = tool_sequence_required_error();
+            if tool_sequence_corrections >= 1 {
+                return Err(error);
+            }
+            state.messages.extend(tool_batch_rejection_messages(
+                &assistant,
+                &tool_calls,
+                &error,
+            ));
+            tool_sequence_corrections += 1;
+            continue;
+        }
+        tool_sequence_corrections = 0;
 
-        state.messages.push(json!({
-            "role": "assistant",
-            "content": assistant.content.clone().unwrap_or(Value::Null),
-            "tool_calls": tool_calls.iter().map(|call| json!({
-                "id": call.id,
-                "type": call.r#type.clone().unwrap_or_else(|| "function".into()),
-                "function": {
-                    "name": call.function.name,
-                    "arguments": call.function.arguments,
-                }
-            })).collect::<Vec<_>>(),
-        }));
+        let text = content_to_text(&assistant.content);
+        if !text.is_empty() {
+            let _ = runtime
+                .store
+                .append_message(conversation_id, "assistant", &text, None, None);
+        }
 
-        if includes_skill_load {
+        state
+            .messages
+            .push(assistant_tool_call_message(&assistant, &tool_calls));
+
+        if validation.includes_skill_load {
             let skill_calls = skill_load_calls(&tool_calls);
             for call in &skill_calls {
                 emit_tool(
@@ -796,10 +811,16 @@ pub fn strip_image_content(messages: &mut [Value]) {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ToolCallBatchValidation {
+    includes_skill_load: bool,
+    requires_sequence_retry: bool,
+}
+
 fn validate_tool_call_batch(
     calls: &[ToolCallPayload],
     advertised: &BTreeSet<&str>,
-) -> Result<bool, AgentError> {
+) -> Result<ToolCallBatchValidation, AgentError> {
     if let Some(call) = calls
         .iter()
         .find(|call| !advertised.contains(call.function.name.as_str()))
@@ -810,9 +831,58 @@ fn validate_tool_call_batch(
         ));
     }
 
-    Ok(calls
-        .iter()
-        .any(|call| call.function.name == READ_SKILL_TOOL_NAME))
+    Ok(ToolCallBatchValidation {
+        includes_skill_load: calls
+            .iter()
+            .any(|call| call.function.name == READ_SKILL_TOOL_NAME),
+        requires_sequence_retry: calls
+            .iter()
+            .filter(|call| call.function.name != READ_SKILL_TOOL_NAME)
+            .count()
+            > 1,
+    })
+}
+
+fn tool_sequence_required_error() -> AgentError {
+    AgentError::new(
+        "tool_sequence_required",
+        "一次模型响应只能调用一个领域工具。请按顺序逐个调用，并在每次结果返回后再决定下一步。",
+    )
+}
+
+fn assistant_tool_call_message(
+    assistant: &crate::agent::llm::ChatMessagePayload,
+    tool_calls: &[ToolCallPayload],
+) -> Value {
+    json!({
+        "role": "assistant",
+        "content": assistant.content.clone().unwrap_or(Value::Null),
+        "tool_calls": tool_calls.iter().map(|call| json!({
+            "id": call.id,
+            "type": call.r#type.clone().unwrap_or_else(|| "function".into()),
+            "function": {
+                "name": call.function.name,
+                "arguments": call.function.arguments,
+            }
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn tool_batch_rejection_messages(
+    assistant: &crate::agent::llm::ChatMessagePayload,
+    tool_calls: &[ToolCallPayload],
+    error: &AgentError,
+) -> Vec<Value> {
+    let mut messages = Vec::with_capacity(tool_calls.len() + 1);
+    messages.push(assistant_tool_call_message(assistant, tool_calls));
+    messages.extend(tool_calls.iter().map(|call| {
+        json!({
+            "role": "tool",
+            "tool_call_id": call.id,
+            "content": tool_error_content(error),
+        })
+    }));
+    messages
 }
 
 fn skill_load_calls(calls: &[ToolCallPayload]) -> Vec<&ToolCallPayload> {
@@ -871,7 +941,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_batches_allow_skill_loads_with_disclosed_domain_calls() {
+    fn tool_batches_allow_skill_loads_but_serialize_domain_calls() {
         let advertised = BTreeSet::from(["read_skill", "get_editor_snapshot"]);
         assert!(matches!(
             validate_tool_call_batch(
@@ -889,7 +959,10 @@ mod tests {
                 &advertised,
             )
             .unwrap(),
-            true
+            ToolCallBatchValidation {
+                includes_skill_load: true,
+                requires_sequence_retry: false,
+            }
         );
         assert_eq!(
             validate_tool_call_batch(
@@ -897,38 +970,74 @@ mod tests {
                 &advertised,
             )
             .unwrap(),
-            true
+            ToolCallBatchValidation {
+                includes_skill_load: true,
+                requires_sequence_retry: false,
+            }
         );
 
         let computer = BTreeSet::from(["perform_computer_action"]);
-        assert_eq!(
-            validate_tool_call_batch(&[call("1", "perform_computer_action", "{}")], &computer,)
-                .unwrap(),
-            false
-        );
+        assert!(!validate_tool_call_batch(
+            &[call("1", "perform_computer_action", "{}")],
+            &computer,
+        )
+        .unwrap()
+        .requires_sequence_retry);
         let mixed_computer = BTreeSet::from(["read_skill", "perform_computer_action"]);
-        assert_eq!(
-            validate_tool_call_batch(
-                &[
-                    call("1", "read_skill", r#"{"name":"computer-operation"}"#),
-                    call("2", "perform_computer_action", "{}"),
-                ],
-                &mixed_computer,
-            )
-            .unwrap(),
-            true
+        assert!(!validate_tool_call_batch(
+            &[
+                call("1", "read_skill", r#"{"name":"computer-operation"}"#),
+                call("2", "perform_computer_action", "{}"),
+            ],
+            &mixed_computer,
+        )
+        .unwrap()
+        .requires_sequence_retry);
+        assert!(validate_tool_call_batch(
+            &[
+                call("1", "perform_computer_action", "{}"),
+                call("2", "perform_computer_action", "{}"),
+            ],
+            &computer,
+        )
+        .unwrap()
+        .requires_sequence_retry);
+    }
+
+    #[test]
+    fn rejected_batches_answer_every_call_without_executing_any_tool() {
+        let calls = vec![
+            call("skill", "read_skill", r#"{"name":"computer-operation"}"#),
+            call("click", "perform_computer_action", "{}"),
+            call("pause", ASK_USER_TOOL_NAME, r#"{"question":"continue?"}"#),
+        ];
+        let assistant = crate::agent::llm::ChatMessagePayload {
+            role: Some("assistant".into()),
+            content: None,
+            tool_calls: Some(calls.clone()),
+        };
+        let messages = tool_batch_rejection_messages(
+            &assistant,
+            &calls,
+            &tool_sequence_required_error(),
         );
-        assert_eq!(
-            validate_tool_call_batch(
-                &[
-                    call("1", "perform_computer_action", "{}"),
-                    call("2", "perform_computer_action", "{}"),
-                ],
-                &computer,
-            )
-            .unwrap(),
-            false
-        );
+
+        assert_eq!(messages.len(), calls.len() + 1);
+        let answered = messages
+            .iter()
+            .skip(1)
+            .filter_map(|message| message["tool_call_id"].as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(answered, BTreeSet::from(["skill", "click", "pause"]));
+        assert!(messages.iter().skip(1).all(|message| {
+            message["content"]
+                .as_str()
+                .and_then(|content| serde_json::from_str::<Value>(content).ok())
+                .is_some_and(|content| {
+                    content.pointer("/error/code").and_then(Value::as_str)
+                        == Some("tool_sequence_required")
+                })
+        }));
     }
 
     #[test]

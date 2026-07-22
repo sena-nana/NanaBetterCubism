@@ -120,11 +120,11 @@ pub(super) fn enumerate_windows(
             }
         }
         let title = window_title(hwnd);
-        if state.filter.is_none() && !title.to_ascii_lowercase().contains("cubism editor") {
+        if state.filter.is_none() && !is_cubism_editor_title(&title) {
             return BOOL(1);
         }
         let geometry = match geometry(hwnd) {
-            Ok(value) if value.width > 0 && value.height > 0 => value,
+            Ok(value) if has_visible_area(value.width, value.height) => value,
             _ => return BOOL(1),
         };
         state.windows.push(PlatformWindow {
@@ -151,6 +151,15 @@ pub(super) fn enumerate_windows(
             .map_err(|error| AgentError::new("window_discovery_failed", error.to_string()))?;
     }
     Ok(state.windows)
+}
+
+fn is_cubism_editor_title(title: &str) -> bool {
+    let normalized = title.trim().to_ascii_lowercase();
+    normalized.contains("cubism editor") && !normalized.contains("nanabettercubism")
+}
+
+fn has_visible_area(width: u32, height: u32) -> bool {
+    width > 0 && height > 0
 }
 
 pub(super) fn window_is_current(window: &PlatformWindow) -> bool {
@@ -453,9 +462,14 @@ fn validate_action(action: &ComputerAction, geometry: PlatformGeometry) -> Resul
         ComputerAction::Scroll { delta, .. } if *delta == 0 || delta.abs() > 1_200 => Err(
             AgentError::new("invalid_arguments", "滚轮距离必须在 -1200 到 1200 之间。"),
         ),
-        ComputerAction::TypeText { text } if text.encode_utf16().count() > 2_048 => Err(
-            AgentError::new("invalid_arguments", "单次文本输入不能超过 2048 个字符。"),
-        ),
+        ComputerAction::TypeText { text }
+            if text.is_empty() || text.encode_utf16().count() > 2_048 =>
+        {
+            Err(AgentError::new(
+                "invalid_arguments",
+                "单次文本输入必须包含 1 到 2048 个字符。",
+            ))
+        }
         ComputerAction::Key { key, modifiers } => {
             let normalized = key.trim().to_ascii_lowercase();
             let normalized = if normalized == "esc" {
@@ -1026,6 +1040,22 @@ mod tests {
             validate_action(&outside, geometry()),
             Err(error) if error.code == "invalid_coordinates"
         ));
+
+        for delta in [0, -1_201, 1_201] {
+            let scroll = ComputerAction::Scroll { x: 1, y: 1, delta };
+            assert!(matches!(
+                validate_action(&scroll, geometry()),
+                Err(error) if error.code == "invalid_arguments"
+            ));
+        }
+
+        let empty_text = ComputerAction::TypeText {
+            text: String::new(),
+        };
+        assert!(matches!(
+            validate_action(&empty_text, geometry()),
+            Err(error) if error.code == "invalid_arguments"
+        ));
     }
 
     #[test]
@@ -1066,5 +1096,17 @@ mod tests {
             Err(error) if error.code == "input_outcome_unknown"
         ));
         assert_eq!(*backend.call_lengths.borrow(), vec![2, 1, 6]);
+    }
+
+    #[test]
+    fn discovery_only_accepts_real_sized_cubism_editor_candidates() {
+        assert!(is_cubism_editor_title("Live2D Cubism Editor 5.2"));
+        assert!(!is_cubism_editor_title(
+            "NanaBetterCubism - Cubism Editor assistant"
+        ));
+        assert!(!is_cubism_editor_title("Cubism model notes"));
+        assert!(has_visible_area(1280, 720));
+        assert!(!has_visible_area(0, 720));
+        assert!(!has_visible_area(1280, 0));
     }
 }

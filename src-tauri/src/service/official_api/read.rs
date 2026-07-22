@@ -5,7 +5,7 @@ use super::{
     },
     CommandError, CurrentModelingDocument, EditorService,
 };
-use crate::protocol::RpcClient;
+use crate::protocol::{RpcClient, RpcError};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
@@ -252,7 +252,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "get_object",
             "读取对象属性",
             "GetObject",
-            "读取 Part、ArtMesh、Glue 或 Deformer 属性。",
+            "读取 Part、ArtMesh、Glue 或 Deformer 属性。id 必须使用结构化读取结果中的精确值，不能使用显示名称 name 或猜测名称映射。",
             true,
             vec![
                 string("id", "Id", true),
@@ -460,7 +460,7 @@ pub(super) async fn execute_direct(
     let mut response = rpc
         .request(spec.method, data)
         .await
-        .map_err(CommandError::from)?;
+        .map_err(|error| map_direct_error(spec.method, error))?;
     if spec.method == "GetDocuments" {
         response = documents_with_refs(service, generation, response).await?;
     } else if spec.method == "GetParameterGroups" {
@@ -509,4 +509,15 @@ pub(super) async fn execute_direct(
         }
     }
     Ok(sanitize_response(response))
+}
+
+pub(super) fn map_direct_error(method: &str, error: RpcError) -> CommandError {
+    if method == "GetObject" && error.editor_kind() == Some("InvalidData") {
+        CommandError::new(
+            "invalid_object_id",
+            "对象 ID 无效。请重新读取 Part 或 Deformer 结构，并使用结构结果中的精确 id；不要使用显示名称或猜测映射。",
+        )
+    } else {
+        CommandError::from(error)
+    }
 }
