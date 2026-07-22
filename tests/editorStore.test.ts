@@ -102,5 +102,7 @@ function snapshot(state: EditorSnapshot["state"], message: string): EditorSnapsh
       officialEditApi: false,
     },
     message,
+    structureStale: false,
+    structureGeneration: 0,
   };
 }

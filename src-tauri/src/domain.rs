@@ -45,6 +45,12 @@ pub struct EditorSnapshot {
     pub groups: Vec<ParameterGroupSummary>,
     pub capabilities: EditorCapabilities,
     pub message: String,
+    /// 最近一次参数结构握手失败时为 true（groups 仅作陈旧诊断）。
+    #[serde(default)]
+    pub structure_stale: bool,
+    /// 成功校验的参数结构代数。
+    #[serde(default)]
+    pub structure_generation: u64,
 }
 
 impl Default for EditorSnapshot {
@@ -62,6 +68,8 @@ impl Default for EditorSnapshot {
                 official_edit_api: false,
             },
             message: "尚未连接 Cubism Editor。".into(),
+            structure_stale: false,
+            structure_generation: 0,
         }
     }
 }
@@ -824,6 +832,8 @@ mod tests {
         assert_eq!(value["state"], "disconnected");
         assert_eq!(value["capabilities"]["batchCreateParameters"], false);
         assert_eq!(value["capabilities"]["findPartParameters"], false);
+        assert_eq!(value["structureStale"], false);
+        assert_eq!(value["structureGeneration"], 0);
         assert!(value.get("modelUid").is_none());
         assert!(value.get("documentUid").is_none());
         assert!(value.get("token").is_none());

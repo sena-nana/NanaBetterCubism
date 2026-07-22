@@ -263,6 +263,8 @@ impl EditorService {
                     official_edit_api: false,
                 },
                 message: "正在连接 Cubism Editor…".into(),
+                structure_stale: false,
+                structure_generation: 0,
             };
             clear_session_data(&mut inner);
             let previous = inner.rpc.take();
@@ -544,15 +546,15 @@ impl EditorService {
                     continue;
                 }
                 Err(error) if matches!(error, RpcError::Protocol(_)) => {
-                    // Editor 返回了无法解析的参数结构（例如条目缺 Name/Min/Default/Max）。
-                    // 连接本身健康，沿用上次成功的结构，下一轮再重试，避免拖垮连接。
-                    self.set_snapshot(
-                        app,
-                        EditorConnectionState::Ready,
-                        "参数结构解析失败，已沿用上次结构；连接保持可用。",
-                        true,
-                    )
-                    .await;
+                    // 协议解码失败不得伪装 Ready；可选字段缺省已在 parse_structure 处理。
+                    {
+                        let mut inner = self.inner.lock().await;
+                        if inner.connection_request != request || !inner.desired_connected {
+                            return Ok(());
+                        }
+                        mark_structure_stale_after_protocol_error(&mut inner, &error);
+                    }
+                    self.emit_snapshot(app).await;
                     tokio::time::sleep(Duration::from_secs(2)).await;
                     continue;
                 }
@@ -569,17 +571,7 @@ impl EditorService {
                 if changed {
                     inner.clear_previews();
                 }
-                inner.model_uid = Some(model_uid);
-                inner.structure = structure.clone();
-                inner.snapshot.state = EditorConnectionState::Ready;
-                inner.snapshot.api_version = Some(EDIT_API_VERSION.into());
-                inner.snapshot.model_label = Some("当前建模模型".into());
-                inner.snapshot.groups = structure.groups.clone();
-                inner.snapshot.capabilities.batch_create_parameters = true;
-                inner.snapshot.capabilities.find_part_parameters = true;
-                inner.snapshot.capabilities.official_api = true;
-                inner.snapshot.capabilities.official_edit_api = true;
-                inner.snapshot.message = "已连接，可以使用 Editor 工具。".into();
+                apply_validated_structure(&mut inner, model_uid, structure.clone());
             }
             self.emit_snapshot(app).await;
             tokio::time::sleep(Duration::from_secs(2)).await;
@@ -1298,6 +1290,39 @@ fn clear_session_data(inner: &mut ServiceState) {
     inner.snapshot.capabilities.find_part_parameters = false;
     inner.snapshot.capabilities.official_api = false;
     inner.snapshot.capabilities.official_edit_api = false;
+    inner.snapshot.structure_stale = false;
+    inner.snapshot.structure_generation = 0;
+}
+
+fn mark_structure_stale_after_protocol_error(inner: &mut ServiceState, error: &RpcError) {
+    inner.snapshot.structure_stale = true;
+    inner.snapshot.state = EditorConnectionState::Failed;
+    inner.snapshot.capabilities.batch_create_parameters = false;
+    inner.snapshot.capabilities.find_part_parameters = false;
+    inner.snapshot.capabilities.official_edit_api = false;
+    inner.snapshot.message = format!(
+        "参数结构协议错误：{error}。已保留上次结构（陈旧）并继续重试。"
+    );
+}
+
+fn apply_validated_structure(
+    inner: &mut ServiceState,
+    model_uid: String,
+    structure: ModelStructure,
+) {
+    inner.model_uid = Some(model_uid);
+    inner.structure = structure.clone();
+    inner.snapshot.structure_stale = false;
+    inner.snapshot.structure_generation = inner.snapshot.structure_generation.wrapping_add(1);
+    inner.snapshot.state = EditorConnectionState::Ready;
+    inner.snapshot.api_version = Some(EDIT_API_VERSION.into());
+    inner.snapshot.model_label = Some("当前建模模型".into());
+    inner.snapshot.groups = structure.groups;
+    inner.snapshot.capabilities.batch_create_parameters = true;
+    inner.snapshot.capabilities.find_part_parameters = true;
+    inner.snapshot.capabilities.official_api = true;
+    inner.snapshot.capabilities.official_edit_api = true;
+    inner.snapshot.message = "已连接，可以使用 Editor 工具。".into();
 }
 
 fn response_bool(value: Value) -> Result<bool, RpcError> {
@@ -1312,7 +1337,7 @@ mod tests {
     use super::*;
     use crate::domain::{
         BatchGroupSelection, ExistingParameter, IdTemplateConfig, ParameterDefaults,
-        ParameterInputRow, ParameterPreviewRow, ParameterRowOverrides,
+        ParameterGroupSummary, ParameterInputRow, ParameterPreviewRow, ParameterRowOverrides,
     };
     use futures_util::{SinkExt, StreamExt};
     use tokio::net::TcpListener;
@@ -1542,8 +1567,6 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_structure_keeps_connection_healthy_when_editor_omits_name() {
-        // Editor 合法返回缺 Name 的参数条目时，fetch_structure 不应抛 RpcError::Protocol，
-        // 否则 run_session 会在轮询时把连接置为 Failed 并退出循环，导致无法重连。
         let port = response_server(vec![(
             "GetParameterStructure",
             json!({
@@ -1562,6 +1585,81 @@ mod tests {
         assert_eq!(structure.parameters[0].id, "ParamAngleX");
         assert_eq!(structure.parameters[0].name, "");
         assert_eq!(structure.parameters[1].name, "Eye L");
+    }
+
+    #[test]
+    fn missing_required_parameter_structure_is_protocol_error_not_ready() {
+        let missing_root = parse_structure(&json!({"Result": true}));
+        assert!(matches!(missing_root, Err(RpcError::Protocol(_))));
+
+        let missing_entries = parse_structure(&json!({
+            "ParameterStructure": { "Name": "broken" }
+        }));
+        assert!(matches!(missing_entries, Err(RpcError::Protocol(_))));
+
+        let malformed_entries = parse_structure(&json!({
+            "ParameterStructure": { "Entries": "not-an-array" }
+        }));
+        assert!(matches!(malformed_entries, Err(RpcError::Protocol(_))));
+    }
+
+    #[test]
+    fn protocol_failure_marks_structure_stale_and_never_ready() {
+        let mut inner = ServiceState::default();
+        apply_validated_structure(
+            &mut inner,
+            "model".into(),
+            ModelStructure {
+                groups: vec![ParameterGroupSummary {
+                    id: "ParamGroupFace".into(),
+                    name: "Face".into(),
+                }],
+                parameters: Vec::new(),
+            },
+        );
+        assert_eq!(inner.snapshot.state, EditorConnectionState::Ready);
+        assert!(!inner.snapshot.structure_stale);
+        assert_eq!(inner.snapshot.structure_generation, 1);
+        assert_eq!(inner.snapshot.groups.len(), 1);
+
+        let protocol = RpcError::Protocol("GetParameterStructure 缺少 Entries".into());
+        mark_structure_stale_after_protocol_error(&mut inner, &protocol);
+
+        assert_eq!(inner.snapshot.state, EditorConnectionState::Failed);
+        assert!(inner.snapshot.structure_stale);
+        assert_eq!(inner.snapshot.structure_generation, 1);
+        assert_eq!(inner.snapshot.groups[0].id, "ParamGroupFace");
+        assert!(!inner.snapshot.capabilities.official_edit_api);
+        assert!(inner.snapshot.message.contains("陈旧"));
+
+        apply_validated_structure(
+            &mut inner,
+            "model".into(),
+            ModelStructure {
+                groups: vec![ParameterGroupSummary {
+                    id: "ParamGroupBody".into(),
+                    name: "Body".into(),
+                }],
+                parameters: Vec::new(),
+            },
+        );
+        assert_eq!(inner.snapshot.state, EditorConnectionState::Ready);
+        assert!(!inner.snapshot.structure_stale);
+        assert_eq!(inner.snapshot.structure_generation, 2);
+        assert_eq!(inner.snapshot.groups[0].id, "ParamGroupBody");
+    }
+
+    #[test]
+    fn optional_numeric_defaults_remain_ready_compatible() {
+        let structure = parse_structure(&json!({
+            "ParameterStructure": {
+                "Entries": [{ "EntryType": "Parameter", "Id": "ParamAngleX" }]
+            }
+        }))
+        .unwrap();
+        assert_eq!(structure.parameters[0].min, 0.0);
+        assert_eq!(structure.parameters[0].default, 0.0);
+        assert_eq!(structure.parameters[0].max, 0.0);
     }
 
     #[test]

@@ -27,6 +27,10 @@ export interface EditorSnapshot {
     officialEditApi: boolean;
   };
   message: string;
+  /** 最近一次参数结构握手失败时为 true（groups 仅作陈旧诊断）。 */
+  structureStale: boolean;
+  /** 成功校验的参数结构代数。 */
+  structureGeneration: number;
 }
 
 export interface DomainCommandError {
