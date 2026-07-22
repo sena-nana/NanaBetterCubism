@@ -36,9 +36,9 @@ describe("成熟对话展示", () => {
           "- [x] 已完成",
           "- [ ] 待处理",
           "",
-          "| 项目 | 状态 |",
-          "| --- | --- |",
-          "| 参数 | 正常 |",
+          "| 项目 | 状态 | 说明 |",
+          "| :--- | :---: | ---: |",
+          "| 参数 | **正常** | `A \\| B` |",
           "",
           "```json",
           "{\"ok\":true}",
@@ -53,13 +53,37 @@ describe("成熟对话展示", () => {
 
     expect(screen.getByRole("heading", { level: 2 })).toBeTruthy();
     expect(screen.getAllByRole("checkbox")).toHaveLength(2);
-    expect(view.container.querySelector("table")).toBeTruthy();
+    const table = view.container.querySelector("table");
+    expect(table).toBeTruthy();
+    expect(table?.querySelectorAll("th")[1]?.style.textAlign).toBe("center");
+    expect(table?.querySelectorAll("th")[2]?.style.textAlign).toBe("right");
+    expect(table?.textContent).toContain("A | B");
     expect(view.container.querySelector("pre code")?.textContent).toContain("ok");
     expect(view.container.querySelector("script")).toBeNull();
     expect(screen.queryByRole("button", { name: "危险" })).toBeNull();
 
     await fireEvent.click(screen.getByRole("button", { name: "文档" }));
     expect(opener.openUrl).toHaveBeenCalledWith("https://example.com/docs");
+  });
+
+  it("在用户与计划正文渲染表格，并保持系统消息为纯文本", () => {
+    const table = "| 项目 | 状态 |\n| --- | --- |\n| 参数 | 正常 |";
+    const view = render(ConversationTranscript, {
+      props: {
+        messages: [
+          message({ id: "user-table", role: "user", content: table }),
+          message({ id: "plan-table", role: "assistant", content: `# 计划\n\n${table}` }),
+          message({ id: "system-table", role: "system", content: table }),
+        ],
+      },
+    });
+
+    expect(view.container.querySelector("[data-agent-id='agent.chat.message.user-table'] table"))
+      .toBeTruthy();
+    expect(view.container.querySelector("[data-agent-id='agent.chat.message.plan-table'] table"))
+      .toBeTruthy();
+    expect(view.container.querySelector("[data-agent-id='agent.chat.message.system-table'] table"))
+      .toBeNull();
   });
 
   it("仅将闭合 Mermaid 围栏延迟渲染，并使用严格安全级别", async () => {

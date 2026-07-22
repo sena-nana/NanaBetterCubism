@@ -2,6 +2,7 @@
 import { computed, nextTick, ref, watch } from "vue";
 import { ActionMenuItem, Button, Popover, Textarea } from "../../../ui";
 import { ImagePlus, Layers, ListChecks, Plus, X } from "@lucide/vue";
+import MarkdownBlock from "../markdown/MarkdownBlock.vue";
 import { chatImageSrc, MAX_CHAT_IMAGES } from "../useChatImageDrafts";
 import { MAX_CHAT_PSD } from "../useChatPsdDocuments";
 import type {
@@ -226,7 +227,11 @@ function onPlanRevisionKeydown(event: KeyboardEvent) {
       class="conversation-composer__pending"
       :data-agent-id="`${agentIdPrefix}.ask`"
     >
-      <p class="conversation-composer__question">{{ pendingQuestion.question }}</p>
+      <MarkdownBlock
+        class="conversation-composer__question"
+        :content="pendingQuestion.question"
+        compact
+      />
       <div v-if="pendingQuestion.options.length" class="conversation-composer__options">
         <Button
           v-for="(option, index) in pendingQuestion.options"

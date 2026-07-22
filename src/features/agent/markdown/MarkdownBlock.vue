@@ -11,7 +11,10 @@ import {
   type TableAlignment,
 } from "./parser";
 
-const props = defineProps<{ content: string | null | undefined }>();
+const props = defineProps<{
+  content: string | null | undefined;
+  compact?: boolean;
+}>();
 const source = computed(() => normalizeMarkdownSource(props.content));
 const blocks = computed(() => parseMarkdownBlocks(source.value));
 const linkError = ref(false);
@@ -35,7 +38,11 @@ async function openLink(href: string) {
 </script>
 
 <template>
-  <div v-if="source" class="markdown-block">
+  <div
+    v-if="source"
+    class="markdown-block"
+    :class="{ 'markdown-block--compact': compact }"
+  >
     <template v-for="block in blocks" :key="block.key">
       <component :is="headingTag(block)" v-if="block.type === 'heading'" class="markdown-block__heading">
         <MarkdownInline :tokens="block.inlines" @open-link="openLink" />
@@ -73,15 +80,16 @@ async function openLink(href: string) {
 </template>
 
 <style scoped>
-.markdown-block { min-width: 0; font-size: 13px; line-height: 1.68; overflow-wrap: anywhere; }
+.markdown-block { --markdown-gap: 10px; --markdown-cell-y: 6px; --markdown-cell-x: 8px; min-width: 0; font-size: 13px; line-height: 1.68; overflow-wrap: anywhere; }
 .markdown-block > :first-child { margin-top: 0; }
 .markdown-block > :last-child { margin-bottom: 0; }
-.markdown-block__paragraph, .markdown-block__heading, .markdown-list, .markdown-block__quote, .markdown-block__code, .markdown-block__table-wrap { margin: 0 0 10px; }
+.markdown-block__paragraph, .markdown-block__heading, .markdown-block__quote, .markdown-block__code, .markdown-block__table-wrap { margin: 0 0 var(--markdown-gap); }
 .markdown-block__heading { color: var(--text); font-weight: 600; line-height: 1.35; }
 h2.markdown-block__heading { font-size: 17px; }
 h3.markdown-block__heading { font-size: 15px; }
 h4.markdown-block__heading, h5.markdown-block__heading, h6.markdown-block__heading { font-size: 13px; }
-.markdown-block :deep(.markdown-list) { padding-left: 22px; }
+.markdown-block :deep(.markdown-list) { margin-bottom: var(--markdown-gap); padding-left: 22px; }
+.markdown-block :deep(.markdown-mermaid) { margin-bottom: var(--markdown-gap); }
 .markdown-block :deep(.markdown-list .markdown-list) { margin-top: 4px; margin-bottom: 0; }
 .markdown-block :deep(.markdown-list__item--task) { list-style: none; }
 .markdown-block :deep(.markdown-list__content) { display: flex; align-items: baseline; gap: 7px; }
@@ -91,11 +99,12 @@ h4.markdown-block__heading, h5.markdown-block__heading, h6.markdown-block__headi
 .markdown-block__code { max-width: 100%; padding: 10px 12px; overflow: auto; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); background: var(--bg-subtle); white-space: pre; }
 .markdown-block__code code { padding: 0; background: transparent; }
 .markdown-block__quote { padding: 3px 0 3px 12px; border-left: 2px solid var(--border-strong); color: var(--text-muted); }
-.markdown-block__table-wrap { max-width: 100%; overflow: auto; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); }
-.markdown-block__table { width: 100%; border-collapse: collapse; font-size: 12px; }
-.markdown-block__table th, .markdown-block__table td { padding: 6px 8px; border-right: 1px solid var(--border-soft); border-bottom: 1px solid var(--border-soft); text-align: left; vertical-align: top; }
+.markdown-block__table-wrap { width: 100%; overflow: auto; border: 1px solid var(--border-soft); border-radius: var(--radius-sm); }
+.markdown-block__table { width: max-content; min-width: 100%; border-collapse: collapse; font-size: 12px; }
+.markdown-block__table th, .markdown-block__table td { padding: var(--markdown-cell-y) var(--markdown-cell-x); border-right: 1px solid var(--border-soft); border-bottom: 1px solid var(--border-soft); text-align: left; vertical-align: top; }
 .markdown-block__table th { background: var(--bg-subtle); font-weight: 600; }
 .markdown-block__table tr:last-child td { border-bottom: 0; }
 .markdown-block__table :is(th, td):last-child { border-right: 0; }
 .markdown-block__error { margin: 6px 0 0; color: var(--err); font-size: 12px; }
+.markdown-block--compact { --markdown-gap: 7px; --markdown-cell-y: 5px; --markdown-cell-x: 7px; line-height: 1.6; }
 </style>
