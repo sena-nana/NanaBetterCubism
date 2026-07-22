@@ -13,6 +13,7 @@ import {
 import type {
   AgentAskDraftEvent,
   AgentComputerOperationEvent,
+  AgentComputerPermissionEvent,
   AgentPlanEvent,
   AgentToolEvent,
   AgentTurnDelta,
@@ -24,6 +25,7 @@ import type {
 const listeners = vi.hoisted(() => ({
   askDraft: null as null | ((payload: AgentAskDraftEvent) => void),
   computerOperation: null as null | ((payload: AgentComputerOperationEvent) => void),
+  computerPermission: null as null | ((payload: AgentComputerPermissionEvent) => void),
   delta: null as null | ((payload: AgentTurnDelta) => void),
   plan: null as null | ((payload: AgentPlanEvent) => void),
   tool: null as null | ((payload: AgentToolEvent) => void),
@@ -43,9 +45,11 @@ const bridge = vi.hoisted(() => ({
   })),
   deleteConversation: vi.fn(async () => undefined),
   cancelTurn: vi.fn(async () => ({ state: "idle" as const })),
+  decideComputerPermission: vi.fn(async () => undefined),
   decidePlan: vi.fn(async () => "execution_started" as const),
   getLlmConfig: vi.fn(async () => ({ baseUrl: null, model: "test-model", hasApiKey: true })),
   getMessages: vi.fn(),
+  getComputerPermission: vi.fn(async () => "not_granted" as const),
   getPendingUserAction: vi.fn(async () => null),
   getPlan: vi.fn(async () => null),
   listConversations: vi.fn(async () => [
@@ -61,6 +65,10 @@ const bridge = vi.hoisted(() => ({
   }),
   listenComputerOperation: vi.fn(async (handler) => {
     listeners.computerOperation = handler;
+    return () => undefined;
+  }),
+  listenComputerPermission: vi.fn(async (handler) => {
+    listeners.computerPermission = handler;
     return () => undefined;
   }),
   listenPlan: vi.fn(async (handler) => {
@@ -118,8 +126,10 @@ beforeEach(async () => {
   bridge.answerQuestion.mockClear();
   bridge.createConversation.mockClear();
   bridge.cancelTurn.mockClear();
+  bridge.decideComputerPermission.mockClear();
   bridge.decidePlan.mockReset().mockResolvedValue("execution_started");
   bridge.getMessages.mockReset().mockResolvedValue([]);
+  bridge.getComputerPermission.mockReset().mockResolvedValue("not_granted");
   bridge.getPendingUserAction.mockReset().mockResolvedValue(null);
   bridge.getPlan.mockReset().mockResolvedValue(null);
   bridge.sendMessage.mockClear();
@@ -336,6 +346,72 @@ describe("对话工作区", () => {
       ["cancel"],
       ["approve"],
     ]);
+  });
+
+  it("电脑权限使用独立决策，不复用 Ask 输入或自动批准", async () => {
+    const view = render(ConversationComposer, {
+      props: {
+        modelValue: "",
+        mode: "auto_approve",
+        pendingAction: {
+          kind: "computer_permission",
+          actionId: "computer-1",
+          conversationId: "a",
+          goal: "调整 Warp 控制点",
+          windowTitle: "Cubism Editor",
+          includesFileDialogs: false,
+        },
+      },
+    });
+
+    expect(view.container.querySelector('[data-agent-id="agent.chat.computer-permission"]')).toBeTruthy();
+    expect(screen.queryByPlaceholderText("输入回答")).toBeNull();
+    await fireEvent.click(view.container.querySelector(
+      '[data-agent-id="agent.chat.computer-permission.deny"]',
+    )!);
+    await fireEvent.click(view.container.querySelector(
+      '[data-agent-id="agent.chat.computer-permission.allow"]',
+    )!);
+    expect(view.emitted().decideComputerPermission).toEqual([["deny"], ["allow"]]);
+  });
+
+  it("电脑权限跨正常收尾保留，并可在空闲时通过停止撤销", async () => {
+    bridge.getPendingUserAction.mockResolvedValue({
+      kind: "computer_permission",
+      actionId: "computer-a",
+      conversationId: "a",
+      goal: "调整 Warp 控制点",
+      windowTitle: "Cubism Editor",
+      includesFileDialogs: true,
+    });
+    await renderChat("a");
+
+    await fireEvent.click((await vi.waitFor(() => {
+      const button = document.querySelector(
+        '[data-agent-id="agent.chat.computer-permission.allow"]',
+      );
+      expect(button).toBeTruthy();
+      return button!;
+    })) as Element);
+    expect(bridge.decideComputerPermission).toHaveBeenCalledWith("computer-a", "allow");
+    listeners.computerPermission?.({ conversationId: "a", status: "granted" });
+    expect(getConversationRuntime("a").computerPermission).toBe("granted");
+
+    bridge.getPendingUserAction.mockResolvedValue(null);
+    bridge.getComputerPermission.mockResolvedValue("granted");
+    listeners.turnFinished?.({ conversationId: "a", ok: true, message: "done" });
+    await vi.waitFor(() => expect(getConversationRuntime("a").phase).toBe("idle"));
+    await vi.waitFor(() => expect(document.querySelector(
+      '[data-agent-id="agent.chat.computer-permission-status"]',
+    )).toBeTruthy());
+
+    bridge.cancelTurn.mockResolvedValueOnce({ state: "permission_revoked" });
+    await fireEvent.click(document.querySelector(
+      '[data-agent-id="agent.chat.computer-permission.stop"]',
+    )!);
+    expect(bridge.cancelTurn).toHaveBeenCalledWith("a");
+    listeners.computerPermission?.({ conversationId: "a", status: "not_granted" });
+    expect(getConversationRuntime("a").computerPermission).toBe("not_granted");
   });
 
   it("计划与权限下拉互斥，并按对话保留模式", async () => {

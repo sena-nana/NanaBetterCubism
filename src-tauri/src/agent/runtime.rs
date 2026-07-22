@@ -12,8 +12,9 @@ use crate::agent::tools::{
 };
 use crate::agent::{
     emit_conversations_changed, new_id, AgentError, AgentRuntime, AgentTurnMode, AgentTurnState,
-    ImageInputSupport, PendingContinuation, PendingUserAction, AUTO_APPROVE_PROMPT,
-    COLLABORATION_PROMPT, CONVERSATION_ONLY_PROMPT, PLAN_MODE_PROMPT, SYSTEM_PROMPT,
+    ComputerPermissionDecision, ImageInputSupport, PendingContinuation, PendingUserAction,
+    AUTO_APPROVE_PROMPT, COLLABORATION_PROMPT, CONVERSATION_ONLY_PROMPT, PLAN_MODE_PROMPT,
+    SYSTEM_PROMPT,
 };
 use crate::service::EditorService;
 use serde_json::{json, Value};
@@ -81,6 +82,71 @@ pub async fn continue_after_question(
             &question.conversation_id,
             "user",
             &format!("回答：{answer}"),
+            None,
+            None,
+        )?;
+        emit_conversations_changed(&app);
+
+        let editor = app.state::<EditorService>();
+        run_turn_inner(
+            &app,
+            &runtime,
+            editor.inner(),
+            &conversation_id,
+            Some(state),
+            mode,
+            None,
+            cancel.clone(),
+        )
+        .await
+    }
+    .await;
+
+    let result = finalize_turn(&app, &runtime, &conversation_id, &cancel, result).await;
+    emit_finished(&app, &conversation_id, &result);
+    result.map(|_| ())
+}
+
+pub async fn continue_after_computer_permission(
+    app: AppHandle,
+    runtime: Arc<AgentRuntime>,
+    action_id: String,
+    conversation_id: String,
+    decision: ComputerPermissionDecision,
+    cancel: Arc<AtomicBool>,
+) -> Result<(), AgentError> {
+    let result = async {
+        let continuation = runtime
+            .pending_continuations
+            .lock()
+            .await
+            .remove(&action_id)
+            .filter(|continuation| {
+                continuation.conversation_id == conversation_id
+                    && continuation.action.is_computer_permission()
+            })
+            .ok_or_else(|| {
+                AgentError::new("computer_permission_not_found", "电脑操作权限请求已失效。")
+            })?;
+        let granted = decision == ComputerPermissionDecision::Allow;
+        let mut state = continuation.resume(json!({
+            "computerPermission": if granted { "granted" } else { "denied" },
+            "message": if granted {
+                "电脑操作权限已授予。重新调用 request_computer_operation 获取本次操作 grant。"
+            } else {
+                "用户拒绝了电脑操作权限。本轮不要再次申请或操作电脑。"
+            }
+        }));
+        state.computer_permission_denied = !granted;
+        let mode = state.mode;
+        runtime.store.append_message(
+            &conversation_id,
+            "user",
+            if granted {
+                "已允许本对话操作电脑。"
+            } else {
+                "已拒绝本轮电脑操作。"
+            },
             None,
             None,
         )?;
@@ -446,6 +512,7 @@ async fn run_turn_inner(
                     tool_call_id: &call.id,
                     cancel: cancel.clone(),
                     mode: state.mode,
+                    computer_permission_denied: state.computer_permission_denied,
                 },
                 &call.function.name,
                 &call.function.arguments,
@@ -473,11 +540,13 @@ async fn run_turn_inner(
                     action,
                     tool_call_id,
                 } => {
+                    let pending_action = action.clone();
                     runtime.pending_continuations.lock().await.insert(
                         action.action_id().to_string(),
                         PendingContinuation {
                             conversation_id: conversation_id.into(),
                             tool_call_id,
+                            action: pending_action,
                             state,
                         },
                     );
@@ -967,6 +1036,12 @@ mod tests {
         let mut resumed = crate::agent::PendingContinuation {
             conversation_id: conversation.id.clone(),
             tool_call_id: "ask-call".into(),
+            action: crate::agent::PendingUserAction::Question {
+                action_id: "ask".into(),
+                conversation_id: conversation.id.clone(),
+                question: "attached?".into(),
+                options: Vec::new(),
+            },
             state,
         }
         .resume(Value::String("attached".into()));

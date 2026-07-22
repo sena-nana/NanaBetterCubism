@@ -11,6 +11,8 @@ import type {
   ChatPsdDocument,
   ChatPsdDraft,
   ComputerOperationStatus,
+  ComputerPermissionDecision,
+  ComputerPermissionStatus,
   PendingUserAction,
 } from "../types";
 
@@ -25,6 +27,7 @@ const props = withDefaults(
     mode?: AgentTurnMode;
     pendingAction?: PendingUserAction | null;
     computerStatus?: ComputerOperationStatus;
+    computerPermission?: ComputerPermissionStatus;
     disabled?: boolean;
     running?: boolean;
     cancelling?: boolean;
@@ -45,6 +48,7 @@ const props = withDefaults(
     mode: "default",
     pendingAction: null,
     computerStatus: "idle",
+    computerPermission: "not_granted",
     disabled: false,
     running: false,
     cancelling: false,
@@ -69,6 +73,7 @@ const emit = defineEmits<{
   cancel: [];
   answer: [answer?: string];
   decidePlan: [decision: "approve" | "revise" | "cancel", revision?: string];
+  decideComputerPermission: [decision: ComputerPermissionDecision];
   pickImages: [];
   pickPsd: [];
   removeImage: [draftId: string];
@@ -154,10 +159,13 @@ const streamingQuestion = computed(() =>
 const planApproval = computed(() =>
   props.pendingAction?.kind === "plan_approval" ? props.pendingAction : null,
 );
+const computerPermissionRequest = computed(() =>
+  props.pendingAction?.kind === "computer_permission" ? props.pendingAction : null,
+);
 
 const statusLabels: Record<ComputerOperationStatus, string> = {
   idle: "",
-  authorized: "已授权",
+  authorized: "操作已就绪",
   running: "正在操作 Cubism",
   completed: "操作完成",
   needs_user_verification: "需要用户核对",
@@ -228,6 +236,26 @@ function onPlanRevisionKeydown(event: KeyboardEvent) {
     </div>
 
     <div
+      v-else-if="computerPermissionRequest"
+      class="conversation-composer__pending conversation-composer__computer-permission"
+      :data-agent-id="`${agentIdPrefix}.computer-permission`"
+    >
+      <div class="conversation-composer__approval-heading">
+        <strong>允许操作电脑？</strong>
+        <span>{{ computerPermissionRequest.windowTitle }}</span>
+      </div>
+      <p class="conversation-composer__permission-goal">{{ computerPermissionRequest.goal }}</p>
+      <p class="conversation-composer__permission-scope">
+        授权将在此对话中持续，直到你点击“停止”。
+        <template v-if="computerPermissionRequest.includesFileDialogs">操作可能包含 Cubism 打开的文件窗口。</template>
+      </p>
+      <div class="conversation-composer__approval-actions">
+        <Button size="sm" :disabled="running || cancelling" :agent-id="`${agentIdPrefix}.computer-permission.deny`" @click="emit('decideComputerPermission', 'deny')">拒绝</Button>
+        <Button variant="primary" size="sm" :disabled="running || cancelling" :agent-id="`${agentIdPrefix}.computer-permission.allow`" @click="emit('decideComputerPermission', 'allow')">允许操作</Button>
+      </div>
+    </div>
+
+    <div
       v-else-if="pendingQuestion || streamingQuestion"
       class="conversation-composer__pending"
       :data-agent-id="`${agentIdPrefix}.ask`"
@@ -284,6 +312,24 @@ function onPlanRevisionKeydown(event: KeyboardEvent) {
     </div>
 
     <template v-else>
+      <div
+        v-if="computerPermission === 'granted'"
+        class="conversation-composer__operation-status"
+        :data-agent-id="`${agentIdPrefix}.computer-permission-status`"
+      >
+        <span class="conversation-composer__status-dot" />
+        <span>电脑操作已授权</span>
+        <Button
+          v-if="!running && !cancelling"
+          class="conversation-composer__permission-stop"
+          size="sm"
+          variant="ghost"
+          :agent-id="`${agentIdPrefix}.computer-permission.stop`"
+          @click="emit('cancel')"
+        >
+          停止
+        </Button>
+      </div>
       <div
         v-if="computerStatus !== 'idle'"
         class="conversation-composer__operation-status"
@@ -445,6 +491,7 @@ function onPlanRevisionKeydown(event: KeyboardEvent) {
               >
                 自动批准
               </ActionMenuItem>
+              <p class="conversation-composer__permission-note">电脑操作始终单独确认</p>
             </div>
           </Popover>
           <Button
@@ -502,6 +549,7 @@ function onPlanRevisionKeydown(event: KeyboardEvent) {
 .conversation-composer__actions,
 .conversation-composer__mode,
 .conversation-composer__answer-actions,
+.conversation-composer__approval-actions,
 .conversation-composer__options,
 .conversation-composer__ask-progress,
 .conversation-composer__operation-status { display: flex; align-items: center; gap: 6px; }
@@ -524,9 +572,16 @@ function onPlanRevisionKeydown(event: KeyboardEvent) {
 .conversation-composer__mode { margin-right: auto; min-width: 0; }
 .conversation-composer__permission--auto { color: #d4a017; }
 .conversation-composer__permission-menu { display: flex; flex-direction: column; min-width: 140px; }
+.conversation-composer__permission-note { margin: 4px 8px 6px; color: var(--text-faint); font-size: 11px; }
 .conversation-composer__hint { color: var(--text-faint); font-size: 11px; }
 .conversation-composer__pending { min-height: 108px; padding: 3px; }
 .conversation-composer__plan-approval { min-height: 0; }
+.conversation-composer__computer-permission { min-height: 0; }
+.conversation-composer__approval-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; color: var(--text); font-size: 13px; }
+.conversation-composer__approval-heading span { overflow: hidden; color: var(--text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.conversation-composer__permission-goal { margin: 10px 0 4px; color: var(--text); font-size: 13px; }
+.conversation-composer__permission-scope { margin: 0; color: var(--text-muted); font-size: 11px; line-height: 1.5; }
+.conversation-composer__approval-actions { justify-content: flex-end; margin-top: 10px; }
 .conversation-composer__plan-approval :deep(.ui-textarea) { margin-top: 7px; min-height: 42px; }
 .conversation-composer__question { max-height: min(260px, 38vh); margin: 0 0 9px; overflow-y: auto; scrollbar-gutter: stable; font-size: 13px; line-height: 1.5; }
 .conversation-composer__options { flex-wrap: wrap; margin-bottom: 7px; }
@@ -536,6 +591,7 @@ function onPlanRevisionKeydown(event: KeyboardEvent) {
 .conversation-composer__answer-actions { padding-bottom: 1px; }
 .conversation-composer__error { margin: 6px 3px 0; color: var(--err); font-size: 12px; }
 .conversation-composer__operation-status { margin: 0 2px 6px; color: var(--text-muted); font-size: 11px; }
+.conversation-composer__permission-stop { margin-left: auto; }
 .conversation-composer__status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 
 @media (max-width: 620px) {
