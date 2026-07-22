@@ -1,6 +1,8 @@
 use super::{read::sanitize_response, schema::normalize_arguments, *};
 use crate::{
-    domain::{EditorConnectionState, EditorEditOutcome, StoredEditorEditPlan},
+    domain::{
+        EditorConnectionState, EditorEditOutcome, StoredEditorEditItem, StoredEditorEditPlan,
+    },
     protocol::RpcClient,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -56,28 +58,35 @@ async fn connected_service(port: u16) -> EditorService {
 }
 
 fn edit_transaction_steps(
-    preview: Value,
-    current: Value,
+    previews: Vec<Value>,
+    current: Vec<Value>,
     method: &'static str,
-    data: Value,
-    after: Value,
+    mutations: Vec<(Value, bool)>,
+    after: Vec<Value>,
 ) -> Vec<(&'static str, Value, Value)> {
-    vec![
+    let mut steps = previews
+        .into_iter()
+        .map(|snapshot| {
+            (
+                "GetParameterStructure",
+                json!({"ModelUID": "private-model"}),
+                snapshot,
+            )
+        })
+        .collect::<Vec<_>>();
+    steps.push((
+        "GetCurrentModelUID",
+        json!({}),
+        json!({"ModelUID": "private-model"}),
+    ));
+    steps.extend(current.into_iter().map(|snapshot| {
         (
             "GetParameterStructure",
             json!({"ModelUID": "private-model"}),
-            preview,
-        ),
-        (
-            "GetCurrentModelUID",
-            json!({}),
-            json!({"ModelUID": "private-model"}),
-        ),
-        (
-            "GetParameterStructure",
-            json!({"ModelUID": "private-model"}),
-            current,
-        ),
+            snapshot,
+        )
+    }));
+    steps.extend([
         (
             "NotifyUndoCancel",
             json!({"Enabled": true}),
@@ -89,15 +98,29 @@ fn edit_transaction_steps(
             json!({"Result": true}),
         ),
         ("EditSendLog", Value::Null, json!({})),
-        (method, data, json!({"Result": true})),
-        ("EditSendProgress", json!({"Value": 1.0}), json!({})),
-        ("EditEnd", json!({"Cancel": false}), json!({"Result": true})),
+    ]);
+    let total = mutations.len();
+    for (index, (data, succeeds)) in mutations.into_iter().enumerate() {
+        steps.push((method, data, json!({"Result": succeeds})));
+        if !succeeds {
+            steps.push(("EditEnd", json!({"Cancel": true}), json!({"Result": true})));
+            return steps;
+        }
+        steps.push((
+            "EditSendProgress",
+            json!({"Value": (index + 1) as f64 / total as f64}),
+            json!({}),
+        ));
+    }
+    steps.push(("EditEnd", json!({"Cancel": false}), json!({"Result": true})));
+    steps.extend(after.into_iter().map(|snapshot| {
         (
             "GetParameterStructure",
             json!({"ModelUID": "private-model"}),
-            after,
-        ),
-    ]
+            snapshot,
+        )
+    }));
+    steps
 }
 
 #[test]
@@ -186,13 +209,125 @@ fn schemas_use_documented_ranges_and_reject_raw_uids() {
         .find(|tool| tool["function"]["name"] == "preview_add_warp_deformer")
         .unwrap();
     assert_eq!(
-        warp["function"]["parameters"]["properties"]["warpDivH"]["minimum"],
+        warp["function"]["parameters"]["properties"]["operations"]["minItems"],
+        1
+    );
+    assert_eq!(
+        warp["function"]["parameters"]["properties"]["operations"]["maxItems"],
+        crate::domain::MAX_BATCH_SIZE
+    );
+    assert_eq!(
+        warp["function"]["parameters"]["properties"]["operations"]["items"]["properties"]
+            ["warpDivH"]["minimum"],
         2
     );
     assert_eq!(
-        warp["function"]["parameters"]["properties"]["bezierDivV"]["maximum"],
+        warp["function"]["parameters"]["properties"]["operations"]["items"]["properties"]
+            ["bezierDivV"]["maximum"],
         100
     );
+}
+
+#[test]
+fn every_preview_schema_requires_a_bounded_operations_array() {
+    let tools = tool_definitions();
+    let previews = tool_specs()
+        .iter()
+        .filter(|spec| spec.mode == ToolMode::Preview)
+        .collect::<Vec<_>>();
+    assert_eq!(previews.len(), 23);
+    for spec in previews {
+        let tool = tools
+            .iter()
+            .find(|tool| tool["function"]["name"] == spec.tool_name)
+            .unwrap();
+        let parameters = &tool["function"]["parameters"];
+        assert_eq!(parameters["required"], json!(["operations"]));
+        assert_eq!(parameters["properties"].as_object().unwrap().len(), 1);
+        assert_eq!(parameters["properties"]["operations"]["minItems"], 1);
+        assert_eq!(
+            parameters["properties"]["operations"]["maxItems"],
+            crate::domain::MAX_BATCH_SIZE
+        );
+    }
+}
+
+#[test]
+fn batch_arguments_reject_legacy_empty_and_oversized_inputs() {
+    let spec = spec("preview_edit_parameter").unwrap();
+    for args in [json!({"id": "ParamA"}), json!({"operations": []})] {
+        assert!(schema::normalize_operations(spec, args, "private-model").is_err());
+    }
+    let operations = (0..=crate::domain::MAX_BATCH_SIZE)
+        .map(|index| json!({"id": format!("Param{index}")}))
+        .collect::<Vec<_>>();
+    assert!(
+        schema::normalize_operations(spec, json!({"operations": operations}), "private-model")
+            .is_err()
+    );
+}
+
+#[test]
+fn batch_conflicts_preserve_optional_object_ids_and_reject_unsafe_dependencies() {
+    assert!(edit::validate_batch_conflicts(
+        "AddPart",
+        &[
+            json!({"ModelUID": "model", "Name": "A"}),
+            json!({"ModelUID": "model", "Name": "B"}),
+        ],
+    )
+    .is_ok());
+    assert!(edit::validate_batch_conflicts(
+        "EditParameter",
+        &[
+            json!({"ModelUID": "model", "Id": "ParamA", "Name": "A"}),
+            json!({"ModelUID": "model", "Id": "ParamA", "Name": "B"}),
+        ],
+    )
+    .is_err());
+    assert!(edit::validate_batch_conflicts(
+        "EditParameter",
+        &[
+            json!({"ModelUID": "model", "Id": "ParamA", "NewId": "ParamB"}),
+            json!({"ModelUID": "model", "Id": "ParamB", "Name": "B"}),
+        ],
+    )
+    .is_err());
+    assert!(edit::validate_batch_conflicts(
+        "DeleteParameterKey",
+        &[
+            json!({"ModelUID": "model", "ObjectId": "Part", "ParameterId": "ParamA"}),
+            json!({"ModelUID": "model", "ObjectId": "Part", "ParameterId": "ParamA", "KeyValue": 1.0}),
+        ],
+    )
+    .is_err());
+}
+
+#[test]
+fn ordered_move_batch_computes_final_positions_in_operation_order() {
+    let root_order = json!(["GroupA", "GroupB", "GroupC"]);
+    let plan = StoredEditorEditPlan {
+        preview_id: "preview".into(),
+        generation: 1,
+        model_uid: "model".into(),
+        method: "MoveParameterGroup".into(),
+        items: vec![
+            StoredEditorEditItem {
+                data: json!({"ModelUID": "model", "Id": "GroupA", "InsertIndex": 2}),
+                precondition: json!({"rootOrder": root_order}),
+            },
+            StoredEditorEditItem {
+                data: json!({"ModelUID": "model", "Id": "GroupB", "InsertIndex": 0}),
+                precondition: json!({"rootOrder": ["GroupA", "GroupB", "GroupC"]}),
+            },
+        ],
+    };
+
+    let positions = transaction::expected_ordered_move_positions(&plan).unwrap();
+
+    assert_eq!(positions.get("GroupB"), Some(&0));
+    assert_eq!(positions.get("GroupC"), Some(&1));
+    assert_eq!(positions.get("GroupA"), Some(&2));
 }
 
 #[test]
@@ -516,23 +651,26 @@ async fn edit_preview_executes_documented_transaction_and_verifies_postcondition
         }
     });
     let port = sequence_server(edit_transaction_steps(
-        before.clone(),
-        before,
+        vec![before.clone()],
+        vec![before],
         "EditParameter",
-        json!({
-            "ModelUID": "private-model",
-            "Id": "ParamFace",
-            "Name": "Face",
-            "IsRepeat": true
-        }),
-        after,
+        vec![(
+            json!({
+                "ModelUID": "private-model",
+                "Id": "ParamFace",
+                "Name": "Face",
+                "IsRepeat": true
+            }),
+            true,
+        )],
+        vec![after],
     ))
     .await;
     let service = connected_service(port).await;
     let preview = call_tool(
         &service,
         "preview_edit_parameter",
-        json!({"id": "ParamFace", "name": "Face", "isRepeat": true}),
+        json!({"operations": [{"id": "ParamFace", "name": "Face", "isRepeat": true}]}),
     )
     .await
     .unwrap();
@@ -549,6 +687,113 @@ async fn edit_preview_executes_documented_transaction_and_verifies_postcondition
         .await;
     assert_eq!(result.outcome, EditorEditOutcome::Committed);
     assert!(result.verification.is_some());
+}
+
+#[tokio::test]
+async fn same_type_batch_uses_one_transaction_and_verifies_every_item() {
+    let before = json!({
+        "ParameterStructure": {
+            "Entries": [
+                {"EntryType": "Parameter", "Id": "ParamA", "Name": "A"},
+                {"EntryType": "Parameter", "Id": "ParamB", "Name": "B"}
+            ]
+        }
+    });
+    let after = json!({
+        "ParameterStructure": {
+            "Entries": [
+                {"EntryType": "Parameter", "Id": "ParamA", "Name": "Updated A"},
+                {"EntryType": "Parameter", "Id": "ParamB", "Name": "Updated B"}
+            ]
+        }
+    });
+    let first = json!({"ModelUID": "private-model", "Id": "ParamA", "Name": "Updated A"});
+    let second = json!({"ModelUID": "private-model", "Id": "ParamB", "Name": "Updated B"});
+    let port = sequence_server(edit_transaction_steps(
+        vec![before.clone(), before.clone()],
+        vec![before.clone(), before],
+        "EditParameter",
+        vec![(first, true), (second, true)],
+        vec![after.clone(), after],
+    ))
+    .await;
+    let service = connected_service(port).await;
+    let preview = call_tool(
+        &service,
+        "preview_edit_parameter",
+        json!({"operations": [
+            {"id": "ParamA", "name": "Updated A"},
+            {"id": "ParamB", "name": "Updated B"}
+        ]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(preview["operationCount"], 2);
+    let preview_id = preview["previewId"].as_str().unwrap();
+    let (rpc, plan) = {
+        let mut inner = service.inner.lock().await;
+        (
+            inner.rpc.clone().unwrap(),
+            inner.editor_edit_previews.remove(preview_id).unwrap(),
+        )
+    };
+
+    let result = service
+        .run_editor_edit_inner(&rpc, &plan, &AtomicBool::new(false))
+        .await;
+
+    assert_eq!(result.outcome, EditorEditOutcome::Committed);
+    assert_eq!((result.completed, result.total), (2, 2));
+    assert_eq!(result.verification.unwrap().verified, 2);
+}
+
+#[tokio::test]
+async fn failed_batch_item_rolls_back_the_whole_transaction_once() {
+    let before = json!({
+        "ParameterStructure": {
+            "Entries": [
+                {"EntryType": "Parameter", "Id": "ParamA", "Name": "A"},
+                {"EntryType": "Parameter", "Id": "ParamB", "Name": "B"}
+            ]
+        }
+    });
+    let first = json!({"ModelUID": "private-model", "Id": "ParamA", "Name": "Updated A"});
+    let second = json!({"ModelUID": "private-model", "Id": "ParamB", "Name": "Updated B"});
+    let port = sequence_server(edit_transaction_steps(
+        vec![before.clone(), before.clone()],
+        vec![before.clone(), before],
+        "EditParameter",
+        vec![(first, true), (second, false)],
+        vec![],
+    ))
+    .await;
+    let service = connected_service(port).await;
+    let preview = call_tool(
+        &service,
+        "preview_edit_parameter",
+        json!({"operations": [
+            {"id": "ParamA", "name": "Updated A"},
+            {"id": "ParamB", "name": "Updated B"}
+        ]}),
+    )
+    .await
+    .unwrap();
+    let preview_id = preview["previewId"].as_str().unwrap();
+    let (rpc, plan) = {
+        let mut inner = service.inner.lock().await;
+        (
+            inner.rpc.clone().unwrap(),
+            inner.editor_edit_previews.remove(preview_id).unwrap(),
+        )
+    };
+
+    let result = service
+        .run_editor_edit_inner(&rpc, &plan, &AtomicBool::new(false))
+        .await;
+
+    assert_eq!(result.outcome, EditorEditOutcome::FailedRolledBack);
+    assert_eq!((result.completed, result.total), (1, 2));
+    assert!(result.verification.is_none());
 }
 
 #[tokio::test]
@@ -579,14 +824,14 @@ async fn official_edit_previews_from_the_same_model_snapshot_coexist() {
     let first = call_tool(
         &service,
         "preview_edit_parameter",
-        json!({"id": "ParamAngleX", "name": "Angle X"}),
+        json!({"operations": [{"id": "ParamAngleX", "name": "Angle X"}]}),
     )
     .await
     .unwrap();
     let second = call_tool(
         &service,
         "preview_edit_parameter",
-        json!({"id": "ParamAngleY", "name": "Angle Y"}),
+        json!({"operations": [{"id": "ParamAngleY", "name": "Angle Y"}]}),
     )
     .await
     .unwrap();
@@ -624,22 +869,25 @@ async fn pending_parameter_edit_executes_after_unrelated_parameter_deletion() {
         }
     });
     let port = sequence_server(edit_transaction_steps(
-        before,
-        after_delete,
+        vec![before],
+        vec![after_delete],
         "EditParameter",
-        json!({
-            "ModelUID": "private-model",
-            "Id": "ParamB",
-            "Name": "Updated"
-        }),
-        after_edit,
+        vec![(
+            json!({
+                "ModelUID": "private-model",
+                "Id": "ParamB",
+                "Name": "Updated"
+            }),
+            true,
+        )],
+        vec![after_edit],
     ))
     .await;
     let service = connected_service(port).await;
     let preview = call_tool(
         &service,
         "preview_edit_parameter",
-        json!({"id": "ParamB", "name": "Updated"}),
+        json!({"operations": [{"id": "ParamB", "name": "Updated"}]}),
     )
     .await
     .unwrap();
@@ -712,8 +960,10 @@ async fn changed_precondition_stops_before_editor_transaction() {
         generation: 7,
         model_uid: "private-model".into(),
         method: "EditParameter".into(),
-        precondition: verification::edit_precondition("EditParameter", &data, &before).unwrap(),
-        data,
+        items: vec![StoredEditorEditItem {
+            precondition: verification::edit_precondition("EditParameter", &data, &before).unwrap(),
+            data,
+        }],
     };
 
     let result = service
@@ -745,7 +995,7 @@ async fn preview_rejects_a_missing_parameter_target() {
     let error = call_tool(
         &service,
         "preview_delete_parameter",
-        json!({"id": "Missing"}),
+        json!({"operations": [{"id": "Missing"}]}),
     )
     .await
     .unwrap_err();

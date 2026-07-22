@@ -1,11 +1,10 @@
 use super::{
-    read::sanitize_response,
     verification::{edit_precondition, verification_snapshot, verify_postcondition},
     CommandError, EditorService,
 };
 use crate::domain::{
-    EditorConnectionState, EditorEditOutcome, EditorEditResult, OperationAccepted,
-    StoredEditorEditPlan,
+    EditorConnectionState, EditorEditOutcome, EditorEditResult, EditorEditVerification,
+    OperationAccepted, StoredEditorEditPlan,
 };
 use crate::protocol::RpcClient;
 use crate::service::{
@@ -14,12 +13,192 @@ use crate::service::{
     ActiveOperation, OperationOwnerKind,
 };
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
 use tauri::AppHandle;
 use uuid::Uuid;
+
+pub(super) fn expected_ordered_move_positions(
+    plan: &StoredEditorEditPlan,
+) -> Option<BTreeMap<String, usize>> {
+    match plan.method.as_str() {
+        "MoveParameterGroup" => {
+            let mut order = plan
+                .items
+                .first()?
+                .precondition
+                .get("rootOrder")?
+                .as_array()?
+                .iter()
+                .map(|value| value.as_str().map(str::to_string))
+                .collect::<Option<Vec<_>>>()?;
+            for item in &plan.items {
+                let id = item.data.get("Id")?.as_str()?;
+                let index = item.data.get("InsertIndex")?.as_u64()? as usize;
+                let current = order.iter().position(|candidate| candidate == id)?;
+                order.remove(current);
+                if index > order.len() {
+                    return None;
+                }
+                order.insert(index, id.into());
+            }
+            Some(
+                order
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, id)| (id, index))
+                    .collect(),
+            )
+        }
+        "MoveParameter" => {
+            let mut group_orders = BTreeMap::<String, Vec<String>>::new();
+            for item in &plan.items {
+                if item.data.get("InsertIndex").is_none() {
+                    continue;
+                }
+                let group_id = item.data.get("GroupId")?.as_str()?.to_string();
+                let order = item
+                    .precondition
+                    .get("destinationOrder")?
+                    .as_array()?
+                    .iter()
+                    .map(|value| value.as_str().map(str::to_string))
+                    .collect::<Option<Vec<_>>>()?;
+                if group_orders
+                    .insert(group_id.clone(), order.clone())
+                    .is_some_and(|existing| existing != order)
+                {
+                    return None;
+                }
+            }
+            for item in &plan.items {
+                let id = item.data.get("Id")?.as_str()?;
+                for order in group_orders.values_mut() {
+                    if let Some(current) = order.iter().position(|candidate| candidate == id) {
+                        order.remove(current);
+                    }
+                }
+                if let Some(index) = item.data.get("InsertIndex").and_then(Value::as_u64) {
+                    let group_id = item.data.get("GroupId")?.as_str()?;
+                    let order = group_orders.get_mut(group_id)?;
+                    let index = index as usize;
+                    if index > order.len() {
+                        return None;
+                    }
+                    order.insert(index, id.into());
+                } else if item
+                    .data
+                    .get("GroupId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|group_id| group_orders.contains_key(group_id))
+                {
+                    return None;
+                }
+            }
+            Some(
+                group_orders
+                    .into_values()
+                    .flat_map(|order| order.into_iter().enumerate().map(|(index, id)| (id, index)))
+                    .collect(),
+            )
+        }
+        _ => None,
+    }
+}
+
+struct EditResultContext<'a> {
+    operation_id: &'a str,
+    method: &'a str,
+    total: usize,
+}
+
+impl EditResultContext<'_> {
+    fn result(
+        &self,
+        outcome: EditorEditOutcome,
+        message: impl Into<String>,
+        completed: usize,
+        verification: Option<EditorEditVerification>,
+    ) -> EditorEditResult {
+        EditorEditResult {
+            operation_id: self.operation_id.into(),
+            operation: self.method.into(),
+            outcome,
+            message: message.into(),
+            completed,
+            total: self.total,
+            failure_code: None,
+            verification,
+        }
+    }
+
+    fn conflict(&self, message: String) -> EditorEditResult {
+        let mut result = self.result(EditorEditOutcome::Failed, message, 0, None);
+        result.failure_code = Some("precondition_conflict".into());
+        result
+    }
+
+    fn cancelled_before_begin(&self) -> EditorEditResult {
+        self.result(
+            EditorEditOutcome::Failed,
+            "操作在事务开始前已取消。",
+            0,
+            None,
+        )
+    }
+
+    async fn transaction_error(
+        &self,
+        rpc: &RpcClient,
+        error: ExecutionError,
+        completed: usize,
+        context: String,
+    ) -> EditorEditResult {
+        let app_cancelled = matches!(&error, ExecutionError::AppCancelled);
+        if let ExecutionError::UserCancelled(restored) = error {
+            return self.result(
+                if restored {
+                    EditorEditOutcome::CancelledRolledBack
+                } else {
+                    EditorEditOutcome::Unknown
+                },
+                if restored {
+                    format!("{context}：Editor 已取消并恢复编辑前状态。")
+                } else {
+                    format!("{context}：Editor 通知取消，但未确认恢复结果。")
+                },
+                completed,
+                None,
+            );
+        }
+        let rollback_confirmed = rpc
+            .request("EditEnd", json!({"Cancel": true}))
+            .await
+            .and_then(require_true)
+            .is_ok();
+        self.result(
+            if rollback_confirmed {
+                if app_cancelled {
+                    EditorEditOutcome::CancelledRolledBack
+                } else {
+                    EditorEditOutcome::FailedRolledBack
+                }
+            } else {
+                EditorEditOutcome::Unknown
+            },
+            if rollback_confirmed {
+                format!("{context}，Editor 已确认整批回滚：{error}")
+            } else {
+                format!("{context}且无法确认整批回滚：{error}")
+            },
+            completed,
+            None,
+        )
+    }
+}
 
 impl EditorService {
     pub(crate) async fn execute_editor_edit(
@@ -76,6 +255,8 @@ impl EditorService {
                     operation: plan.method.clone(),
                     outcome: EditorEditOutcome::Running,
                     message: "编辑事务正在执行。".into(),
+                    completed: 0,
+                    total: plan.items.len(),
                     failure_code: None,
                     verification: None,
                 },
@@ -84,7 +265,8 @@ impl EditorService {
             inner.snapshot.capabilities.batch_create_parameters = false;
             inner.snapshot.capabilities.find_part_parameters = false;
             inner.snapshot.capabilities.official_edit_api = false;
-            inner.snapshot.message = format!("正在执行 {}…", plan.method);
+            inner.snapshot.message =
+                format!("正在执行 {}（共 {} 项）…", plan.method, plan.items.len());
             (plan, rpc)
         };
         self.emit_snapshot(&app).await;
@@ -139,52 +321,68 @@ impl EditorService {
             .as_ref()
             .map(|operation| operation.id.clone())
             .unwrap_or_default();
-        let result = |outcome, message: String, verification| EditorEditResult {
-            operation_id: operation_id.clone(),
-            operation: plan.method.clone(),
-            outcome,
-            message,
-            failure_code: None,
-            verification,
+        let results = EditResultContext {
+            operation_id: &operation_id,
+            method: &plan.method,
+            total: plan.items.len(),
         };
-        let conflict = |message: String| EditorEditResult {
-            operation_id: operation_id.clone(),
-            operation: plan.method.clone(),
-            outcome: EditorEditOutcome::Failed,
-            message,
-            failure_code: Some("precondition_conflict".into()),
-            verification: None,
-        };
+        let total = results.total;
+        if cancel.load(Ordering::SeqCst) {
+            return results.cancelled_before_begin();
+        }
         let current_model = match rpc.request("GetCurrentModelUID", json!({})).await {
             Ok(value) => value,
             Err(error) => {
-                return result(EditorEditOutcome::Failed, error.to_string(), None);
+                return results.result(EditorEditOutcome::Failed, error.to_string(), 0, None);
             }
         };
         if current_model.get("ModelUID").and_then(Value::as_str) != Some(&plan.model_uid) {
-            return result(
+            return results.result(
                 EditorEditOutcome::Failed,
-                "当前模型已变化，请重新预览。".into(),
+                "当前模型已变化，请重新预览。",
+                0,
                 None,
             );
         }
-        let snapshot = match verification_snapshot(rpc, &plan.method, &plan.data).await {
-            Ok(value) => value,
-            Err(error) => {
-                return result(EditorEditOutcome::Failed, error.to_string(), None);
+        for (index, item) in plan.items.iter().enumerate() {
+            if cancel.load(Ordering::SeqCst) {
+                return results.cancelled_before_begin();
             }
-        };
-        let precondition = match edit_precondition(&plan.method, &plan.data, &snapshot) {
-            Ok(value) => value,
-            Err(error) if error.invalid_target => {
-                return conflict(format!("目标状态与预览不再一致：{}", error.message));
+            let snapshot = match verification_snapshot(rpc, &plan.method, &item.data).await {
+                Ok(value) => value,
+                Err(error) => {
+                    return results.result(
+                        EditorEditOutcome::Failed,
+                        format!("第 {} 项前置状态读取失败：{error}", index + 1),
+                        0,
+                        None,
+                    );
+                }
+            };
+            let precondition = match edit_precondition(&plan.method, &item.data, &snapshot) {
+                Ok(value) => value,
+                Err(error) if error.invalid_target => {
+                    return results.conflict(format!(
+                        "第 {} 项目标状态与预览不再一致：{}",
+                        index + 1,
+                        error.message
+                    ));
+                }
+                Err(error) => {
+                    return results.result(
+                        EditorEditOutcome::Failed,
+                        format!("第 {} 项前置条件校验失败：{}", index + 1, error.message),
+                        0,
+                        None,
+                    );
+                }
+            };
+            if precondition != item.precondition {
+                return results.conflict(format!(
+                    "第 {} 项目标状态与预览不再一致，整批未开始。",
+                    index + 1
+                ));
             }
-            Err(error) => {
-                return result(EditorEditOutcome::Failed, error.message, None);
-            }
-        };
-        if precondition != plan.precondition {
-            return conflict("目标状态与预览不再一致，已阻止该项编辑。".into());
         }
         let mut events = rpc.subscribe();
         match rpc
@@ -193,15 +391,19 @@ impl EditorService {
         {
             Ok(value) if value.get("Accepted").and_then(Value::as_bool) == Some(true) => {}
             Ok(_) => {
-                return result(
+                return results.result(
                     EditorEditOutcome::Failed,
-                    "Editor 未接受撤销取消通知，未开始编辑。".into(),
+                    "Editor 未接受撤销取消通知，未开始编辑。",
+                    0,
                     None,
                 );
             }
             Err(error) => {
-                return result(EditorEditOutcome::Failed, error.to_string(), None);
+                return results.result(EditorEditOutcome::Failed, error.to_string(), 0, None);
             }
+        }
+        if cancel.load(Ordering::SeqCst) {
+            return results.cancelled_before_begin();
         }
         let begin = mutation_request(
             rpc,
@@ -214,20 +416,37 @@ impl EditorService {
         .and_then(require_execution_true);
         if let Err(error) = begin {
             return match error {
-                ExecutionError::UserCancelled(true) => result(
+                ExecutionError::UserCancelled(true) => results.result(
                     EditorEditOutcome::CancelledRolledBack,
-                    "Editor 已在事务开始前取消操作。".into(),
+                    "Editor 已在事务开始前取消操作。",
+                    0,
                     None,
                 ),
-                ExecutionError::UserCancelled(false) => result(
+                ExecutionError::UserCancelled(false) => results.result(
                     EditorEditOutcome::Unknown,
-                    "Editor 通知取消，但未确认恢复结果。".into(),
+                    "Editor 通知取消，但未确认恢复结果。",
+                    0,
                     None,
                 ),
-                error => result(EditorEditOutcome::Failed, error.to_string(), None),
+                error @ ExecutionError::AppCancelled => {
+                    results
+                        .transaction_error(rpc, error, 0, "事务开始时取消".into())
+                        .await
+                }
+                ExecutionError::Rpc(error) if error.is_transport_failure() => {
+                    results
+                        .transaction_error(
+                            rpc,
+                            ExecutionError::Rpc(error),
+                            0,
+                            "事务开始状态不确定".into(),
+                        )
+                        .await
+                }
+                error => results.result(EditorEditOutcome::Failed, error.to_string(), 0, None),
             };
         }
-        let mut mutation = mutation_request(
+        let log = mutation_request(
             rpc,
             &mut events,
             cancel,
@@ -236,73 +455,67 @@ impl EditorService {
         )
         .await
         .map(|_| ());
-        if mutation.is_ok() {
-            mutation = mutation_request(rpc, &mut events, cancel, &plan.method, plan.data.clone())
-                .await
-                .and_then(require_execution_true)
-                .map(|_| ());
+        if let Err(error) = log {
+            return results
+                .transaction_error(rpc, error, 0, "编辑准备失败".into())
+                .await;
         }
-        if mutation.is_ok() {
-            mutation = mutation_request(
+
+        let mut completed = 0;
+        for (index, item) in plan.items.iter().enumerate() {
+            let mutation =
+                mutation_request(rpc, &mut events, cancel, &plan.method, item.data.clone())
+                    .await
+                    .and_then(require_execution_true);
+            if let Err(error) = mutation {
+                return results
+                    .transaction_error(
+                        rpc,
+                        error,
+                        completed,
+                        format!("第 {} 项执行失败", index + 1),
+                    )
+                    .await;
+            }
+            completed = index + 1;
+            if let Err(error) = mutation_request(
                 rpc,
                 &mut events,
                 cancel,
                 "EditSendProgress",
-                json!({"Value": 1.0}),
+                json!({"Value": completed as f64 / total as f64}),
             )
             .await
-            .map(|_| ());
-        }
-        if let Err(error) = mutation {
-            if let ExecutionError::UserCancelled(restored) = error {
-                return result(
-                    if restored {
-                        EditorEditOutcome::CancelledRolledBack
-                    } else {
-                        EditorEditOutcome::Unknown
-                    },
-                    if restored {
-                        "Editor 已取消并恢复编辑前状态。".into()
-                    } else {
-                        "Editor 通知取消，但未确认恢复结果。".into()
-                    },
-                    None,
-                );
+            {
+                return results
+                    .transaction_error(
+                        rpc,
+                        error,
+                        completed,
+                        format!("第 {completed} 项后进度上报失败"),
+                    )
+                    .await;
             }
-            let rollback = rpc
-                .request("EditEnd", json!({"Cancel": true}))
-                .await
-                .and_then(require_true);
-            return result(
-                if rollback.is_ok() {
-                    EditorEditOutcome::FailedRolledBack
-                } else {
-                    EditorEditOutcome::Unknown
-                },
-                if rollback.is_ok() {
-                    format!("编辑失败，Editor 已确认回滚：{error}")
-                } else {
-                    format!("编辑失败且无法确认回滚：{error}")
-                },
-                None,
-            );
+            self.update_editor_edit_progress(&operation_id, completed, total)
+                .await;
         }
         if cancel.load(Ordering::SeqCst) {
             let rollback = rpc
                 .request("EditEnd", json!({"Cancel": true}))
                 .await
                 .and_then(require_true);
-            return result(
+            return results.result(
                 if rollback.is_ok() {
                     EditorEditOutcome::CancelledRolledBack
                 } else {
                     EditorEditOutcome::Unknown
                 },
                 if rollback.is_ok() {
-                    "已取消并恢复编辑前状态。".into()
+                    "已取消并恢复编辑前状态。"
                 } else {
-                    "已请求取消，但无法确认恢复结果。".into()
+                    "已请求取消，但无法确认恢复结果。"
                 },
+                completed,
                 None,
             );
         }
@@ -311,35 +524,74 @@ impl EditorService {
             .await
             .and_then(require_true)
         {
-            return result(
+            return results.result(
                 EditorEditOutcome::Unknown,
                 format!("无法确认 Editor 是否提交：{error}"),
+                completed,
                 None,
             );
         }
-        match verification_snapshot(rpc, &plan.method, &plan.data).await {
-            Ok(snapshot) => match verify_postcondition(plan, &snapshot) {
-                Some(true) => result(
-                    EditorEditOutcome::Committed,
-                    "Editor 已提交，回读语义验证通过。".into(),
-                    Some(sanitize_response(snapshot)),
-                ),
-                Some(false) => result(
-                    EditorEditOutcome::Unknown,
-                    "Editor 已结束事务，但回读结果与预览不一致。".into(),
-                    Some(sanitize_response(snapshot)),
-                ),
-                None => result(
-                    EditorEditOutcome::Unknown,
-                    "Editor 已结束事务，但该参数组合无法可靠回读验证。".into(),
-                    Some(sanitize_response(snapshot)),
-                ),
-            },
-            Err(error) => result(
+        let mut verification = EditorEditVerification {
+            total,
+            verified: 0,
+            mismatched_indices: Vec::new(),
+            unverifiable_indices: Vec::new(),
+        };
+        let ordered_positions = expected_ordered_move_positions(plan);
+        for (index, item) in plan.items.iter().enumerate() {
+            match verification_snapshot(rpc, &plan.method, &item.data).await {
+                Ok(snapshot) => {
+                    let mut expected = item.data.clone();
+                    if let Some(position) = ordered_positions.as_ref().and_then(|positions| {
+                        item.data
+                            .get("Id")
+                            .and_then(Value::as_str)
+                            .and_then(|id| positions.get(id))
+                    }) {
+                        expected["InsertIndex"] = json!(position);
+                    }
+                    match verify_postcondition(&plan.method, &expected, &snapshot) {
+                        Some(true) => verification.verified += 1,
+                        Some(false) => verification.mismatched_indices.push(index + 1),
+                        None => verification.unverifiable_indices.push(index + 1),
+                    }
+                }
+                Err(_) => verification.unverifiable_indices.push(index + 1),
+            }
+        }
+        if verification.verified == total {
+            results.result(
+                EditorEditOutcome::Committed,
+                format!("Editor 已提交，{total} 项修改均通过回读语义验证。"),
+                completed,
+                Some(verification),
+            )
+        } else {
+            results.result(
                 EditorEditOutcome::Unknown,
-                format!("Editor 已结束事务，但回读验证失败：{error}"),
-                None,
-            ),
+                "Editor 已结束事务，但整批回读未全部通过。",
+                completed,
+                Some(verification),
+            )
+        }
+    }
+
+    async fn update_editor_edit_progress(
+        &self,
+        operation_id: &str,
+        completed: usize,
+        total: usize,
+    ) {
+        if let Some(result) = self
+            .inner
+            .lock()
+            .await
+            .editor_edit_results
+            .get_mut(operation_id)
+        {
+            result.completed = completed;
+            result.total = total;
+            result.message = format!("编辑事务正在执行：{completed}/{total}。");
         }
     }
 
