@@ -108,7 +108,8 @@ const psdController = useChatPsdDocuments({
 const canSend = computed(
   () =>
     Boolean(draft.value.trim() || imageDrafts.value.length) &&
-    canCompose.value,
+    canCompose.value &&
+    llm.state.connectionStatus === "ready",
 );
 
 const currentProjectName = computed(() => conversation.value?.projectName?.trim() || "收集箱");
