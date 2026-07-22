@@ -6,7 +6,7 @@ use super::{
         LABEL_COLORS,
     },
     transaction::expected_ordered_move_positions,
-    verification::{edit_precondition, verification_snapshot},
+    verification::{edit_precondition, precondition_snapshot, shared_precondition_snapshot},
     CommandError, EditorService,
 };
 use crate::domain::{EditorEditPreview, StoredEditorEditItem, StoredEditorEditPlan};
@@ -190,11 +190,11 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "preview_add_part",
             "预览添加 Part",
             "AddPart",
-            "预览添加 Part。",
+            "用稳定 ID 预览添加 Part，并验证目标对象仍属于当前模型。",
             false,
             vec![
                 string("name", "Name", false),
-                string("id", "Id", false),
+                string("id", "Id", true),
                 number("drawOrder", "DrawOrder", false, Some(0.0), Some(1000.0)),
                 strings("ids", "Ids", false),
                 boolean("isNested", "IsNested", false),
@@ -267,7 +267,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
 
     let add_deformer = vec![
         string("name", "Name", false),
-        string("id", "Id", false),
+        string("id", "Id", true),
         string("parentId", "ParentId", false),
         strings("targetObjectIds", "TargetObjectIds", false),
         choice("mode", "Mode", false, DEFORMER_MODES),
@@ -276,7 +276,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         "preview_add_rotation_deformer",
         "预览添加 Rotation Deformer",
         "AddRotationDeformer",
-        "预览添加 Rotation Deformer。",
+        "用稳定 ID 预览添加 Rotation Deformer；AsParent 把目标对象置于新 Deformer 下，AsChild 只接受一个目标对象。",
         false,
         add_deformer.clone(),
     ));
@@ -293,7 +293,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         "preview_add_warp_deformer",
         "预览添加 Warp Deformer",
         "AddWarpDeformer",
-        "预览添加 Warp Deformer。",
+        "用稳定 ID 预览添加 Warp Deformer；AsParent 把目标对象置于新 Deformer 下，AsChild 只接受一个目标对象。",
         false,
         add_warp,
     ));
@@ -642,11 +642,16 @@ pub(super) async fn preview_edit(
     }
     validate_batch_conflicts(spec.method, &data)?;
 
+    let shared_precondition = shared_precondition_snapshot(&rpc, spec.method, &model_uid)
+        .await
+        .map_err(CommandError::from)?;
+
     let mut items = Vec::with_capacity(data.len());
     for (index, data) in data.into_iter().enumerate() {
-        let snapshot = verification_snapshot(&rpc, spec.method, &data)
-            .await
-            .map_err(CommandError::from)?;
+        let snapshot =
+            precondition_snapshot(&rpc, spec.method, &data, shared_precondition.as_ref())
+                .await
+                .map_err(CommandError::from)?;
         let precondition = edit_precondition(spec.method, &data, &snapshot).map_err(|error| {
             CommandError::new(
                 if error.invalid_target {

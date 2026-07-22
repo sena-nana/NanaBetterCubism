@@ -1,6 +1,7 @@
 use crate::protocol::{RpcClient, RpcError};
 use serde_json::{json, Map, Value};
-use std::collections::HashSet;
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug)]
 pub(super) struct PreconditionError {
@@ -201,11 +202,163 @@ fn is_parameter_structure_method(method: &str) -> bool {
     )
 }
 
+fn creation_structure(method: &str) -> Option<(&'static str, &'static str)> {
+    match method {
+        "AddPart" => Some(("GetPartStructure", "PartStructure")),
+        "AddRotationDeformer" | "AddWarpDeformer" => {
+            Some(("GetDeformerStructure", "DeformerStructure"))
+        }
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct HierarchyNode {
+    kind: String,
+    parent_id: Option<String>,
+}
+
+fn index_hierarchy_node(
+    value: &Value,
+    parent_id: Option<&str>,
+    nodes: &mut HashMap<String, HierarchyNode>,
+) -> Result<(), PreconditionError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| PreconditionError::protocol("对象结构条目不是对象。"))?;
+    let id = object
+        .get("Id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| PreconditionError::protocol("对象结构条目缺少 Id。"))?;
+    let kind = object
+        .get("Type")
+        .and_then(Value::as_str)
+        .filter(|kind| !kind.is_empty())
+        .ok_or_else(|| PreconditionError::protocol(format!("对象 {id} 缺少 Type。")))?;
+    let children: &[Value] = match object.get("Children") {
+        Some(value) => value.as_array().map(Vec::as_slice).ok_or_else(|| {
+            PreconditionError::protocol(format!("对象 {id} 的 Children 不是数组。"))
+        })?,
+        None => &[],
+    };
+    if nodes
+        .insert(
+            id.to_string(),
+            HierarchyNode {
+                kind: kind.to_string(),
+                parent_id: parent_id.map(str::to_string),
+            },
+        )
+        .is_some()
+    {
+        return Err(PreconditionError::protocol(format!(
+            "对象结构包含重复 ID {id}。"
+        )));
+    }
+    for child in children {
+        index_hierarchy_node(child, Some(id), nodes)?;
+    }
+    Ok(())
+}
+
+fn hierarchy_index(
+    snapshot: &Value,
+    field: &str,
+) -> Result<HashMap<String, HierarchyNode>, PreconditionError> {
+    let root = snapshot
+        .get(field)
+        .ok_or_else(|| PreconditionError::protocol(format!("结构响应缺少 {field}。")))?;
+    let mut nodes = HashMap::new();
+    match root {
+        Value::Object(_) => index_hierarchy_node(root, None, &mut nodes)?,
+        Value::Array(roots) => {
+            for root in roots {
+                index_hierarchy_node(root, None, &mut nodes)?;
+            }
+        }
+        _ => {
+            return Err(PreconditionError::protocol(format!(
+                "结构响应中的 {field} 不是对象或数组。"
+            )))
+        }
+    }
+    Ok(nodes)
+}
+
+fn hierarchy_node_state(
+    nodes: &HashMap<String, HierarchyNode>,
+    id: &str,
+) -> Result<Value, PreconditionError> {
+    let node = nodes
+        .get(id)
+        .ok_or_else(|| PreconditionError::invalid(format!("对象 {id} 不存在。")))?;
+    Ok(json!({
+        "id": id,
+        "type": node.kind,
+        "parentId": node.parent_id,
+    }))
+}
+
+fn object_add_precondition(
+    method: &str,
+    data: &Value,
+    snapshot: &Value,
+) -> Result<Value, PreconditionError> {
+    let (_, field) = creation_structure(method)
+        .ok_or_else(|| PreconditionError::protocol("创建操作缺少结构类型。"))?;
+    let nodes = hierarchy_index(snapshot, field)?;
+    let target_id = required_id(data, "Id")?;
+    if nodes.contains_key(target_id) {
+        return Err(PreconditionError::invalid(format!(
+            "目标 ID {target_id} 已被占用。"
+        )));
+    }
+    let parent = data
+        .get("ParentId")
+        .and_then(Value::as_str)
+        .map(|id| hierarchy_node_state(&nodes, id))
+        .transpose()?
+        .unwrap_or(Value::Null);
+    let target_field = if method == "AddPart" {
+        "Ids"
+    } else {
+        "TargetObjectIds"
+    };
+    let targets = data
+        .get(target_field)
+        .and_then(Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .map(|id| {
+                    id.as_str()
+                        .ok_or_else(|| {
+                            PreconditionError::protocol(format!("{target_field} 包含非字符串 ID。"))
+                        })
+                        .and_then(|id| hierarchy_node_state(&nodes, id))
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    Ok(json!({
+        "targetId": target_id,
+        "parent": parent,
+        "targets": targets,
+    }))
+}
+
 pub(super) fn edit_precondition(
     method: &str,
     data: &Value,
     snapshot: &Value,
 ) -> Result<Value, PreconditionError> {
+    if matches!(
+        method,
+        "AddPart" | "AddRotationDeformer" | "AddWarpDeformer"
+    ) {
+        return object_add_precondition(method, data, snapshot);
+    }
     if !is_parameter_structure_method(method) {
         return Ok(snapshot.clone());
     }
@@ -276,6 +429,48 @@ pub(super) fn edit_precondition(
     }
 }
 
+pub(super) async fn shared_precondition_snapshot(
+    rpc: &RpcClient,
+    method: &str,
+    model_uid: &str,
+) -> Result<Option<Value>, RpcError> {
+    let Some((structure_method, _)) = creation_structure(method) else {
+        return Ok(None);
+    };
+    rpc.request(structure_method, json!({"ModelUID": model_uid}))
+        .await
+        .map(Some)
+}
+
+pub(super) async fn precondition_snapshot<'a>(
+    rpc: &RpcClient,
+    method: &str,
+    data: &Value,
+    shared: Option<&'a Value>,
+) -> Result<Cow<'a, Value>, RpcError> {
+    if creation_structure(method).is_some() {
+        return shared
+            .map(Cow::Borrowed)
+            .ok_or_else(|| RpcError::Protocol("创建操作缺少共享结构前置快照。".into()));
+    }
+    verification_snapshot(rpc, method, data)
+        .await
+        .map(Cow::Owned)
+}
+
+pub(super) async fn shared_verification_snapshot(
+    rpc: &RpcClient,
+    method: &str,
+    model_uid: &str,
+) -> Result<Option<Value>, RpcError> {
+    if !matches!(method, "AddRotationDeformer" | "AddWarpDeformer") {
+        return Ok(None);
+    }
+    rpc.request("GetDeformerStructure", json!({"ModelUID": model_uid}))
+        .await
+        .map(Some)
+}
+
 pub(super) async fn verification_snapshot(
     rpc: &RpcClient,
     method: &str,
@@ -304,7 +499,7 @@ pub(super) async fn verification_snapshot(
             rpc.request("GetPartStructure", json!({"ModelUID": model_uid}))
                 .await
         }
-        "AddPart" | "AddRotationDeformer" | "AddWarpDeformer" if data.get("Id").is_some() => {
+        "AddPart" | "AddRotationDeformer" | "AddWarpDeformer" => {
             rpc.request(
                 "GetObject",
                 json!({"ModelUID": model_uid, "Id": data["Id"]}),
@@ -366,6 +561,36 @@ fn verify_fields(data: &Value, actual: &Map<String, Value>, ignored: &[&str]) ->
     })
 }
 
+fn verify_deformer_hierarchy(method: &str, data: &Value, snapshot: &Value) -> Option<bool> {
+    let nodes = hierarchy_index(snapshot, "DeformerStructure").ok()?;
+    let id = data.get("Id")?.as_str()?;
+    let deformer = nodes.get(id)?;
+    let expected_type = if method == "AddWarpDeformer" {
+        "WarpDeformer"
+    } else {
+        "RotationDeformer"
+    };
+    if deformer.kind != expected_type {
+        return Some(false);
+    }
+    let Some(targets) = data.get("TargetObjectIds").and_then(Value::as_array) else {
+        return Some(true);
+    };
+    match data.get("Mode").and_then(Value::as_str) {
+        Some("AsParent") => Some(targets.iter().all(|target| {
+            target.as_str().is_some_and(|target| {
+                nodes.get(target).and_then(|node| node.parent_id.as_deref()) == Some(id)
+            })
+        })),
+        Some("AsChild") => {
+            let target = targets.first()?.as_str()?;
+            Some(deformer.parent_id.as_deref() == Some(target))
+        }
+        _ if targets.is_empty() => Some(true),
+        _ => None,
+    }
+}
+
 fn direct_id_position(container: &Map<String, Value>, id: &str) -> Option<usize> {
     container
         .get("Parameters")
@@ -424,7 +649,12 @@ fn find_parameter_parent<'a>(snapshot: &'a Value, id: &str) -> Option<Option<&'a
     None
 }
 
-pub(super) fn verify_postcondition(method: &str, data: &Value, snapshot: &Value) -> Option<bool> {
+pub(super) fn verify_postcondition(
+    method: &str,
+    data: &Value,
+    snapshot: &Value,
+    hierarchy: Option<&Value>,
+) -> Option<bool> {
     match method {
         "AddParameter" => {
             let id = data.get("Id")?.as_str()?;
@@ -529,14 +759,7 @@ pub(super) fn verify_postcondition(method: &str, data: &Value, snapshot: &Value)
             if !base {
                 return Some(false);
             }
-            // GetObject's deformer Data shape for TargetObjectIds/Mode is not confirmed
-            // in the capability matrix, so we cannot reliably verify those structural
-            // fields. Admit Unknown rather than falsely reporting Committed.
-            if data.get("TargetObjectIds").is_some() || data.get("Mode").is_some() {
-                None
-            } else {
-                Some(true)
-            }
+            verify_deformer_hierarchy(method, data, hierarchy.unwrap_or(snapshot))
         }
         "MoveParameter" => {
             let group = find_id(snapshot, data.get("GroupId")?.as_str()?)?;
@@ -630,7 +853,12 @@ mod tests {
     }
 
     fn verify(snapshot: Value, group_id: Option<&str>) -> Option<bool> {
-        verify_postcondition("AddParameter", &add_parameter_data(group_id), &snapshot)
+        verify_postcondition(
+            "AddParameter",
+            &add_parameter_data(group_id),
+            &snapshot,
+            None,
+        )
     }
 
     #[test]
@@ -686,7 +914,7 @@ mod tests {
         let snapshot = structure(json!([group("FaceGroup", "脸部", vec![])]));
         let data = json!({ "ModelUID": "model", "Id": "FaceGroup", "Name": "脸部" });
         assert_eq!(
-            verify_postcondition("AddParameterGroup", &data, &snapshot),
+            verify_postcondition("AddParameterGroup", &data, &snapshot, None),
             Some(true)
         );
     }
@@ -824,6 +1052,14 @@ mod tests {
         json!({ "Data": data })
     }
 
+    fn hierarchy_snapshot(data: Value, hierarchy: Value) -> Value {
+        json!({ "Data": data, "DeformerStructure": hierarchy })
+    }
+
+    fn hierarchy_node(id: &str, kind: &str, children: Vec<Value>) -> Value {
+        json!({ "Id": id, "Name": id, "Type": kind, "Children": children })
+    }
+
     fn deformer_data(extras: Value) -> Value {
         let mut data = json!({ "ModelUID": "model", "Id": "Rotator", "Name": "旋转" });
         if let Some(object) = extras.as_object() {
@@ -835,32 +1071,159 @@ mod tests {
     }
 
     #[test]
-    fn add_rotation_deformer_with_target_object_ids_reports_unknown() {
-        let snapshot = object_snapshot(json!({ "Id": "Rotator", "Name": "旋转" }));
-        let data = deformer_data(json!({ "TargetObjectIds": ["ArtMesh1"] }));
+    fn object_add_precondition_tracks_only_referenced_hierarchy() {
+        let before = json!({"DeformerStructure": [
+            hierarchy_node("ArtMesh1", "ArtMesh", vec![]),
+            hierarchy_node("Unrelated", "ArtMesh", vec![]),
+        ]});
+        let after = json!({"DeformerStructure": [
+            hierarchy_node("ArtMesh1", "ArtMesh", vec![]),
+        ]});
+        let data = deformer_data(json!({
+            "TargetObjectIds": ["ArtMesh1"],
+            "Mode": "AsParent",
+        }));
+
         assert_eq!(
-            verify_postcondition("AddRotationDeformer", &data, &snapshot),
-            None
+            edit_precondition("AddRotationDeformer", &data, &before).unwrap(),
+            edit_precondition("AddRotationDeformer", &data, &after).unwrap()
         );
     }
 
     #[test]
-    fn add_rotation_deformer_with_mode_reports_unknown() {
-        let snapshot = object_snapshot(json!({ "Id": "Rotator", "Name": "旋转" }));
-        let data = deformer_data(json!({ "Mode": "AsChild" }));
+    fn object_add_precondition_rejects_occupied_id_and_missing_references() {
+        let occupied = json!({"DeformerStructure": [
+            hierarchy_node("Rotator", "RotationDeformer", vec![]),
+        ]});
+        let missing_parent = json!({"DeformerStructure": [
+            hierarchy_node("ArtMesh1", "ArtMesh", vec![]),
+        ]});
+        let missing_target = json!({"DeformerStructure": [
+            hierarchy_node("PartA", "Part", vec![]),
+        ]});
+        let data = deformer_data(json!({
+            "ParentId": "PartA",
+            "TargetObjectIds": ["ArtMesh1"],
+            "Mode": "AsParent",
+        }));
+
+        for method in ["AddRotationDeformer", "AddWarpDeformer"] {
+            assert!(
+                edit_precondition(method, &data, &occupied)
+                    .unwrap_err()
+                    .invalid_target
+            );
+            assert!(
+                edit_precondition(method, &data, &missing_parent)
+                    .unwrap_err()
+                    .invalid_target
+            );
+            assert!(
+                edit_precondition(method, &data, &missing_target)
+                    .unwrap_err()
+                    .invalid_target
+            );
+        }
+    }
+
+    #[test]
+    fn add_part_precondition_uses_part_structure() {
+        let snapshot = json!({"PartStructure": hierarchy_node(
+            "Root",
+            "Part",
+            vec![hierarchy_node("ArtMesh1", "ArtMesh", vec![])]
+        )});
+        let data = json!({
+            "ModelUID": "model",
+            "Id": "PartFace",
+            "Name": "脸",
+            "Ids": ["ArtMesh1"],
+        });
+
         assert_eq!(
-            verify_postcondition("AddRotationDeformer", &data, &snapshot),
-            None
+            edit_precondition("AddPart", &data, &snapshot).unwrap()["targetId"],
+            "PartFace"
+        );
+        let occupied = json!({"PartStructure": hierarchy_node(
+            "Root",
+            "Part",
+            vec![hierarchy_node("PartFace", "Part", vec![])]
+        )});
+        let missing_target = json!({"PartStructure": hierarchy_node(
+            "Root",
+            "Part",
+            vec![]
+        )});
+        assert!(
+            edit_precondition("AddPart", &data, &occupied)
+                .unwrap_err()
+                .invalid_target
+        );
+        assert!(
+            edit_precondition("AddPart", &data, &missing_target)
+                .unwrap_err()
+                .invalid_target
         );
     }
 
     #[test]
-    fn add_rotation_deformer_without_structural_fields_passes() {
-        let snapshot = object_snapshot(json!({ "Id": "Rotator", "Name": "旋转" }));
-        let data = deformer_data(json!({}));
+    fn add_rotation_deformer_as_parent_verifies_direct_children() {
+        let snapshot = hierarchy_snapshot(
+            json!({ "Id": "Rotator", "Name": "旋转" }),
+            json!([hierarchy_node(
+                "Rotator",
+                "RotationDeformer",
+                vec![hierarchy_node("ArtMesh1", "ArtMesh", vec![])]
+            )]),
+        );
+        let data = deformer_data(json!({
+            "TargetObjectIds": ["ArtMesh1"],
+            "Mode": "AsParent",
+        }));
         assert_eq!(
-            verify_postcondition("AddRotationDeformer", &data, &snapshot),
+            verify_postcondition("AddRotationDeformer", &data, &snapshot, None),
             Some(true)
+        );
+    }
+
+    #[test]
+    fn add_rotation_deformer_as_child_verifies_parent() {
+        let snapshot = hierarchy_snapshot(
+            json!({ "Id": "Rotator", "Name": "旋转" }),
+            json!([hierarchy_node(
+                "ArtMesh1",
+                "ArtMesh",
+                vec![hierarchy_node("Rotator", "RotationDeformer", vec![])]
+            )]),
+        );
+        let data = deformer_data(json!({
+            "TargetObjectIds": ["ArtMesh1"],
+            "Mode": "AsChild",
+        }));
+        assert_eq!(
+            verify_postcondition("AddRotationDeformer", &data, &snapshot, None),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn add_warp_deformer_reports_mismatched_hierarchy() {
+        let snapshot = hierarchy_snapshot(
+            json!({ "Id": "Rotator", "Name": "旋转", "WarpDivH": 2, "WarpDivV": 2 }),
+            json!([
+                hierarchy_node("Rotator", "WarpDeformer", vec![]),
+                hierarchy_node("ArtMesh1", "ArtMesh", vec![]),
+            ]),
+        );
+        let data = deformer_data(json!({
+            "TargetObjectIds": ["ArtMesh1"],
+            "Mode": "AsParent",
+            "WarpDivH": 2,
+            "WarpDivV": 2,
+        }));
+        assert_eq!(
+            verify_postcondition("AddWarpDeformer", &data, &snapshot, None),
+            Some(false)
         );
     }
 
@@ -869,21 +1232,8 @@ mod tests {
         let snapshot = object_snapshot(json!({ "Id": "Other", "Name": "旋转" }));
         let data = deformer_data(json!({}));
         assert_eq!(
-            verify_postcondition("AddRotationDeformer", &data, &snapshot),
+            verify_postcondition("AddRotationDeformer", &data, &snapshot, None),
             Some(false)
-        );
-    }
-
-    #[test]
-    fn add_warp_deformer_with_target_object_ids_reports_unknown() {
-        let snapshot = object_snapshot(
-            json!({ "Id": "Rotator", "Name": "旋转", "WarpDivH": 2, "WarpDivV": 2 }),
-        );
-        let data =
-            deformer_data(json!({ "TargetObjectIds": ["ArtMesh1"], "WarpDivH": 2, "WarpDivV": 2 }));
-        assert_eq!(
-            verify_postcondition("AddWarpDeformer", &data, &snapshot),
-            None
         );
     }
 
@@ -894,7 +1244,7 @@ mod tests {
         let data =
             json!({ "ModelUID": "model", "Id": "PartA", "Name": "头部", "Ids": ["ArtMesh1"] });
         assert_eq!(
-            verify_postcondition("AddPart", &data, &snapshot),
+            verify_postcondition("AddPart", &data, &snapshot, None),
             Some(true)
         );
     }

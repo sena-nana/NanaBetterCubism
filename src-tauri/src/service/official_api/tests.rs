@@ -226,6 +226,22 @@ fn schemas_use_documented_ranges_and_reject_raw_uids() {
             ["bezierDivV"]["maximum"],
         100
     );
+    for name in [
+        "preview_add_part",
+        "preview_add_rotation_deformer",
+        "preview_add_warp_deformer",
+    ] {
+        let tool = tools
+            .iter()
+            .find(|tool| tool["function"]["name"] == name)
+            .unwrap();
+        assert!(
+            tool["function"]["parameters"]["properties"]["operations"]["items"]["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("id"))
+        );
+    }
 }
 
 #[test]
@@ -268,15 +284,33 @@ fn batch_arguments_reject_legacy_empty_and_oversized_inputs() {
 }
 
 #[test]
-fn batch_conflicts_preserve_optional_object_ids_and_reject_unsafe_dependencies() {
+fn object_creation_arguments_require_stable_ids() {
+    for name in [
+        "preview_add_part",
+        "preview_add_rotation_deformer",
+        "preview_add_warp_deformer",
+    ] {
+        let spec = spec(name).unwrap();
+        let error = schema::normalize_operations(
+            spec,
+            json!({"operations": [{"name": "缺少稳定 ID"}]}),
+            "private-model",
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "invalid_arguments");
+    }
+}
+
+#[test]
+fn batch_conflicts_reject_duplicate_stable_ids_and_unsafe_dependencies() {
     assert!(edit::validate_batch_conflicts(
         "AddPart",
         &[
-            json!({"ModelUID": "model", "Name": "A"}),
-            json!({"ModelUID": "model", "Name": "B"}),
+            json!({"ModelUID": "model", "Id": "PartA", "Name": "A"}),
+            json!({"ModelUID": "model", "Id": "PartA", "Name": "B"}),
         ],
     )
-    .is_ok());
+    .is_err());
     assert!(edit::validate_batch_conflicts(
         "EditParameter",
         &[
@@ -687,6 +721,268 @@ async fn edit_preview_executes_documented_transaction_and_verifies_postcondition
         .await;
     assert_eq!(result.outcome, EditorEditOutcome::Committed);
     assert!(result.verification.is_some());
+}
+
+#[tokio::test]
+async fn warp_batch_with_explicit_ids_previews_and_verifies_hierarchy() {
+    let before = json!({
+        "DeformerStructure": [
+            {"Id": "ArtMeshA", "Name": "A", "Type": "ArtMesh", "Children": []},
+            {"Id": "ArtMeshB", "Name": "B", "Type": "ArtMesh", "Children": []}
+        ]
+    });
+    let after = json!({
+        "DeformerStructure": [
+            {
+                "Id": "DeformerA", "Name": "A", "Type": "WarpDeformer",
+                "Children": [{"Id": "ArtMeshA", "Name": "A", "Type": "ArtMesh", "Children": []}]
+            },
+            {
+                "Id": "DeformerB", "Name": "B", "Type": "WarpDeformer",
+                "Children": [{"Id": "ArtMeshB", "Name": "B", "Type": "ArtMesh", "Children": []}]
+            }
+        ]
+    });
+    let first = json!({
+        "ModelUID": "private-model",
+        "Id": "DeformerA",
+        "Name": "A",
+        "TargetObjectIds": ["ArtMeshA"],
+        "Mode": "AsParent",
+        "WarpDivH": 2,
+        "WarpDivV": 2
+    });
+    let second = json!({
+        "ModelUID": "private-model",
+        "Id": "DeformerB",
+        "Name": "B",
+        "TargetObjectIds": ["ArtMeshB"],
+        "Mode": "AsParent",
+        "WarpDivH": 2,
+        "WarpDivV": 2
+    });
+    let port = sequence_server(vec![
+        (
+            "GetDeformerStructure",
+            json!({"ModelUID": "private-model"}),
+            before.clone(),
+        ),
+        (
+            "GetCurrentModelUID",
+            json!({}),
+            json!({"ModelUID": "private-model"}),
+        ),
+        (
+            "GetDeformerStructure",
+            json!({"ModelUID": "private-model"}),
+            before,
+        ),
+        (
+            "NotifyUndoCancel",
+            json!({"Enabled": true}),
+            json!({"Accepted": true}),
+        ),
+        (
+            "EditBegin",
+            json!({"Silent": false}),
+            json!({"Result": true}),
+        ),
+        ("EditSendLog", Value::Null, json!({})),
+        ("AddWarpDeformer", first.clone(), json!({"Result": true})),
+        ("EditSendProgress", json!({"Value": 0.5}), json!({})),
+        ("AddWarpDeformer", second.clone(), json!({"Result": true})),
+        ("EditSendProgress", json!({"Value": 1.0}), json!({})),
+        ("EditEnd", json!({"Cancel": false}), json!({"Result": true})),
+        (
+            "GetDeformerStructure",
+            json!({"ModelUID": "private-model"}),
+            after,
+        ),
+        (
+            "GetObject",
+            json!({"ModelUID": "private-model", "Id": "DeformerA"}),
+            json!({"Data": {
+                "Id": "DeformerA", "Name": "A", "WarpDivH": 2, "WarpDivV": 2
+            }}),
+        ),
+        (
+            "GetObject",
+            json!({"ModelUID": "private-model", "Id": "DeformerB"}),
+            json!({"Data": {
+                "Id": "DeformerB", "Name": "B", "WarpDivH": 2, "WarpDivV": 2
+            }}),
+        ),
+    ])
+    .await;
+    let service = connected_service(port).await;
+    let preview = call_tool(
+        &service,
+        "preview_add_warp_deformer",
+        json!({"operations": [
+            {
+                "id": "DeformerA", "name": "A", "targetObjectIds": ["ArtMeshA"],
+                "mode": "AsParent", "warpDivH": 2, "warpDivV": 2
+            },
+            {
+                "id": "DeformerB", "name": "B", "targetObjectIds": ["ArtMeshB"],
+                "mode": "AsParent", "warpDivH": 2, "warpDivV": 2
+            }
+        ]}),
+    )
+    .await
+    .unwrap();
+    let preview_id = preview["previewId"].as_str().unwrap();
+    let (rpc, plan) = {
+        let mut inner = service.inner.lock().await;
+        (
+            inner.rpc.clone().unwrap(),
+            inner.editor_edit_previews.remove(preview_id).unwrap(),
+        )
+    };
+
+    let result = service
+        .run_editor_edit_inner(&rpc, &plan, &AtomicBool::new(false))
+        .await;
+
+    assert_eq!(result.outcome, EditorEditOutcome::Committed);
+    assert_eq!(result.verification.unwrap().verified, 2);
+}
+
+#[tokio::test]
+async fn changed_warp_target_hierarchy_stops_before_transaction() {
+    let before = json!({"DeformerStructure": [
+        {"Id": "ArtMeshA", "Name": "A", "Type": "ArtMesh", "Children": []}
+    ]});
+    let changed = json!({"DeformerStructure": [{
+        "Id": "Existing", "Name": "Existing", "Type": "WarpDeformer", "Children": [
+            {"Id": "ArtMeshA", "Name": "A", "Type": "ArtMesh", "Children": []}
+        ]
+    }]});
+    let port = sequence_server(vec![
+        (
+            "GetDeformerStructure",
+            json!({"ModelUID": "private-model"}),
+            before,
+        ),
+        (
+            "GetCurrentModelUID",
+            json!({}),
+            json!({"ModelUID": "private-model"}),
+        ),
+        (
+            "GetDeformerStructure",
+            json!({"ModelUID": "private-model"}),
+            changed,
+        ),
+    ])
+    .await;
+    let service = connected_service(port).await;
+    let preview = call_tool(
+        &service,
+        "preview_add_warp_deformer",
+        json!({"operations": [{
+            "id": "DeformerA", "name": "A", "targetObjectIds": ["ArtMeshA"],
+            "mode": "AsParent"
+        }]}),
+    )
+    .await
+    .unwrap();
+    let preview_id = preview["previewId"].as_str().unwrap();
+    let (rpc, plan) = {
+        let mut inner = service.inner.lock().await;
+        (
+            inner.rpc.clone().unwrap(),
+            inner.editor_edit_previews.remove(preview_id).unwrap(),
+        )
+    };
+
+    let result = service
+        .run_editor_edit_inner(&rpc, &plan, &AtomicBool::new(false))
+        .await;
+
+    assert_eq!(result.outcome, EditorEditOutcome::Failed);
+    assert_eq!(
+        result.failure_code.as_deref(),
+        Some("precondition_conflict")
+    );
+    assert_eq!(result.completed, 0);
+}
+
+#[tokio::test]
+async fn mismatched_warp_hierarchy_reports_unknown_after_commit() {
+    let before = json!({"DeformerStructure": [
+        {"Id": "ArtMeshA", "Name": "A", "Type": "ArtMesh", "Children": []}
+    ]});
+    let after = json!({"DeformerStructure": [
+        {"Id": "DeformerA", "Name": "A", "Type": "WarpDeformer", "Children": []},
+        {"Id": "ArtMeshA", "Name": "A", "Type": "ArtMesh", "Children": []}
+    ]});
+    let data = json!({
+        "ModelUID": "private-model",
+        "Id": "DeformerA",
+        "Name": "A",
+        "TargetObjectIds": ["ArtMeshA"],
+        "Mode": "AsParent"
+    });
+    let port = sequence_server(vec![
+        (
+            "GetCurrentModelUID",
+            json!({}),
+            json!({"ModelUID": "private-model"}),
+        ),
+        (
+            "GetDeformerStructure",
+            json!({"ModelUID": "private-model"}),
+            before.clone(),
+        ),
+        (
+            "NotifyUndoCancel",
+            json!({"Enabled": true}),
+            json!({"Accepted": true}),
+        ),
+        (
+            "EditBegin",
+            json!({"Silent": false}),
+            json!({"Result": true}),
+        ),
+        ("EditSendLog", Value::Null, json!({})),
+        ("AddWarpDeformer", data.clone(), json!({"Result": true})),
+        ("EditSendProgress", json!({"Value": 1.0}), json!({})),
+        ("EditEnd", json!({"Cancel": false}), json!({"Result": true})),
+        (
+            "GetDeformerStructure",
+            json!({"ModelUID": "private-model"}),
+            after,
+        ),
+        (
+            "GetObject",
+            json!({"ModelUID": "private-model", "Id": "DeformerA"}),
+            json!({"Data": {"Id": "DeformerA", "Name": "A"}}),
+        ),
+    ])
+    .await;
+    let service = connected_service(port).await;
+    let rpc = service.inner.lock().await.rpc.clone().unwrap();
+    let plan = StoredEditorEditPlan {
+        preview_id: "preview".into(),
+        generation: 7,
+        model_uid: "private-model".into(),
+        method: "AddWarpDeformer".into(),
+        items: vec![StoredEditorEditItem {
+            precondition: verification::edit_precondition("AddWarpDeformer", &data, &before)
+                .unwrap(),
+            data,
+        }],
+    };
+
+    let result = service
+        .run_editor_edit_inner(&rpc, &plan, &AtomicBool::new(false))
+        .await;
+
+    assert_eq!(result.outcome, EditorEditOutcome::Unknown);
+    let verification = result.verification.unwrap();
+    assert_eq!(verification.verified, 0);
+    assert_eq!(verification.mismatched_indices, vec![1]);
 }
 
 #[tokio::test]
