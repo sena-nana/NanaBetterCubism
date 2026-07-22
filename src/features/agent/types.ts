@@ -179,6 +179,11 @@ export interface AgentTurnDelta {
   text: string;
 }
 
+export interface AgentAskDraftEvent {
+  conversationId: string;
+  question: string | null;
+}
+
 export interface AgentToolEvent {
   conversationId: string;
   toolCallId: string;

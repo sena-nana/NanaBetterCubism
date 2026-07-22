@@ -20,6 +20,7 @@ const props = withDefaults(
   defineProps<{
     modelValue: string;
     askAnswer?: string;
+    askDraft?: string | null;
     planRevision?: string;
     mode?: AgentTurnMode;
     pendingAction?: PendingUserAction | null;
@@ -39,6 +40,7 @@ const props = withDefaults(
   }>(),
   {
     askAnswer: "",
+    askDraft: null,
     planRevision: "",
     mode: "default",
     pendingAction: null,
@@ -146,6 +148,9 @@ function resize(value: TextareaRef) {
 const pendingQuestion = computed(() =>
   props.pendingAction?.kind === "question" ? props.pendingAction : null,
 );
+const streamingQuestion = computed(() =>
+  !pendingQuestion.value && props.askDraft?.trim() ? props.askDraft : null,
+);
 const planApproval = computed(() =>
   props.pendingAction?.kind === "plan_approval" ? props.pendingAction : null,
 );
@@ -223,16 +228,16 @@ function onPlanRevisionKeydown(event: KeyboardEvent) {
     </div>
 
     <div
-      v-else-if="pendingQuestion"
+      v-else-if="pendingQuestion || streamingQuestion"
       class="conversation-composer__pending"
       :data-agent-id="`${agentIdPrefix}.ask`"
     >
       <MarkdownBlock
         class="conversation-composer__question"
-        :content="pendingQuestion.question"
+        :content="pendingQuestion?.question ?? streamingQuestion"
         compact
       />
-      <div v-if="pendingQuestion.options.length" class="conversation-composer__options">
+      <div v-if="pendingQuestion?.options.length" class="conversation-composer__options">
         <Button
           v-for="(option, index) in pendingQuestion.options"
           :key="option"
@@ -243,7 +248,7 @@ function onPlanRevisionKeydown(event: KeyboardEvent) {
           {{ option }}
         </Button>
       </div>
-      <div class="conversation-composer__answer">
+      <div v-if="pendingQuestion" class="conversation-composer__answer">
         <Textarea
           ref="askRef"
           :model-value="askAnswer"
@@ -257,6 +262,24 @@ function onPlanRevisionKeydown(event: KeyboardEvent) {
           <Button size="sm" :agent-id="`${agentIdPrefix}.cancel`" @click="emit('cancel')">取消</Button>
           <Button variant="primary" size="sm" :disabled="!askAnswer.trim()" :agent-id="`${agentIdPrefix}.ask-submit`" @click="emit('answer')">回答</Button>
         </div>
+      </div>
+      <div
+        v-else
+        class="conversation-composer__ask-progress"
+        role="status"
+        aria-live="polite"
+        :data-agent-id="`${agentIdPrefix}.ask-streaming`"
+      >
+        <span class="conversation-composer__status-dot" aria-hidden="true" />
+        <span>正在准备确认</span>
+        <Button
+          size="sm"
+          :loading="cancelling"
+          :agent-id="`${agentIdPrefix}.stop`"
+          @click="emit('cancel')"
+        >
+          {{ cancelling ? "正在停止" : "停止" }}
+        </Button>
       </div>
     </div>
 
@@ -480,6 +503,7 @@ function onPlanRevisionKeydown(event: KeyboardEvent) {
 .conversation-composer__mode,
 .conversation-composer__answer-actions,
 .conversation-composer__options,
+.conversation-composer__ask-progress,
 .conversation-composer__operation-status { display: flex; align-items: center; gap: 6px; }
 .conversation-composer__toolbar { min-height: 28px; padding: 0 1px 6px; overflow-x: auto; }
 .conversation-composer__images { flex-wrap: wrap; padding: 5px 1px 1px; }
@@ -504,8 +528,10 @@ function onPlanRevisionKeydown(event: KeyboardEvent) {
 .conversation-composer__pending { min-height: 108px; padding: 3px; }
 .conversation-composer__plan-approval { min-height: 0; }
 .conversation-composer__plan-approval :deep(.ui-textarea) { margin-top: 7px; min-height: 42px; }
-.conversation-composer__question { margin: 0 0 9px; font-size: 13px; line-height: 1.5; }
+.conversation-composer__question { max-height: min(260px, 38vh); margin: 0 0 9px; overflow-y: auto; scrollbar-gutter: stable; font-size: 13px; line-height: 1.5; }
 .conversation-composer__options { flex-wrap: wrap; margin-bottom: 7px; }
+.conversation-composer__ask-progress { justify-content: flex-end; min-height: 30px; color: var(--text-muted); font-size: 11px; }
+.conversation-composer__ask-progress > :last-child { margin-left: auto; }
 .conversation-composer__answer { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 7px; }
 .conversation-composer__answer-actions { padding-bottom: 1px; }
 .conversation-composer__error { margin: 6px 3px 0; color: var(--err); font-size: 12px; }

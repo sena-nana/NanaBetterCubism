@@ -233,6 +233,7 @@ async function onCancel() {
       return;
     }
     state.pendingAction = null;
+    state.askDraft = null;
     state.askAnswer = "";
     if (wasComputerOperation) state.computerStatus = "cancelled";
     setConversationTurnPhase(id, "idle");
@@ -302,6 +303,7 @@ async function onAnswerAsk(answer?: string) {
         v-model:ask-answer="askAnswer"
         v-model:plan-revision="planRevision"
         v-model:mode="composerMode"
+        :ask-draft="runtime.askDraft"
         :pending-action="runtime.pendingAction"
         :computer-status="runtime.computerStatus"
         :disabled="!llm.state.config.hasApiKey"

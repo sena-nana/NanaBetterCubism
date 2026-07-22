@@ -1,6 +1,7 @@
 use crate::agent::computer_control::ComputerOperationStatus;
 use crate::agent::llm::{
-    chat_completions_stream, content_to_text, image_file_to_data_url, ToolCallPayload,
+    chat_completions_stream, content_to_text, image_file_to_data_url, ChatStreamDelta,
+    ToolCallPayload,
 };
 use crate::agent::plan::{PendingPlanApproval, PlanApprovalAction};
 use crate::agent::psd::PsdAttachmentManifest;
@@ -22,6 +23,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 
 const PSD_CONTEXT_PREFIX: &str = "Current conversation PSD attachments. This is a compact, authoritative snapshot, not a full layer tree. Use the document id with PSD inspection tools. After loading psd-inspection, refresh with list_attached_psds before claiming that no PSD is attached or after user interaction. This local context does not imply Cubism Editor PSD operations. JSON:\n";
+const ASK_USER_TOOL_NAME: &str = "ask_user";
 
 pub async fn run_turn(
     app: AppHandle,
@@ -248,14 +250,34 @@ async fn run_turn_inner(
         }
 
         let app_for_capability = app.clone();
+        let mut ask_draft_streamed = false;
+        let mut last_ask_draft = None;
         let assistant = {
-            let conversation_id = conversation_id.to_string();
-            let app = app.clone();
-            match chat_completions_stream(&config, &state.messages, &tools, move |piece| {
-                let _ = app.emit(
-                    "agent://turn-delta",
-                    json!({ "conversationId": conversation_id, "text": piece }),
-                );
+            match chat_completions_stream(&config, &state.messages, &tools, |delta| {
+                match delta {
+                    ChatStreamDelta::Text(text) => {
+                        let _ = app.emit(
+                            "agent://turn-delta",
+                            json!({ "conversationId": conversation_id, "text": text }),
+                        );
+                    }
+                    ChatStreamDelta::ToolCall {
+                        name, arguments, ..
+                    } => {
+                        if state.mode.is_auto_approve() || name != ASK_USER_TOOL_NAME {
+                            return;
+                        }
+                        let Some(question) = ask_draft_question(&arguments) else {
+                            return;
+                        };
+                        if last_ask_draft.as_deref() == Some(question.as_str()) {
+                            return;
+                        }
+                        emit_ask_draft(app, conversation_id, Some(&question));
+                        last_ask_draft = Some(question);
+                        ask_draft_streamed = true;
+                    }
+                }
             })
             .await
             {
@@ -285,6 +307,14 @@ async fn run_turn_inner(
         }
 
         let tool_calls = assistant.tool_calls.clone().unwrap_or_default();
+        if ask_draft_streamed
+            && !tool_calls
+                .iter()
+                .any(|call| call.function.name == ASK_USER_TOOL_NAME)
+        {
+            emit_ask_draft(app, conversation_id, None);
+            ask_draft_streamed = false;
+        }
         if tool_calls.is_empty() {
             if state.mode == AgentTurnMode::Plan {
                 return Err(AgentError::new(
@@ -425,6 +455,10 @@ async fn run_turn_inner(
                 Ok(outcome) => outcome,
                 Err(error) if error.code == "cancelled" => return Err(error),
                 Err(error) => {
+                    if call.function.name == ASK_USER_TOOL_NAME && ask_draft_streamed {
+                        emit_ask_draft(app, conversation_id, None);
+                        ask_draft_streamed = false;
+                    }
                     state.messages.push(json!({
                         "role": "tool",
                         "tool_call_id": call.id,
@@ -535,6 +569,45 @@ async fn run_turn_inner(
             }
         }
     }
+}
+
+fn emit_ask_draft(app: &AppHandle, conversation_id: &str, question: Option<&str>) {
+    let _ = app.emit(
+        "agent://ask-draft",
+        json!({ "conversationId": conversation_id, "question": question }),
+    );
+}
+
+fn ask_draft_question(arguments: &str) -> Option<String> {
+    for (start, _) in arguments.match_indices("\"question\"") {
+        let Some(value) = arguments[start + "\"question\"".len()..]
+            .trim_start()
+            .strip_prefix(':')
+            .map(str::trim_start)
+            .and_then(|value| value.strip_prefix('"'))
+        else {
+            continue;
+        };
+        let mut escaped = false;
+        let end = value.char_indices().find_map(|(index, character)| {
+            if character == '"' && !escaped {
+                return Some(index);
+            }
+            escaped = character == '\\' && !escaped;
+            None
+        });
+        if escaped {
+            return None;
+        }
+        let mut quoted = format!("\"{}", &value[..end.unwrap_or(value.len())]);
+        quoted.push('"');
+        if let Ok(question) = serde_json::from_str::<String>(&quoted) {
+            if !question.trim().is_empty() {
+                return Some(question);
+            }
+        }
+    }
+    None
 }
 
 fn refresh_conversation_psd_context(
@@ -942,6 +1015,23 @@ mod tests {
 
         assert_eq!(messages[1]["content"], "好的");
         assert_eq!(messages[3]["content"], "保持不变");
+    }
+
+    #[test]
+    fn ask_draft_projects_partial_question_without_exposing_tool_json() {
+        assert_eq!(
+            ask_draft_question(r###"{"question":"## 计划\n- 核对参数"###).as_deref(),
+            Some("## 计划\n- 核对参数")
+        );
+        assert_eq!(
+            ask_draft_question(
+                r###"{"options":["继续"],"question":"确认后执行\n\n| 操作 | 影响 |"###,
+            )
+            .as_deref(),
+            Some("确认后执行\n\n| 操作 | 影响 |")
+        );
+        assert!(ask_draft_question(r###"{"question":"无效转义\q"###).is_none());
+        assert!(ask_draft_question(r#"{"options":["继续"]}"#).is_none());
     }
 
     #[test]

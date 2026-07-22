@@ -36,6 +36,15 @@ pub struct ToolFunctionPayload {
     pub arguments: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatStreamDelta {
+    Text(String),
+    ToolCall {
+        name: String,
+        arguments: String,
+    },
+}
+
 #[derive(Debug, Default)]
 struct StreamingToolCall {
     id: String,
@@ -156,7 +165,7 @@ pub async fn chat_completions_stream<F>(
     mut on_delta: F,
 ) -> Result<ChatMessagePayload, AgentError>
 where
-    F: FnMut(&str),
+    F: FnMut(ChatStreamDelta),
 {
     let (base, api_key, model) = resolve_endpoint(config)?;
     let client = reqwest::Client::new();
@@ -184,25 +193,24 @@ where
         let message = first_message(response.json().await?)?;
         let text = content_to_text(&message.content);
         if !text.is_empty() {
-            on_delta(&text);
+            on_delta(ChatStreamDelta::Text(text));
         }
         return Ok(message);
     }
 
     let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
+    let mut buffer = Vec::new();
     let mut content = String::new();
     let mut tool_calls: BTreeMap<u64, StreamingToolCall> = BTreeMap::new();
+    let mut finished = false;
 
-    while let Some(chunk) = stream.next().await {
+    while !finished {
+        let Some(chunk) = stream.next().await else {
+            break;
+        };
         let chunk = chunk?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(idx) = buffer.find('\n') {
-            let mut line = buffer[..idx].to_string();
-            buffer.drain(..=idx);
-            if line.ends_with('\r') {
-                line.pop();
-            }
+        buffer.extend_from_slice(&chunk);
+        while let Some(line) = take_sse_line(&mut buffer)? {
             let line = line.trim();
             if line.is_empty() || line.starts_with(':') {
                 continue;
@@ -212,6 +220,7 @@ where
             };
             let data = data.trim();
             if data == "[DONE]" {
+                finished = true;
                 break;
             }
             let Ok(payload) = serde_json::from_str::<Value>(data) else {
@@ -230,13 +239,17 @@ where
             if let Some(piece) = delta.get("content").and_then(|value| value.as_str()) {
                 if !piece.is_empty() {
                     content.push_str(piece);
-                    on_delta(piece);
+                    on_delta(ChatStreamDelta::Text(piece.to_string()));
                 }
             }
             if let Some(calls) = delta.get("tool_calls").and_then(|value| value.as_array()) {
                 for call in calls {
-                    let index = call.get("index").and_then(|value| value.as_u64()).unwrap_or(0);
+                    let index = call
+                        .get("index")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0);
                     let entry = tool_calls.entry(index).or_default();
+                    let mut changed = false;
                     if let Some(id) = call.get("id").and_then(|value| value.as_str()) {
                         if !id.is_empty() {
                             entry.id = id.to_string();
@@ -247,13 +260,25 @@ where
                     }
                     if let Some(function) = call.get("function") {
                         if let Some(name) = function.get("name").and_then(|value| value.as_str()) {
-                            entry.name.push_str(name);
+                            if !name.is_empty() {
+                                entry.name.push_str(name);
+                                changed = true;
+                            }
                         }
                         if let Some(arguments) =
                             function.get("arguments").and_then(|value| value.as_str())
                         {
-                            entry.arguments.push_str(arguments);
+                            if !arguments.is_empty() {
+                                entry.arguments.push_str(arguments);
+                                changed = true;
+                            }
                         }
+                    }
+                    if changed {
+                        on_delta(ChatStreamDelta::ToolCall {
+                            name: entry.name.clone(),
+                            arguments: entry.arguments.clone(),
+                        });
                     }
                 }
             }
@@ -291,6 +316,20 @@ where
         },
         tool_calls,
     })
+}
+
+fn take_sse_line(buffer: &mut Vec<u8>) -> Result<Option<String>, AgentError> {
+    let Some(index) = buffer.iter().position(|byte| *byte == b'\n') else {
+        return Ok(None);
+    };
+    let mut bytes = buffer.drain(..=index).collect::<Vec<_>>();
+    bytes.pop();
+    if bytes.last() == Some(&b'\r') {
+        bytes.pop();
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| AgentError::new("llm_stream_invalid", "模型流返回了无效 UTF-8。"))
 }
 
 pub async fn test_connection(
@@ -602,12 +641,86 @@ data: [DONE]
                 json!({"role":"tool","tool_call_id":"call_1","content":"{}"}),
             ],
             &[],
-            |piece| deltas.push_str(piece),
+            |delta| {
+                if let ChatStreamDelta::Text(piece) = delta {
+                    deltas.push_str(&piece);
+                }
+            },
         )
         .await
         .unwrap();
         assert_eq!(content_to_text(&second.content), "截屏完成");
         assert_eq!(deltas, "截屏完成");
+    }
+
+    #[tokio::test]
+    async fn streaming_tool_calls_report_accumulated_ask_arguments() {
+        let chunks = [
+            json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"ask-1","type":"function","function":{"name":"ask_user","arguments":"{\"question\":\"## 计划\\n"}}]}}]}),
+            json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"- 核对参数\\n- 执行调整\""}}]}}]}),
+            json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":",\"options\":[\"继续\"]}"}}]}}]}),
+        ];
+        let body = chunks
+            .into_iter()
+            .map(|payload| format!("data: {payload}\n\n"))
+            .collect::<String>()
+            + "data: [DONE]\n";
+        let base_url = spawn_mock_llm(vec![body]).await;
+        let config = LlmConfigInternal {
+            base_url: Some(base_url),
+            api_key: Some("test-key".into()),
+            model: Some("mock-model".into()),
+            context_window: None,
+            max_input_tokens: None,
+        };
+        let mut snapshots = Vec::new();
+
+        let message = chat_completions_stream(
+            &config,
+            &[json!({"role":"user","content":"调整参数"})],
+            &[json!({"type":"function","function":{"name":"ask_user"}})],
+            |delta| {
+                if let ChatStreamDelta::ToolCall {
+                    name, arguments, ..
+                } = delta
+                {
+                    snapshots.push((name, arguments));
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(snapshots.len(), 3);
+        assert_eq!(snapshots[0].0, "ask_user");
+        assert!(snapshots[0].1.ends_with("## 计划\\n"));
+        assert!(snapshots[1].1.contains("执行调整"));
+        let call = &message.tool_calls.unwrap()[0];
+        assert_eq!(call.function.name, "ask_user");
+        assert_eq!(
+            serde_json::from_str::<Value>(&call.function.arguments).unwrap()["options"][0],
+            "继续"
+        );
+    }
+
+    #[test]
+    fn sse_line_buffer_waits_for_complete_utf8() {
+        let source = "data: {\"text\":\"计划\"}\n".as_bytes();
+        let marker = "计".as_bytes();
+        let start = source
+            .windows(marker.len())
+            .position(|window| window == marker)
+            .unwrap();
+        let split = start + 1;
+        let mut buffer = source[..split].to_vec();
+
+        assert!(take_sse_line(&mut buffer).unwrap().is_none());
+        buffer.extend_from_slice(&source[split..]);
+
+        assert_eq!(
+            take_sse_line(&mut buffer).unwrap().as_deref(),
+            Some("data: {\"text\":\"计划\"}")
+        );
     }
 
     #[test]
