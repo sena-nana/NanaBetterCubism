@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, ref } from "vue";
 import ChatPage from "../src/features/agent/ChatPage.vue";
 import ConversationComposer from "../src/features/agent/components/ConversationComposer.vue";
+import { useLlmConfigStore } from "../src/features/agent/llmConfigStore";
+import HomePage from "../src/features/home/HomePage.vue";
 import {
   clearConversationTurnPhase,
   getConversationRuntime,
@@ -29,6 +31,14 @@ const listeners = vi.hoisted(() => ({
 
 const bridge = vi.hoisted(() => ({
   answerQuestion: vi.fn(async () => undefined),
+  createConversation: vi.fn(async () => ({
+    id: "new-conversation",
+    title: "新对话",
+    projectId: null,
+    projectName: null,
+    updatedAt: "",
+    pinned: false,
+  })),
   deleteConversation: vi.fn(async () => undefined),
   cancelTurn: vi.fn(async () => ({ state: "idle" as const })),
   decidePlan: vi.fn(async () => "execution_started" as const),
@@ -79,20 +89,38 @@ const bridge = vi.hoisted(() => ({
     createdAt: "2026-07-15T00:00:00Z",
   })),
   setConversationPinned: vi.fn(async () => true),
+  testLlmConnection: vi.fn(),
 }));
 
 vi.mock("../src/features/agent/bridge", () => bridge);
 
-beforeEach(() => {
+const completeLlmConfig = {
+  baseUrl: "https://api.example.test/v1",
+  model: "test-model",
+  hasApiKey: true,
+};
+
+const successfulLlmCheck = {
+  ok: true,
+  message: "connected",
+  models: ["test-model"],
+};
+
+beforeEach(async () => {
   clearConversationTurnPhase("a");
   clearConversationTurnPhase("b");
   bridge.answerQuestion.mockClear();
+  bridge.createConversation.mockClear();
   bridge.cancelTurn.mockClear();
   bridge.decidePlan.mockReset().mockResolvedValue("execution_started");
   bridge.getMessages.mockReset().mockResolvedValue([]);
   bridge.getPendingUserAction.mockReset().mockResolvedValue(null);
   bridge.getPlan.mockReset().mockResolvedValue(null);
   bridge.sendMessage.mockClear();
+  bridge.testLlmConnection.mockReset().mockResolvedValue(successfulLlmCheck);
+  const llm = useLlmConfigStore();
+  llm.applyConfig(completeLlmConfig);
+  await llm.testConnection();
 });
 
 function deferred<T>() {
@@ -163,6 +191,45 @@ describe("对话工作区", () => {
     expect(regular.emitted().send).toBeUndefined();
     await fireEvent.keyDown(input, { key: "Enter" });
     expect(regular.emitted().send).toHaveLength(1);
+  });
+
+  it.each([
+    ["会话页", () => renderChat("a"), "a"],
+    ["首页", renderHome, "new-conversation"],
+  ] as const)("%s composer 仅在模型就绪时发送并保留草稿", async (_, renderHost, conversationId) => {
+    await renderHost();
+    const llm = useLlmConfigStore();
+    const input = await screen.findByPlaceholderText("描述你想在 Cubism Editor 中完成的事…");
+    const send = screen.getByRole("button", { name: "发送" });
+    await fireEvent.update(input, "保留这份草稿");
+    expect(send).toBeEnabled();
+
+    bridge.testLlmConnection.mockResolvedValueOnce({ ok: false, message: "unavailable", models: [] });
+    await llm.testConnection();
+    await vi.waitFor(() => expect(send).toBeDisabled());
+    expect(input).toHaveValue("保留这份草稿");
+    await fireEvent.keyDown(input, { key: "Enter" });
+    expect(bridge.sendMessage).not.toHaveBeenCalled();
+
+    bridge.testLlmConnection.mockResolvedValueOnce(successfulLlmCheck);
+    await llm.testConnection();
+    expect(send).toBeEnabled();
+
+    llm.applyConfig({ ...completeLlmConfig, model: "next-model" });
+    await vi.waitFor(() => expect(send).toBeDisabled());
+    expect(input).toHaveValue("保留这份草稿");
+    await fireEvent.click(send);
+    expect(bridge.sendMessage).not.toHaveBeenCalled();
+
+    bridge.testLlmConnection.mockResolvedValueOnce(successfulLlmCheck);
+    await llm.testConnection();
+    await fireEvent.click(send);
+    await vi.waitFor(() => expect(bridge.sendMessage).toHaveBeenCalledWith(
+      conversationId,
+      "保留这份草稿",
+      [],
+      "default",
+    ));
   });
 
   it("使用现有提问面板处理保存到项目记忆的选择", async () => {
@@ -453,6 +520,19 @@ async function renderChat(conversationId: string) {
   render({ template: "<RouterView />" }, { global: { plugins: [router] } });
   await vi.waitFor(() => expect(bridge.getMessages).toHaveBeenCalledWith(conversationId));
   return router;
+}
+
+async function renderHome() {
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: "/", component: HomePage },
+      { path: "/chats/:id", component: { template: "<div />" } },
+    ],
+  });
+  await router.push("/");
+  await router.isReady();
+  render({ template: "<RouterView />" }, { global: { plugins: [router] } });
 }
 
 async function waitForConversationLoad(conversationId: string) {

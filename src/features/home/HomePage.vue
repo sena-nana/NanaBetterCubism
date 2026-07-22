@@ -56,7 +56,10 @@ const psdDraftController = useHomePsdDrafts({
 });
 
 const canSend = computed(
-  () => Boolean(draft.value.trim() || imageDrafts.value.length) && canCompose.value,
+  () =>
+    Boolean(draft.value.trim() || imageDrafts.value.length) &&
+    canCompose.value &&
+    llm.state.connectionStatus === "ready",
 );
 
 onMounted(async () => {
