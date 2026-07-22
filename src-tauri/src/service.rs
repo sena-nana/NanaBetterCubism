@@ -1492,8 +1492,10 @@ mod tests {
                 generation: 1,
                 model_uid: "model".into(),
                 method: "EditParameter".into(),
-                data: Value::Null,
-                precondition: Value::Null,
+                items: vec![crate::domain::StoredEditorEditItem {
+                    data: Value::Null,
+                    precondition: Value::Null,
+                }],
             },
         );
         state

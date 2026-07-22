@@ -188,7 +188,8 @@ pub struct EditorEditPreview {
     pub preview_id: String,
     pub operation: String,
     pub summary: String,
-    pub arguments: serde_json::Value,
+    pub operation_count: usize,
+    pub operations: Vec<serde_json::Value>,
     pub destructive: bool,
 }
 
@@ -210,9 +211,26 @@ pub struct EditorEditResult {
     pub operation: String,
     pub outcome: EditorEditOutcome,
     pub message: String,
+    pub completed: usize,
+    pub total: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_code: Option<String>,
-    pub verification: Option<serde_json::Value>,
+    pub verification: Option<EditorEditVerification>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorEditVerification {
+    pub total: usize,
+    pub verified: usize,
+    pub mismatched_indices: Vec<usize>,
+    pub unverifiable_indices: Vec<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredEditorEditItem {
+    pub data: serde_json::Value,
+    pub precondition: serde_json::Value,
 }
 
 #[derive(Debug, Clone)]
@@ -221,8 +239,7 @@ pub struct StoredEditorEditPlan {
     pub generation: u64,
     pub model_uid: String,
     pub method: String,
-    pub data: serde_json::Value,
-    pub precondition: serde_json::Value,
+    pub items: Vec<StoredEditorEditItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

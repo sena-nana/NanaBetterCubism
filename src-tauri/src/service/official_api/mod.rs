@@ -10,6 +10,7 @@ mod tests;
 pub(crate) use self::schema::ToolAccess;
 use self::schema::{field_schema, function_tool, ToolMode, ToolSpec};
 use super::{CommandError, EditorService};
+use crate::domain::MAX_BATCH_SIZE;
 use serde_json::{json, Map, Value};
 use std::sync::LazyLock;
 
@@ -66,16 +67,42 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
                 .filter(|field| field.required)
                 .map(|field| field.input)
                 .collect::<Vec<_>>();
-            function_tool(
-                spec.tool_name,
-                spec.description,
+            let parameters = if spec.mode == ToolMode::Preview {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "operations": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": MAX_BATCH_SIZE,
+                            "items": {
+                                "type": "object",
+                                "properties": properties,
+                                "required": required,
+                                "additionalProperties": false
+                            }
+                        }
+                    },
+                    "required": ["operations"],
+                    "additionalProperties": false
+                })
+            } else {
                 json!({
                     "type": "object",
                     "properties": properties,
                     "required": required,
                     "additionalProperties": false
-                }),
-            )
+                })
+            };
+            let description = if spec.mode == ToolMode::Preview {
+                format!(
+                    "{} 使用 operations 传入 1 到 {MAX_BATCH_SIZE} 个同类型操作，并生成一个事务预览。",
+                    spec.description
+                )
+            } else {
+                spec.description.into()
+            };
+            function_tool(spec.tool_name, &description, parameters)
         })
         .collect::<Vec<_>>();
     tools.extend([
@@ -90,7 +117,7 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
         ),
         function_tool(
             "execute_editor_edit",
-            "执行已确认的官方编辑 API 预览；返回 operationId。",
+            "执行已确认的同类型批量编辑预览；整个预览只使用一次 Editor 事务，并返回 operationId。",
             json!({
                 "type": "object",
                 "properties": {"previewId": {"type": "string", "minLength": 1}},

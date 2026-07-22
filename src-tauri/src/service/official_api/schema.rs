@@ -1,4 +1,5 @@
 use super::CommandError;
+use crate::domain::MAX_BATCH_SIZE;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
 
@@ -467,4 +468,37 @@ pub(super) fn normalize_arguments(
         }
     }
     Ok(Value::Object(data))
+}
+
+pub(super) fn normalize_operations(
+    spec: &ToolSpec,
+    args: Value,
+    model_uid: &str,
+) -> Result<Vec<(Value, Value)>, CommandError> {
+    let args = args
+        .as_object()
+        .ok_or_else(|| CommandError::new("invalid_arguments", "工具参数必须是 JSON 对象。"))?;
+    if args.keys().any(|key| key != "operations") {
+        return Err(CommandError::new(
+            "invalid_arguments",
+            "官方编辑工具只接受 operations 数组。",
+        ));
+    }
+    let operations = args
+        .get("operations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CommandError::new("invalid_arguments", "operations 必须是数组。"))?;
+    if operations.is_empty() || operations.len() > MAX_BATCH_SIZE {
+        return Err(CommandError::new(
+            "invalid_arguments",
+            format!("operations 必须包含 1 到 {MAX_BATCH_SIZE} 项。"),
+        ));
+    }
+    operations
+        .iter()
+        .map(|operation| {
+            let normalized = normalize_arguments(spec, operation.clone(), Some(model_uid))?;
+            Ok((operation.clone(), normalized))
+        })
+        .collect()
 }
