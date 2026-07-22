@@ -52,7 +52,7 @@ describe("聊天图片", () => {
       },
     });
 
-    await images.addPaths(["C:\\face.png", "C:\\bad.bmp"]);
+    const errors = await images.addPaths(["C:\\face.png", "C:\\bad.bmp"]);
 
     expect(bridge.prepareImages).toHaveBeenCalledWith(
       [
@@ -62,7 +62,7 @@ describe("聊天图片", () => {
       8,
     );
     expect(drafts.value).toEqual([draft]);
-    expect(error.value).toContain("bad.bmp：格式不支持");
+    expect(errors[0]).toContain("bad.bmp：格式不支持");
   });
 
   it("普通文本粘贴保持默认行为，图片粘贴才拦截并准备字节", async () => {

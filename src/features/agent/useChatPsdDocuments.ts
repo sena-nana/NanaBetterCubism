@@ -5,12 +5,36 @@ import type { ChatPsdDocument } from "./types";
 
 export const MAX_CHAT_PSD = 8;
 
+function basename(path: string): string {
+  return path.match(/[^\\/]+$/)?.[0] ?? "document.psd";
+}
+
 export function useChatPsdDocuments(options: {
   conversationId: () => string;
   documents: Ref<ChatPsdDocument[]>;
   canInteract: () => boolean;
   setError: (message: string | null) => void;
 }) {
+  async function addPaths(paths: string[]): Promise<string[]> {
+    if (!options.canInteract() || paths.length === 0) return [];
+    const errors: string[] = [];
+    let limitReached = false;
+    for (const path of paths) {
+      if (options.documents.value.length >= MAX_CHAT_PSD) {
+        limitReached = true;
+        continue;
+      }
+      try {
+        const result = await preparePsd(options.conversationId(), path);
+        options.documents.value = [...options.documents.value, result.document];
+      } catch (error) {
+        errors.push(`${basename(path)}：${normalizeCommandError(error).message}`);
+      }
+    }
+    if (limitReached) errors.push(`每个对话最多附加 ${MAX_CHAT_PSD} 个 PSD 文件。`);
+    return errors;
+  }
+
   async function pickPsd() {
     if (!options.canInteract()) return;
     options.setError(null);
@@ -22,8 +46,7 @@ export function useChatPsdDocuments(options: {
       });
       const path = Array.isArray(selected) ? selected[0] : selected;
       if (!path) return;
-      const result = await preparePsd(options.conversationId(), path);
-      options.documents.value = [...options.documents.value, result.document];
+      options.setError((await addPaths([path])).join("\n") || null);
     } catch (error) {
       options.setError(normalizeCommandError(error).message);
     }
@@ -42,5 +65,5 @@ export function useChatPsdDocuments(options: {
     }
   }
 
-  return { pickPsd, removePsd };
+  return { addPaths, pickPsd, removePsd };
 }

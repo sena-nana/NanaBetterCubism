@@ -14,6 +14,21 @@ export function useHomePsdDrafts(options: {
   canInteract: () => boolean;
   setError: (message: string | null) => void;
 }) {
+  async function addPaths(paths: string[]): Promise<string[]> {
+    if (!options.canInteract() || paths.length === 0) return [];
+    const available = Math.max(0, MAX_CHAT_PSD - options.drafts.value.length);
+    const accepted = paths.slice(0, available).map((path): ChatPsdDraft => ({
+      id: crypto.randomUUID(),
+      name: basename(path),
+      path,
+    }));
+    options.drafts.value = [...options.drafts.value, ...accepted];
+    const errors = paths.length > available
+      ? [`每个对话最多附加 ${MAX_CHAT_PSD} 个 PSD 文件。`]
+      : [];
+    return errors;
+  }
+
   async function pickPsd() {
     if (!options.canInteract()) return;
     options.setError(null);
@@ -25,16 +40,7 @@ export function useHomePsdDrafts(options: {
       });
       const path = Array.isArray(selected) ? selected[0] : selected;
       if (!path) return;
-      if (options.drafts.value.length >= MAX_CHAT_PSD) {
-        options.setError(`每个对话最多附加 ${MAX_CHAT_PSD} 个 PSD 文件。`);
-        return;
-      }
-      const draft: ChatPsdDraft = {
-        id: crypto.randomUUID(),
-        name: basename(path),
-        path,
-      };
-      options.drafts.value = [...options.drafts.value, draft];
+      options.setError((await addPaths([path])).join("\n") || null);
     } catch (error) {
       options.setError(normalizeCommandError(error).message);
     }
@@ -53,5 +59,5 @@ export function useHomePsdDrafts(options: {
     return prepared;
   }
 
-  return { pickPsd, removePsdDraft, prepareAll };
+  return { addPaths, pickPsd, removePsdDraft, prepareAll };
 }
