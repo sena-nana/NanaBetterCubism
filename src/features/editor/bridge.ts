@@ -15,6 +15,8 @@ const fallbackSnapshot: EditorSnapshot = {
     officialEditApi: false,
   },
   message: "请在桌面应用中连接 Cubism Editor。",
+  structureStale: false,
+  structureGeneration: 0,
 };
 
 export function isTauriRuntime() {
