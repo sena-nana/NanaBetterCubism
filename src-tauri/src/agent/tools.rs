@@ -1,4 +1,3 @@
-use crate::agent::capture::capture_cubism_editor_window;
 use crate::agent::computer_control::{
     ComputerAction, ComputerActionKind, ComputerOperationOutcome, ComputerOperationStatus,
     ComputerOperationStep, UnsupportedCapability,
@@ -102,12 +101,14 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
         read_tool(
             "capture_cubism_editor_window",
             "查看 Editor 窗口",
-            "按窗口标题匹配截取 Cubism Editor 窗口。",
+            "截取 list_cubism_windows 返回的当前有效 Cubism Editor 窗口。windowId 必须来自最近一次发现结果。",
             json!({
                 "type": "object",
                 "properties": {
-                    "titleSubstring": { "type": "string", "description": "默认 Cubism Editor" }
-                }
+                    "windowId": { "type": "string", "minLength": 1 }
+                },
+                "required": ["windowId"],
+                "additionalProperties": false
             }),
         ),
         read_tool(
@@ -261,7 +262,7 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
                 "required": ["steps"]
             }),
         ),
-        mutating_tool(
+        read_tool(
             "list_cubism_windows",
             "查找 Cubism 窗口",
             "列出可供电脑代理操作选择的 Cubism 窗口；获得 grant 后可列出同进程随后打开的窗口。",
@@ -337,7 +338,7 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
                     "grantId": { "type": "string" },
                     "frameId": { "type": "string" },
                     "stepId": { "type": "string" },
-                    "action": { "type": "object" },
+                    "action": computer_action_schema(),
                     "settleMs": { "type": "integer", "minimum": 0, "maximum": 2000 }
                 },
                 "required": ["grantId", "frameId", "stepId", "action"],
@@ -387,6 +388,83 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
             }),
     );
     tools
+}
+
+fn computer_action_schema() -> Value {
+    let point = || json!({"type": "integer", "minimum": 0});
+    let button = || json!({"type": "string", "enum": ["left", "right", "middle"]});
+    let mouse_action = |kind: &str| {
+        json!({
+            "type": "object",
+            "properties": {
+                "kind": {"const": kind},
+                "x": point(),
+                "y": point(),
+                "button": button()
+            },
+            "required": ["kind", "x", "y"],
+            "additionalProperties": false
+        })
+    };
+
+    json!({
+        "oneOf": [
+            mouse_action("click"),
+            mouse_action("double_click"),
+            {
+                "type": "object",
+                "properties": {
+                    "kind": {"const": "drag"},
+                    "fromX": point(),
+                    "fromY": point(),
+                    "toX": point(),
+                    "toY": point(),
+                    "durationMs": {"type": "integer", "minimum": 100, "maximum": 5000}
+                },
+                "required": ["kind", "fromX", "fromY", "toX", "toY"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "kind": {"const": "scroll"},
+                    "x": point(),
+                    "y": point(),
+                    "delta": {
+                        "type": "integer",
+                        "minimum": -1200,
+                        "maximum": 1200,
+                        "not": {"const": 0}
+                    }
+                },
+                "required": ["kind", "x", "y", "delta"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "kind": {"const": "key"},
+                    "key": {"type": "string", "minLength": 1},
+                    "modifiers": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["ctrl", "shift", "alt"]},
+                        "uniqueItems": true
+                    }
+                },
+                "required": ["kind", "key"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "kind": {"const": "type_text"},
+                    "text": {"type": "string", "minLength": 1, "maxLength": 2048}
+                },
+                "required": ["kind", "text"],
+                "additionalProperties": false
+            }
+        ]
+    })
 }
 
 static TOOL_METADATA: LazyLock<BTreeMap<String, (String, ToolAccess)>> = LazyLock::new(|| {
@@ -629,7 +707,8 @@ pub async fn execute_tool(
                 Some(name),
                 Some("finished"),
             );
-            let (trace_arguments, trace_result) = safe_tool_trace(name, arguments, content);
+            let (trace_arguments, trace_result) =
+                safe_tool_trace(name, arguments, ToolTraceOutcome::Succeeded(content));
             let _ = runtime.store.append_tool_trace(
                 conversation_id,
                 tool_call_id,
@@ -655,7 +734,8 @@ pub async fn execute_tool(
                 Some(name),
                 Some("finished"),
             );
-            let (trace_arguments, trace_result) = safe_tool_trace(name, arguments, "waiting_user");
+            let (trace_arguments, trace_result) =
+                safe_tool_trace(name, arguments, ToolTraceOutcome::WaitingUser);
             let _ = runtime.store.append_tool_trace(
                 conversation_id,
                 tool_call_id,
@@ -684,7 +764,7 @@ pub async fn execute_tool(
             );
         }
         Err(error) => {
-            if is_computer_tool(name) {
+            if name != "capture_cubism_editor_window" && is_computer_tool(name) {
                 if error.code == "input_outcome_unknown" {
                     runtime
                         .computer_control
@@ -709,7 +789,8 @@ pub async fn execute_tool(
                 Some(name),
                 Some("failed"),
             );
-            let (trace_arguments, trace_result) = safe_tool_trace(name, arguments, &error.code);
+            let (trace_arguments, trace_result) =
+                safe_tool_trace(name, arguments, ToolTraceOutcome::Failed(&error.code));
             let _ = runtime.store.append_tool_trace(
                 conversation_id,
                 tool_call_id,
@@ -903,17 +984,16 @@ async fn execute_tool_inner(
                     "当前模型不支持图片输入，「查看 Editor 窗口」已禁用，请更换支持视觉的模型。",
                 ));
             }
-            let needle = args
-                .get("titleSubstring")
-                .and_then(|v| v.as_str())
-                .unwrap_or("Cubism Editor");
+            let window_id = required_string(&args, "windowId")?;
             let cache = runtime
                 .store
                 .cache_dir()
                 .ok_or_else(|| AgentError::new("store_not_ready", "缓存目录不可用。"))?;
-            let captured = capture_cubism_editor_window(&cache, needle)?;
+            let captured = runtime
+                .computer_control
+                .capture_editor_window(window_id, &cache)?;
             Ok(ToolOutcome::Result {
-                content: serde_json::to_string_pretty(&captured)?,
+                content: serde_json::to_string_pretty(&captured.window)?,
                 image_path: Some(captured.path),
             })
         }
@@ -1248,7 +1328,8 @@ fn result_with_memory_offer(
 pub(crate) fn is_computer_tool(name: &str) -> bool {
     matches!(
         name,
-        "list_cubism_windows"
+        "capture_cubism_editor_window"
+            | "list_cubism_windows"
             | "request_computer_operation"
             | "capture_computer_operation_frame"
             | "perform_computer_action"
@@ -1271,9 +1352,24 @@ fn is_terminal_computer_error(code: &str) -> bool {
     )
 }
 
-fn safe_tool_trace(name: &str, arguments: &str, result: &str) -> (String, String) {
+enum ToolTraceOutcome<'a> {
+    Succeeded(&'a str),
+    WaitingUser,
+    Failed(&'a str),
+}
+
+fn safe_tool_trace(
+    name: &str,
+    arguments: &str,
+    outcome: ToolTraceOutcome<'_>,
+) -> (String, String) {
     if !is_computer_tool(name) {
-        return (arguments.to_string(), result.to_string());
+        let result = match outcome {
+            ToolTraceOutcome::Succeeded(result) => result.to_string(),
+            ToolTraceOutcome::WaitingUser => "waiting_user".into(),
+            ToolTraceOutcome::Failed(error_code) => error_code.to_string(),
+        };
+        return (arguments.to_string(), result);
     }
     let parsed: Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
     let safe_arguments = match name {
@@ -1288,23 +1384,35 @@ fn safe_tool_trace(name: &str, arguments: &str, result: &str) -> (String, String
             "actionType": parsed.pointer("/action/kind"),
         }),
         "finish_computer_operation" => json!({ "outcome": parsed.get("outcome") }),
+        "capture_cubism_editor_window" => json!({ "action": "capture_editor_window" }),
         "list_cubism_windows" => {
             json!({ "phase": if parsed.get("grantId").is_some() { "authorized" } else { "selection" } })
         }
         _ => json!({ "action": "capture" }),
     };
-    let parsed_result = serde_json::from_str::<Value>(result).unwrap_or_else(|_| json!({}));
-    let safe_result = match name {
-        "list_cubism_windows" => {
-            json!({ "windowCount": parsed_result.as_array().map(Vec::len) })
+    let safe_result = match outcome {
+        ToolTraceOutcome::Failed(error_code) => json!({ "errorCode": error_code }),
+        ToolTraceOutcome::WaitingUser => json!({ "state": "waiting_user" }),
+        ToolTraceOutcome::Succeeded(result) => {
+            let parsed_result =
+                serde_json::from_str::<Value>(result).unwrap_or_else(|_| json!({}));
+            match name {
+                "list_cubism_windows" => {
+                    json!({ "windowCount": parsed_result.as_array().map(Vec::len) })
+                }
+                "perform_computer_action" => {
+                    json!({ "actionCount": 1, "result": "captured" })
+                }
+                "finish_computer_operation" => json!({
+                    "actionCount": parsed_result.get("actionCount"),
+                    "outcome": parsed_result.get("outcome"),
+                }),
+                "capture_cubism_editor_window" | "capture_computer_operation_frame" => {
+                    json!({ "result": "captured" })
+                }
+                _ => json!({ "recorded": true }),
+            }
         }
-        "perform_computer_action" => json!({ "actionCount": 1, "result": "captured" }),
-        "finish_computer_operation" => json!({
-            "actionCount": parsed_result.get("actionCount"),
-            "outcome": parsed_result.get("outcome"),
-        }),
-        "capture_computer_operation_frame" => json!({ "result": "captured" }),
-        _ => json!({ "recorded": true }),
     };
     (safe_arguments.to_string(), safe_result.to_string())
 }
@@ -1317,6 +1425,7 @@ fn computer_tool_summary(name: &str, result: &str) -> String {
             .map(|count| format!("发现 {count} 个 Cubism 窗口"))
             .unwrap_or_else(|| "已检查 Cubism 窗口".into()),
         "request_computer_operation" => "已发起电脑代理操作".into(),
+        "capture_cubism_editor_window" => "已获取 Cubism Editor 画面".into(),
         "capture_computer_operation_frame" => "已获取最新 Cubism 画面".into(),
         "perform_computer_action" => "已执行一个手势并获取新画面".into(),
         "finish_computer_operation" => "电脑代理操作已结束".into(),
@@ -1661,7 +1770,6 @@ mod tests {
                 "set_parameter_values",
                 "perform_computer_action",
                 "capture_computer_operation_frame",
-                "list_cubism_windows",
                 "upsert_memory",
             ] {
                 assert!(matches!(
@@ -1670,6 +1778,7 @@ mod tests {
                 ));
             }
             assert!(ensure_tool_access(mode, "get_parameter_values").is_ok());
+            assert!(ensure_tool_access(mode, "list_cubism_windows").is_ok());
         }
         assert!(ensure_tool_access(AgentTurnMode::Default, "submit_plan").is_err());
         assert!(ensure_tool_access(AgentTurnMode::Plan, "submit_plan").is_ok());
@@ -1680,7 +1789,9 @@ mod tests {
         let (arguments, result) = safe_tool_trace(
             "perform_computer_action",
             r#"{"grantId":"secret","frameId":"frame","stepId":"move","action":{"kind":"type_text","text":"C:\\private\\model.cmo3","x":42}}"#,
-            r#"{"frameId":"next","path":"C:\\cache\\capture.png"}"#,
+            ToolTraceOutcome::Succeeded(
+                r#"{"frameId":"next","path":"C:\\cache\\capture.png"}"#,
+            ),
         );
         assert!(arguments.contains("type_text"));
         assert!(arguments.contains("move"));
@@ -1695,6 +1806,64 @@ mod tests {
             assert!(!arguments.contains(sensitive));
             assert!(!result.contains(sensitive));
         }
+
+        let (failed_arguments, failed_result) = safe_tool_trace(
+            "perform_computer_action",
+            r#"{"grantId":"secret","frameId":"frame","stepId":"move","action":{"kind":"drag","fromX":1,"fromY":2,"toX":3,"toY":4}}"#,
+            ToolTraceOutcome::Failed("stale_frame"),
+        );
+        assert!(!failed_arguments.contains("secret"));
+        let failed: Value = serde_json::from_str(&failed_result).unwrap();
+        assert_eq!(failed["errorCode"], "stale_frame");
+        assert!(failed.get("result").is_none());
+    }
+
+    #[test]
+    fn computer_action_schema_declares_six_closed_variants() {
+        let schema = computer_action_schema();
+        let variants = schema["oneOf"].as_array().unwrap();
+        assert_eq!(variants.len(), 6);
+        let kinds = variants
+            .iter()
+            .filter_map(|variant| variant.pointer("/properties/kind/const")?.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            kinds,
+            BTreeSet::from([
+                "click",
+                "double_click",
+                "drag",
+                "scroll",
+                "key",
+                "type_text"
+            ])
+        );
+        assert!(variants
+            .iter()
+            .all(|variant| variant["additionalProperties"] == Value::Bool(false)));
+
+        let drag = variants
+            .iter()
+            .find(|variant| {
+                variant
+                    .pointer("/properties/kind/const")
+                    .and_then(Value::as_str)
+                    == Some("drag")
+            })
+            .unwrap();
+        assert_eq!(drag["properties"]["durationMs"]["minimum"], 100);
+        assert!(drag["properties"].get("duration_ms").is_none());
+        let scroll = variants
+            .iter()
+            .find(|variant| {
+                variant
+                    .pointer("/properties/kind/const")
+                    .and_then(Value::as_str)
+                    == Some("scroll")
+            })
+            .unwrap();
+        assert_eq!(scroll["properties"]["delta"]["minimum"], -1200);
+        assert_eq!(scroll["properties"]["delta"]["maximum"], 1200);
     }
 
     #[test]

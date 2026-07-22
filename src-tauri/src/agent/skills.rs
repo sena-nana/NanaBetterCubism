@@ -14,6 +14,7 @@ const CORE_DOMAIN_TOOLS: &[&str] = &[
 ];
 
 const EDITOR_CONTEXT_TOOLS: &[&str] = &[
+    "list_cubism_windows",
     "capture_cubism_editor_window",
     "list_editor_documents",
     "get_editor_document",

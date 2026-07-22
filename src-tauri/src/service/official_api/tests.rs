@@ -199,6 +199,25 @@ fn catalog_covers_every_official_method_without_exposing_session_primitives() {
 }
 
 #[test]
+fn get_object_invalid_data_is_recoverable_without_reclassifying_other_reads() {
+    let error = read::map_direct_error(
+        "GetObject",
+        crate::protocol::RpcError::Editor {
+            kind: "InvalidData".into(),
+        },
+    );
+    assert_eq!(error.code, "invalid_object_id");
+
+    let unrelated = read::map_direct_error(
+        "GetPartStructure",
+        crate::protocol::RpcError::Editor {
+            kind: "InvalidData".into(),
+        },
+    );
+    assert_eq!(unrelated.code, "InvalidData");
+}
+
+#[test]
 fn schemas_use_documented_ranges_and_reject_raw_uids() {
     let tools = tool_definitions();
     let serialized = serde_json::to_string(&tools).unwrap();

@@ -101,8 +101,13 @@ pub struct CapturedComputerFrame {
     pub path: String,
 }
 
+pub struct CapturedEditorWindow {
+    pub window: ComputerWindow,
+    pub path: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ComputerAction {
     Click {
         x: i32,
@@ -117,11 +122,19 @@ pub enum ComputerAction {
         button: MouseButton,
     },
     Drag {
+        #[serde(rename = "fromX", alias = "from_x")]
         from_x: i32,
+        #[serde(rename = "fromY", alias = "from_y")]
         from_y: i32,
+        #[serde(rename = "toX", alias = "to_x")]
         to_x: i32,
+        #[serde(rename = "toY", alias = "to_y")]
         to_y: i32,
-        #[serde(default = "default_drag_duration")]
+        #[serde(
+            rename = "durationMs",
+            alias = "duration_ms",
+            default = "default_drag_duration"
+        )]
         duration_ms: u64,
     },
     Scroll {
@@ -293,6 +306,45 @@ impl ComputerControlService {
             state.windows.insert(window_id, window);
         }
         Ok(result)
+    }
+
+    pub fn capture_editor_window(
+        &self,
+        window_id: &str,
+        cache_root: &Path,
+    ) -> Result<CapturedEditorWindow, AgentError> {
+        let state = self.inner.lock().unwrap();
+        let window = state.windows.get(window_id).cloned().ok_or_else(|| {
+            AgentError::new(
+                "stale_window",
+                "Cubism 窗口引用不存在或已经失效，请重新列出窗口。",
+            )
+        })?;
+        let capture_id = new_id();
+        let capture = capture_window(
+            &window,
+            &cache_root.join("editor-window-captures"),
+            &capture_id,
+        )
+        .map_err(|error| {
+            if error.code == "window_changed" {
+                AgentError::new(
+                    "stale_window",
+                    "Cubism 窗口尺寸无效或已经变化，请重新列出窗口。",
+                )
+            } else {
+                error
+            }
+        })?;
+        Ok(CapturedEditorWindow {
+            window: ComputerWindow {
+                window_id: window_id.to_string(),
+                title: window.title,
+                width: capture.geometry.width,
+                height: capture.geometry.height,
+            },
+            path: capture.path,
+        })
     }
 
     pub fn permission_status(&self, conversation_id: &str) -> ComputerPermissionStatus {
@@ -870,6 +922,52 @@ fn perform_platform_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn computer_actions_parse_camel_case_and_legacy_drag_fields() {
+        for value in [
+            json!({"kind":"click", "x":1, "y":2}),
+            json!({"kind":"double_click", "x":1, "y":2, "button":"right"}),
+            json!({"kind":"drag", "fromX":1, "fromY":2, "toX":3, "toY":4, "durationMs":200}),
+            json!({"kind":"scroll", "x":1, "y":2, "delta":120}),
+            json!({"kind":"key", "key":"enter", "modifiers":["ctrl"]}),
+            json!({"kind":"type_text", "text":"value"}),
+        ] {
+            assert!(serde_json::from_value::<ComputerAction>(value).is_ok());
+        }
+
+        assert!(serde_json::from_value::<ComputerAction>(json!({
+            "kind":"drag",
+            "from_x":1,
+            "from_y":2,
+            "to_x":3,
+            "to_y":4,
+            "duration_ms":200
+        }))
+        .is_ok());
+    }
+
+    #[test]
+    fn computer_actions_reject_missing_misnamed_and_extra_fields() {
+        for value in [
+            json!({"x":1, "y":2}),
+            json!({"kind":"scroll", "x":1, "y":2}),
+            json!({"kind":"drag", "fromx":1, "fromY":2, "toX":3, "toY":4}),
+            json!({"kind":"click", "x":1, "y":2, "path":"secret"}),
+        ] {
+            assert!(serde_json::from_value::<ComputerAction>(value).is_err());
+        }
+    }
+
+    #[test]
+    fn editor_capture_requires_a_current_discovered_window_reference() {
+        let service = ComputerControlService::new(OperationCoordinator::default());
+        let error = service
+            .capture_editor_window("missing", Path::new("."))
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "stale_window");
+    }
 
     fn fake_window() -> PlatformWindow {
         PlatformWindow {

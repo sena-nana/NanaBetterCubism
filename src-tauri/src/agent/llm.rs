@@ -86,6 +86,7 @@ fn request_body(model: &str, messages: &[Value], tools: &[Value], stream: bool) 
             "messages": messages,
             "tools": tools,
             "tool_choice": "auto",
+            "parallel_tool_calls": false,
             "stream": stream,
         })
     }
@@ -479,6 +480,19 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::Mutex;
+
+    #[test]
+    fn tool_requests_explicitly_disable_parallel_calls() {
+        let body = request_body(
+            "model",
+            &[json!({"role": "user", "content": "hello"})],
+            &[json!({"type": "function", "function": {"name": "tool"}})],
+            true,
+        );
+
+        assert_eq!(body["parallel_tool_calls"], Value::Bool(false));
+        assert_eq!(body["tool_choice"], Value::String("auto".into()));
+    }
 
     #[derive(Clone)]
     struct MockHttpResponse {
