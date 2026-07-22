@@ -30,9 +30,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, EnumWindows, GetClientRect, GetForegroundWindow, GetSystemMetrics,
     GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
-    IsWindowVisible, SetForegroundWindow, ShowWindow, SystemParametersInfoW, SM_CXVIRTUALSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETFOREGROUNDLOCKTIMEOUT,
-    SPI_SETFOREGROUNDLOCKTIMEOUT, SW_RESTORE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    IsWindowVisible, SetForegroundWindow, ShowWindow, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_RESTORE,
 };
 
 struct EnumState {
@@ -48,11 +47,54 @@ trait InputBackend {
     }
 }
 
-struct SystemInputBackend;
+#[derive(Clone, Copy)]
+struct FrameSnapshot {
+    geometry: PlatformGeometry,
+    last_input_tick: u32,
+}
 
-impl InputBackend for SystemInputBackend {
+trait ActionBackend: InputBackend {
+    fn snapshot(&self, hwnd: HWND) -> Result<FrameSnapshot, AgentError>;
+    fn is_foreground(&self, hwnd: HWND) -> bool;
+    fn is_minimized(&self, hwnd: HWND) -> bool;
+    fn restore(&self, hwnd: HWND);
+    fn activate(&self, hwnd: HWND);
+}
+
+struct SystemActionBackend;
+
+impl InputBackend for SystemActionBackend {
     fn send(&self, inputs: &[INPUT]) -> u32 {
         unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) }
+    }
+}
+
+impl ActionBackend for SystemActionBackend {
+    fn snapshot(&self, hwnd: HWND) -> Result<FrameSnapshot, AgentError> {
+        Ok(FrameSnapshot {
+            geometry: geometry(hwnd)?,
+            last_input_tick: last_input_tick()?,
+        })
+    }
+
+    fn is_foreground(&self, hwnd: HWND) -> bool {
+        unsafe { GetForegroundWindow() == hwnd }
+    }
+
+    fn is_minimized(&self, hwnd: HWND) -> bool {
+        unsafe { IsIconic(hwnd).as_bool() }
+    }
+
+    fn restore(&self, hwnd: HWND) {
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+    }
+
+    fn activate(&self, hwnd: HWND) {
+        unsafe {
+            activate_window(hwnd);
+        }
     }
 }
 
@@ -236,32 +278,34 @@ pub(super) fn perform_action(
     if !window_is_current(window) {
         return Err(AgentError::new("stale_window", "Cubism 窗口已经变化。"));
     }
-    if last_input_tick()? != expected_last_input {
-        return Err(AgentError::new(
-            "stale_frame",
-            "截屏后检测到新的用户输入，请重新获取画面。",
-        ));
-    }
+    perform_action_with_backend(
+        window,
+        expected_geometry,
+        expected_last_input,
+        action,
+        &SystemActionBackend,
+    )
+}
+
+fn perform_action_with_backend(
+    window: &PlatformWindow,
+    expected_geometry: PlatformGeometry,
+    expected_last_input: u32,
+    action: &ComputerAction,
+    backend: &impl ActionBackend,
+) -> Result<(), AgentError> {
     let hwnd = hwnd(window.handle);
-    if geometry(hwnd)? != expected_geometry {
-        return Err(AgentError::new(
-            "stale_frame",
-            "Cubism 窗口位置或大小已经变化，请重新获取画面。",
-        ));
-    }
-    ensure_foreground(hwnd)?;
-    if geometry(hwnd)? != expected_geometry {
-        return Err(AgentError::new(
-            "stale_frame",
-            "Cubism 窗口位置或大小已经变化，请重新获取画面。",
-        ));
-    }
-    if last_input_tick()? != expected_last_input {
-        return Err(AgentError::new(
-            "stale_frame",
-            "截屏后检测到新的用户输入，请重新获取画面。",
-        ));
-    }
+    validate_snapshot(
+        backend.snapshot(hwnd)?,
+        expected_geometry,
+        expected_last_input,
+    )?;
+    ensure_foreground(hwnd, backend)?;
+    validate_snapshot(
+        backend.snapshot(hwnd)?,
+        expected_geometry,
+        expected_last_input,
+    )?;
     validate_action(action, expected_geometry)?;
     if let ComputerAction::Drag {
         from_x,
@@ -278,75 +322,62 @@ pub(super) fn perform_action(
             *to_y,
             *duration_ms,
             expected_geometry,
-            &SystemInputBackend,
+            backend,
         );
     }
-    send_all_with_backend(
-        &action_inputs(action, expected_geometry)?,
-        &SystemInputBackend,
-    )
+    send_all_with_backend(&action_inputs(action, expected_geometry)?, backend)
 }
 
-fn ensure_foreground(hwnd: HWND) -> Result<(), AgentError> {
-    unsafe {
-        if GetForegroundWindow() == hwnd {
-            return Ok(());
-        }
-        if IsIconic(hwnd).as_bool() {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
-        }
-        if activate_window(hwnd) {
-            return Ok(());
-        }
-
-        let flags = SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0);
-        let mut timeout = 0u32;
-        if SystemParametersInfoW(
-            SPI_GETFOREGROUNDLOCKTIMEOUT,
-            0,
-            Some((&mut timeout as *mut u32).cast()),
-            flags,
-        )
-        .is_ok()
-        {
-            let mut zero = 0u32;
-            let _ = SystemParametersInfoW(
-                SPI_SETFOREGROUNDLOCKTIMEOUT,
-                0,
-                Some((&mut zero as *mut u32).cast()),
-                flags,
-            );
-            let ok = activate_window(hwnd);
-            let _ = SystemParametersInfoW(
-                SPI_SETFOREGROUNDLOCKTIMEOUT,
-                0,
-                Some((&mut timeout as *mut u32).cast()),
-                flags,
-            );
-            if ok {
-                return Ok(());
-            }
-        }
-
-        Err(AgentError::new(
-            "focus_required",
-            "无法确认 Cubism 窗口已位于前台，请切换到该窗口后重试。",
-        ))
+fn validate_snapshot(
+    snapshot: FrameSnapshot,
+    expected_geometry: PlatformGeometry,
+    expected_last_input: u32,
+) -> Result<(), AgentError> {
+    if snapshot.geometry != expected_geometry {
+        return Err(AgentError::new(
+            "stale_frame",
+            "Cubism 窗口位置或大小已经变化，请重新获取画面。",
+        ));
     }
+    if snapshot.last_input_tick != expected_last_input {
+        return Err(AgentError::new(
+            "stale_frame",
+            "截屏后检测到新的用户输入，请重新获取画面。",
+        ));
+    }
+    Ok(())
 }
 
-unsafe fn activate_window(hwnd: HWND) -> bool {
+fn ensure_foreground(hwnd: HWND, backend: &impl ActionBackend) -> Result<(), AgentError> {
+    if backend.is_foreground(hwnd) {
+        return Ok(());
+    }
+    if backend.is_minimized(hwnd) {
+        backend.restore(hwnd);
+    }
+    backend.activate(hwnd);
+    backend.wait(Duration::from_millis(50));
+    if backend.is_foreground(hwnd) {
+        return Ok(());
+    }
+
+    Err(AgentError::new(
+        "focus_required",
+        "无法确认 Cubism 窗口已位于前台，请切换到该窗口后重试。",
+    ))
+}
+
+unsafe fn activate_window(hwnd: HWND) {
     let current = GetCurrentThreadId();
     let foreground = GetWindowThreadProcessId(GetForegroundWindow(), None);
-    let attached =
-        foreground != 0 && foreground != current && AttachThreadInput(current, foreground, true).as_bool();
+    let attached = foreground != 0
+        && foreground != current
+        && AttachThreadInput(current, foreground, true).as_bool();
     let _ = BringWindowToTop(hwnd);
     let _ = SetForegroundWindow(hwnd);
     if attached {
         let _ = AttachThreadInput(current, foreground, false);
     }
-    std::thread::sleep(Duration::from_millis(50));
-    GetForegroundWindow() == hwnd
 }
 
 fn send_drag_with_backend(
@@ -783,7 +814,7 @@ fn hwnd(value: isize) -> HWND {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
 
     struct FakeInputBackend {
@@ -812,6 +843,74 @@ mod tests {
         fn wait(&self, _duration: Duration) {}
     }
 
+    struct FakeActionBackend {
+        minimized: bool,
+        foreground: Cell<bool>,
+        activation_succeeds: bool,
+        snapshots: RefCell<VecDeque<FrameSnapshot>>,
+        restore_count: Cell<u32>,
+        send_count: Cell<u32>,
+    }
+
+    impl FakeActionBackend {
+        fn new(
+            minimized: bool,
+            activation_succeeds: bool,
+            snapshots: impl IntoIterator<Item = FrameSnapshot>,
+        ) -> Self {
+            Self {
+                minimized,
+                foreground: Cell::new(false),
+                activation_succeeds,
+                snapshots: RefCell::new(snapshots.into_iter().collect()),
+                restore_count: Cell::new(0),
+                send_count: Cell::new(0),
+            }
+        }
+
+        fn next_snapshot(&self) -> FrameSnapshot {
+            let mut values = self.snapshots.borrow_mut();
+            if values.len() > 1 {
+                values.pop_front().unwrap()
+            } else {
+                *values.front().unwrap()
+            }
+        }
+    }
+
+    impl InputBackend for FakeActionBackend {
+        fn send(&self, inputs: &[INPUT]) -> u32 {
+            self.send_count.set(self.send_count.get() + 1);
+            inputs.len() as u32
+        }
+
+        fn wait(&self, _duration: Duration) {}
+    }
+
+    impl ActionBackend for FakeActionBackend {
+        fn snapshot(&self, _hwnd: HWND) -> Result<FrameSnapshot, AgentError> {
+            Ok(self.next_snapshot())
+        }
+
+        fn is_foreground(&self, _hwnd: HWND) -> bool {
+            self.foreground.get()
+        }
+
+        fn is_minimized(&self, _hwnd: HWND) -> bool {
+            self.minimized
+        }
+
+        fn restore(&self, _hwnd: HWND) {
+            self.restore_count.set(self.restore_count.get() + 1);
+        }
+
+        fn activate(&self, _hwnd: HWND) {
+            if self.activation_succeeds {
+                self.foreground.set(true);
+            }
+        }
+    }
+
     fn geometry() -> PlatformGeometry {
         PlatformGeometry {
             screen_x: -1920,
@@ -820,6 +919,80 @@ mod tests {
             height: 600,
             dpi: 144,
         }
+    }
+
+    fn window() -> PlatformWindow {
+        PlatformWindow {
+            handle: 1,
+            process_id: 2,
+            process_started: 3,
+            title: "Cubism Editor".into(),
+            width: 800,
+            height: 600,
+        }
+    }
+
+    fn click() -> ComputerAction {
+        ComputerAction::Click {
+            x: 10,
+            y: 10,
+            button: MouseButton::Left,
+        }
+    }
+
+    fn snapshot() -> FrameSnapshot {
+        FrameSnapshot {
+            geometry: geometry(),
+            last_input_tick: 42,
+        }
+    }
+
+    fn perform_click(backend: &FakeActionBackend) -> Result<(), AgentError> {
+        perform_action_with_backend(&window(), geometry(), 42, &click(), backend)
+    }
+
+    #[test]
+    fn minimized_window_is_restored_and_activated_before_input() {
+        let backend = FakeActionBackend::new(true, true, [snapshot()]);
+
+        perform_click(&backend).unwrap();
+
+        assert_eq!(backend.restore_count.get(), 1);
+        assert_eq!(backend.send_count.get(), 1);
+    }
+
+    #[test]
+    fn refused_activation_requires_focus_without_sending_input() {
+        let backend = FakeActionBackend::new(false, false, [snapshot()]);
+
+        let error = perform_click(&backend).unwrap_err();
+
+        assert_eq!(error.code, "focus_required");
+        assert_eq!(backend.send_count.get(), 0);
+    }
+
+    #[test]
+    fn focus_success_with_changed_geometry_rejects_the_stale_frame() {
+        let mut changed = snapshot();
+        changed.geometry.screen_x += 10;
+        let backend = FakeActionBackend::new(false, true, [snapshot(), changed]);
+
+        let error = perform_click(&backend).unwrap_err();
+
+        assert_eq!(error.code, "stale_frame");
+        assert_eq!(backend.send_count.get(), 0);
+    }
+
+    #[test]
+    fn focus_success_with_new_user_input_rejects_the_stale_frame() {
+        let mut changed = snapshot();
+        changed.last_input_tick += 1;
+        let backend = FakeActionBackend::new(false, true, [snapshot(), changed]);
+
+        let error = perform_click(&backend).unwrap_err();
+
+        assert_eq!(error.code, "stale_frame");
+        assert_eq!(backend.send_count.get(), 0);
     }
 
     #[test]
