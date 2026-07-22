@@ -1,5 +1,8 @@
 use super::{
-    verification::{edit_precondition, verification_snapshot, verify_postcondition},
+    verification::{
+        edit_precondition, precondition_snapshot, shared_precondition_snapshot,
+        shared_verification_snapshot, verification_snapshot, verify_postcondition,
+    },
     CommandError, EditorService,
 };
 use crate::domain::{
@@ -344,11 +347,30 @@ impl EditorService {
                 None,
             );
         }
+        let shared_precondition =
+            match shared_precondition_snapshot(rpc, &plan.method, &plan.model_uid).await {
+                Ok(value) => value,
+                Err(error) => {
+                    return results.result(
+                        EditorEditOutcome::Failed,
+                        format!("前置结构读取失败：{error}"),
+                        0,
+                        None,
+                    );
+                }
+            };
         for (index, item) in plan.items.iter().enumerate() {
             if cancel.load(Ordering::SeqCst) {
                 return results.cancelled_before_begin();
             }
-            let snapshot = match verification_snapshot(rpc, &plan.method, &item.data).await {
+            let snapshot = match precondition_snapshot(
+                rpc,
+                &plan.method,
+                &item.data,
+                shared_precondition.as_ref(),
+            )
+            .await
+            {
                 Ok(value) => value,
                 Err(error) => {
                     return results.result(
@@ -538,6 +560,10 @@ impl EditorService {
             unverifiable_indices: Vec::new(),
         };
         let ordered_positions = expected_ordered_move_positions(plan);
+        let shared_verification = shared_verification_snapshot(rpc, &plan.method, &plan.model_uid)
+            .await
+            .ok()
+            .flatten();
         for (index, item) in plan.items.iter().enumerate() {
             match verification_snapshot(rpc, &plan.method, &item.data).await {
                 Ok(snapshot) => {
@@ -550,7 +576,12 @@ impl EditorService {
                     }) {
                         expected["InsertIndex"] = json!(position);
                     }
-                    match verify_postcondition(&plan.method, &expected, &snapshot) {
+                    match verify_postcondition(
+                        &plan.method,
+                        &expected,
+                        &snapshot,
+                        shared_verification.as_ref(),
+                    ) {
                         Some(true) => verification.verified += 1,
                         Some(false) => verification.mismatched_indices.push(index + 1),
                         None => verification.unverifiable_indices.push(index + 1),
