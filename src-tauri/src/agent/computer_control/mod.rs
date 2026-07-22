@@ -5,15 +5,14 @@ use crate::agent::{new_id, AgentError};
 use crate::service::{OperationCoordinator, OperationOwnerKind, OperationPermit};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-const GRANT_LIFETIME: Duration = Duration::from_secs(5 * 60);
 const MAX_GESTURES: u32 = 30;
 const MAX_SETTLE_MS: u64 = 2_000;
 
@@ -69,6 +68,13 @@ pub enum ComputerOperationStatus {
     Cancelled,
     Failed,
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputerPermissionStatus {
+    NotGranted,
+    Granted,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -186,6 +192,7 @@ pub struct ComputerControlService {
 #[derive(Default)]
 struct ComputerControlState {
     windows: HashMap<String, PlatformWindow>,
+    permissions: HashSet<String>,
     grant: Option<ComputerGrant>,
     frames: HashMap<String, FrameRecord>,
 }
@@ -207,7 +214,6 @@ struct ComputerGrant {
     step_ids: BTreeSet<String>,
     includes_file_dialogs: bool,
     document_instance_key: Option<String>,
-    expires_at: Instant,
     action_count: u32,
     cache_dir: Option<PathBuf>,
     _permit: OperationPermit,
@@ -257,7 +263,6 @@ impl ComputerControlService {
 
     pub fn list_windows(&self, grant_id: Option<&str>) -> Result<Vec<ComputerWindow>, AgentError> {
         let mut state = self.inner.lock().unwrap();
-        expire_state(&mut state);
         let process_filter = match grant_id {
             Some(id) => {
                 let grant = require_grant(&state, id)?;
@@ -272,7 +277,7 @@ impl ComputerControlService {
             }
             return Err(AgentError::new(
                 "process_changed",
-                "已授权的 Cubism 进程已经变化，需重新授权。",
+                "Cubism 进程已经变化，本次操作已结束，请重新选择窗口。",
             ));
         }
         state.windows.clear();
@@ -290,6 +295,58 @@ impl ComputerControlService {
         Ok(result)
     }
 
+    pub fn permission_status(&self, conversation_id: &str) -> ComputerPermissionStatus {
+        if self.has_permission(conversation_id) {
+            ComputerPermissionStatus::Granted
+        } else {
+            ComputerPermissionStatus::NotGranted
+        }
+    }
+
+    pub fn has_permission(&self, conversation_id: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .permissions
+            .contains(conversation_id)
+    }
+
+    pub fn grant_permission(&self, conversation_id: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .permissions
+            .insert(conversation_id.to_string())
+    }
+
+    pub fn revoke_permission(&self, conversation_id: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .permissions
+            .remove(conversation_id)
+    }
+
+    pub fn validate_operation_request(
+        &self,
+        target_window_id: &str,
+        capability: UnsupportedCapability,
+        goal: &str,
+        steps: &[ComputerOperationStep],
+        allowed_actions: &[ComputerActionKind],
+    ) -> Result<String, AgentError> {
+        let state = self.inner.lock().unwrap();
+        Ok(validate_request_target(
+            &state,
+            target_window_id,
+            capability,
+            goal,
+            steps,
+            allowed_actions,
+        )?
+        .title)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn grant(
         &self,
@@ -302,29 +359,21 @@ impl ComputerControlService {
         includes_file_dialogs: bool,
         document_instance_key: Option<String>,
     ) -> Result<Value, AgentError> {
-        if !capability.available_in_first_release() {
-            return Err(AgentError::new(
-                "computer_capability_not_validated",
-                "该类电脑代理操作尚未通过真实 Editor 验证，当前不可用。",
-            ));
-        }
-        validate_plan(&goal, &steps, &allowed_actions)?;
         let mut state = self.inner.lock().unwrap();
-        expire_state(&mut state);
-        if state.grant.is_some() {
+        if !state.permissions.contains(conversation_id) {
             return Err(AgentError::new(
-                "computer_operation_active",
-                "已有电脑代理操作正在执行。",
+                "computer_permission_required",
+                "需要先获得独立的电脑操作权限。",
             ));
         }
-        let target = state
-            .windows
-            .get(target_window_id)
-            .cloned()
-            .ok_or_else(|| AgentError::new("stale_window", "目标窗口已失效，请重新列出窗口。"))?;
-        if !window_is_current(&target) {
-            return Err(AgentError::new("stale_window", "目标窗口已经变化。"));
-        }
+        let target = validate_request_target(
+            &state,
+            target_window_id,
+            capability,
+            &goal,
+            &steps,
+            &allowed_actions,
+        )?;
         let grant_id = new_id();
         let permit = self
             .coordinator
@@ -344,7 +393,6 @@ impl ComputerControlService {
             step_ids: steps.into_iter().map(|step| step.id).collect(),
             includes_file_dialogs,
             document_instance_key,
-            expires_at: Instant::now() + GRANT_LIFETIME,
             action_count: 0,
             cache_dir: None,
             _permit: permit,
@@ -356,8 +404,7 @@ impl ComputerControlService {
     }
 
     pub fn has_active_grant(&self, conversation_id: &str) -> bool {
-        let mut state = self.inner.lock().unwrap();
-        expire_state(&mut state);
+        let state = self.inner.lock().unwrap();
         state
             .grant
             .as_ref()
@@ -373,7 +420,6 @@ impl ComputerControlService {
         current_document_instance_key: Option<&str>,
     ) -> Result<CapturedComputerFrame, AgentError> {
         let mut state = self.inner.lock().unwrap();
-        expire_state(&mut state);
         let selection = {
             let grant = require_grant_for_conversation(&state, grant_id, conversation_id)?;
             verify_document(grant, current_document_instance_key)
@@ -451,7 +497,6 @@ impl ComputerControlService {
             return Err(AgentError::new("cancelled", "已取消。"));
         }
         let mut state = self.inner.lock().unwrap();
-        expire_state(&mut state);
         let frame = state
             .frames
             .get(frame_id)
@@ -588,17 +633,51 @@ impl ComputerControlService {
         }
     }
 
-    pub fn cancel_conversation(&self, conversation_id: &str) {
+    pub fn stop_conversation(&self, conversation_id: &str) -> bool {
         let mut state = self.inner.lock().unwrap();
-        if let Some(id) = state
+        let permission_revoked = state.permissions.remove(conversation_id);
+        let grant_id = state
             .grant
             .as_ref()
             .filter(|grant| grant.conversation_id == conversation_id)
-            .map(|grant| grant.id.clone())
-        {
-            revoke_grant(&mut state, &id);
+            .map(|grant| grant.id.clone());
+        if let Some(grant_id) = grant_id {
+            revoke_grant(&mut state, &grant_id);
         }
+        permission_revoked
     }
+}
+
+fn validate_request_target(
+    state: &ComputerControlState,
+    target_window_id: &str,
+    capability: UnsupportedCapability,
+    goal: &str,
+    steps: &[ComputerOperationStep],
+    allowed_actions: &[ComputerActionKind],
+) -> Result<PlatformWindow, AgentError> {
+    if !capability.available_in_first_release() {
+        return Err(AgentError::new(
+            "computer_capability_not_validated",
+            "该类电脑代理操作尚未通过真实 Editor 验证，当前不可用。",
+        ));
+    }
+    validate_plan(goal, steps, allowed_actions)?;
+    if state.grant.is_some() {
+        return Err(AgentError::new(
+            "computer_operation_active",
+            "已有电脑代理操作正在执行。",
+        ));
+    }
+    let target = state
+        .windows
+        .get(target_window_id)
+        .cloned()
+        .ok_or_else(|| AgentError::new("stale_window", "目标窗口已失效，请重新列出窗口。"))?;
+    if !window_is_current(&target) {
+        return Err(AgentError::new("stale_window", "目标窗口已经变化。"));
+    }
+    Ok(target)
 }
 
 fn validate_plan(
@@ -648,8 +727,8 @@ fn require_grant<'a>(
     state
         .grant
         .as_ref()
-        .filter(|grant| grant.id == grant_id && grant.expires_at > Instant::now())
-        .ok_or_else(|| AgentError::new("grant_not_found", "电脑代理授权已失效。"))
+        .filter(|grant| grant.id == grant_id)
+        .ok_or_else(|| AgentError::new("grant_not_found", "本次电脑操作已失效。"))
 }
 
 fn require_grant_for_conversation<'a>(
@@ -661,7 +740,7 @@ fn require_grant_for_conversation<'a>(
     if grant.conversation_id != conversation_id {
         return Err(AgentError::new(
             "grant_not_found",
-            "电脑代理授权不属于当前对话。",
+            "本次电脑操作不属于当前对话。",
         ));
     }
     Ok(grant)
@@ -675,7 +754,7 @@ fn verify_document(
         if current_document_instance_key != Some(expected) {
             return Err(AgentError::new(
                 "document_changed",
-                "当前 Cubism 文档已经变化，需要重新授权。",
+                "当前 Cubism 文档已经变化，本次操作已结束，请重新发起操作。",
             ));
         }
     }
@@ -704,19 +783,6 @@ fn select_window(
         ));
     }
     Ok((selected.to_string(), window))
-}
-
-fn expire_state(state: &mut ComputerControlState) {
-    let now = Instant::now();
-    if state
-        .grant
-        .as_ref()
-        .is_some_and(|grant| grant.expires_at <= now)
-    {
-        if let Some(id) = state.grant.as_ref().map(|grant| grant.id.clone()) {
-            revoke_grant(state, &id);
-        }
-    }
 }
 
 fn revoke_grant(state: &mut ComputerControlState, grant_id: &str) {
@@ -825,6 +891,7 @@ mod tests {
             .try_acquire(OperationOwnerKind::ComputerControl, "grant")
             .unwrap();
         let mut state = service.inner.lock().unwrap();
+        state.permissions.insert("conversation".into());
         state.grant = Some(ComputerGrant {
             id: "grant".into(),
             conversation_id: "conversation".into(),
@@ -834,7 +901,6 @@ mod tests {
             step_ids: BTreeSet::from(["move".into()]),
             includes_file_dialogs: false,
             document_instance_key: None,
-            expires_at: Instant::now() + Duration::from_secs(10),
             action_count: 0,
             cache_dir: None,
             _permit: permit,
@@ -927,7 +993,32 @@ mod tests {
     }
 
     #[test]
-    fn second_grant_is_rejected_and_expired_grants_are_reaped() {
+    fn operation_grants_require_conversation_scoped_permission() {
+        let service = ComputerControlService::new(OperationCoordinator::default());
+        let error = service
+            .grant(
+                "conversation",
+                "window",
+                UnsupportedCapability::WarpControlPoints,
+                "调整控制点".into(),
+                vec![ComputerOperationStep {
+                    id: "move".into(),
+                    title: "拖动控制点".into(),
+                }],
+                vec![ComputerActionKind::Drag],
+                false,
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "computer_permission_required");
+        assert!(service.grant_permission("conversation"));
+        assert!(service.has_permission("conversation"));
+        assert!(!service.has_permission("other"));
+        assert!(!service.grant_permission("conversation"));
+    }
+
+    #[test]
+    fn permission_and_active_grant_persist_until_explicit_stop() {
         let coordinator = OperationCoordinator::default();
         let service = ComputerControlService::new(coordinator.clone());
         install_fake_grant_and_frame(&service, &coordinator, fake_window());
@@ -949,14 +1040,10 @@ mod tests {
             .unwrap();
         assert_eq!(error.code, "computer_operation_active");
         assert!(service.has_active_grant("conversation"));
-
-        {
-            let mut state = service.inner.lock().unwrap();
-            if let Some(grant) = state.grant.as_mut() {
-                grant.expires_at = Instant::now() - Duration::from_secs(1);
-            }
-        }
+        assert!(service.has_permission("conversation"));
+        assert!(service.stop_conversation("conversation"));
         assert!(!service.has_active_grant("conversation"));
+        assert!(!service.has_permission("conversation"));
     }
 
     #[test]
@@ -971,6 +1058,7 @@ mod tests {
         std::fs::write(cache_dir.join("frame.png"), b"temporary").unwrap();
         {
             let mut state = service.inner.lock().unwrap();
+            state.permissions.insert("conversation".into());
             state.grant = Some(ComputerGrant {
                 id: "grant".into(),
                 conversation_id: "conversation".into(),
@@ -980,7 +1068,6 @@ mod tests {
                 step_ids: BTreeSet::from(["move".into()]),
                 includes_file_dialogs: false,
                 document_instance_key: Some("document".into()),
-                expires_at: Instant::now() + Duration::from_secs(10),
                 action_count: 2,
                 cache_dir: Some(cache_dir.clone()),
                 _permit: permit,
@@ -1054,6 +1141,6 @@ mod tests {
             ),
             Err(error) if error.code == "window_not_approved"
         ));
-        service.cancel_conversation("conversation");
+        service.revoke_grant_for_conversation("conversation");
     }
 }

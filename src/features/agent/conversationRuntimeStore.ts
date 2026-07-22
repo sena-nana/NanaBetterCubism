@@ -1,11 +1,13 @@
 import { computed, reactive } from "vue";
 import {
   getMessages,
+  getComputerPermission,
   getPendingUserAction,
   getPlan,
   listenAskDraft,
   listPsds,
   listenComputerOperation,
+  listenComputerPermission,
   listenPlan,
   listenToolEvent,
   listenTurnDelta,
@@ -20,6 +22,7 @@ import type {
   ChatImageDraft,
   ChatPsdDocument,
   ComputerOperationStatus,
+  ComputerPermissionStatus,
   ConversationPlan,
   PendingUserAction,
 } from "./types";
@@ -34,6 +37,7 @@ export interface ConversationRuntimeState {
   pendingAction: PendingUserAction | null;
   askDraft: string | null;
   computerStatus: ComputerOperationStatus;
+  computerPermission: ComputerPermissionStatus;
   draft: string;
   imageDrafts: ChatImageDraft[];
   psdDocuments: ChatPsdDocument[];
@@ -98,6 +102,11 @@ export function installConversationRuntimeStore() {
       state.computerStatus = payload.status;
       touch(state);
     }),
+    listenComputerPermission((payload) => {
+      const state = runtimeState(payload.conversationId);
+      state.computerPermission = payload.status;
+      touch(state);
+    }),
     listenPlan((payload) => {
       const state = runtimeState(payload.conversationId);
       state.plan = payload.plan;
@@ -138,11 +147,12 @@ export async function loadConversationRuntime(
   state.loading = true;
   if (!options.preserveError) state.error = null;
   try {
-    const [messages, plan, pendingAction, psdDocuments] = await Promise.all([
+    const [messages, plan, pendingAction, psdDocuments, computerPermission] = await Promise.all([
       getMessages(conversationId),
       getPlan(conversationId),
       getPendingUserAction(conversationId),
       listPsds(conversationId),
+      getComputerPermission(conversationId),
     ]);
     if (epoch !== state.loadEpoch) return state;
 
@@ -156,6 +166,7 @@ export async function loadConversationRuntime(
       state.pendingAction = pendingAction;
       state.askDraft = null;
       state.psdDocuments = psdDocuments;
+      state.computerPermission = computerPermission;
       if (pendingAction?.kind === "plan_approval") state.composerMode = "plan";
     }
     if (pendingAction) setConversationTurnPhase(conversationId, "awaiting_input");
@@ -258,6 +269,7 @@ function runtimeState(conversationId: string) {
       pendingAction: null,
       askDraft: null,
       computerStatus: "idle",
+      computerPermission: "not_granted",
       draft: "",
       imageDrafts: [],
       psdDocuments: [],

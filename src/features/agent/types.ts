@@ -222,9 +222,23 @@ export interface PlanApprovalAction {
   title: string;
 }
 
-export type PendingUserAction = PendingQuestionAction | PlanApprovalAction;
+export interface ComputerPermissionAction {
+  kind: "computer_permission";
+  actionId: string;
+  conversationId: string;
+  goal: string;
+  windowTitle: string;
+  includesFileDialogs: boolean;
+}
+
+export type PendingUserAction =
+  | PendingQuestionAction
+  | PlanApprovalAction
+  | ComputerPermissionAction;
 export type PlanDecision = "approve" | "revise" | "cancel";
 export type PlanDecisionResult = "execution_started" | "revision_started" | "cancelled";
+export type ComputerPermissionDecision = "allow" | "deny";
+export type ComputerPermissionStatus = "not_granted" | "granted";
 
 export type ComputerOperationStatus =
   | "idle"
@@ -237,7 +251,7 @@ export type ComputerOperationStatus =
   | "unknown";
 
 export interface CancelTurnResult {
-  state: "cancel_requested" | "pending_cleared" | "idle";
+  state: "cancel_requested" | "pending_cleared" | "permission_revoked" | "idle";
 }
 
 export interface AgentUserActionEvent {
@@ -248,6 +262,11 @@ export interface AgentUserActionEvent {
 export interface AgentComputerOperationEvent {
   conversationId: string;
   status: ComputerOperationStatus;
+}
+
+export interface AgentComputerPermissionEvent {
+  conversationId: string;
+  status: ComputerPermissionStatus;
 }
 
 export interface AgentPlanEvent {

@@ -5,6 +5,7 @@ import UiImageViewer from "@lilia/image-viewer/components/ImageViewer";
 import {
   answerQuestion,
   cancelTurn,
+  decideComputerPermission,
   decidePlan,
   listConversations,
   normalizeCommandError,
@@ -28,7 +29,7 @@ import {
 import {
   applyConversationGroup,
 } from "./sidebarConversations";
-import type { ConversationSummary, PlanDecision } from "./types";
+import type { ComputerPermissionDecision, ConversationSummary, PlanDecision } from "./types";
 import { addDroppedChatPaths } from "./chatDropPaths";
 import { useChatImageDrafts } from "./useChatImageDrafts";
 import { MAX_CHAT_PSD, useChatPsdDocuments } from "./useChatPsdDocuments";
@@ -242,6 +243,24 @@ async function onCancel() {
   }
 }
 
+async function onDecideComputerPermission(decision: ComputerPermissionDecision) {
+  const permission = runtime.value.pendingAction?.kind === "computer_permission"
+    ? runtime.value.pendingAction
+    : null;
+  if (!permission) return;
+  const state = getConversationRuntime(permission.conversationId);
+  state.error = null;
+  try {
+    await decideComputerPermission(permission.actionId, decision);
+    state.pendingAction = null;
+    setConversationTurnPhase(permission.conversationId, "running");
+  } catch (err) {
+    state.pendingAction = permission;
+    setConversationTurnPhase(permission.conversationId, "awaiting_input");
+    state.error = normalizeCommandError(err).message;
+  }
+}
+
 async function onAnswerAsk(answer?: string) {
   const currentAsk = runtime.value.pendingAction?.kind === "question"
     ? runtime.value.pendingAction
@@ -306,6 +325,7 @@ async function onAnswerAsk(answer?: string) {
         :ask-draft="runtime.askDraft"
         :pending-action="runtime.pendingAction"
         :computer-status="runtime.computerStatus"
+        :computer-permission="runtime.computerPermission"
         :disabled="!llm.state.config.hasApiKey"
         :running="turn.running.value"
         :cancelling="turn.cancelling.value"
@@ -318,6 +338,7 @@ async function onAnswerAsk(answer?: string) {
         @cancel="onCancel"
         @answer="onAnswerAsk"
         @decide-plan="onDecidePlan"
+        @decide-computer-permission="onDecideComputerPermission"
         @pick-images="imageDraftController.pickImages"
         @pick-psd="psdController.pickPsd"
         @remove-image="imageDraftController.removeImage"

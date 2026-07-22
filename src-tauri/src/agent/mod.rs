@@ -18,7 +18,7 @@ mod user_action;
 pub use commands::*;
 pub use plan::{PlanApprovalAction, PlanDecision, PlanDecisionResult};
 pub use store::AgentStore;
-pub use user_action::PendingUserAction;
+pub use user_action::{ComputerPermissionDecision, PendingUserAction};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -123,6 +123,7 @@ impl AgentRuntime {
 pub struct PendingContinuation {
     pub conversation_id: String,
     pub tool_call_id: String,
+    pub action: PendingUserAction,
     pub state: AgentTurnState,
 }
 
@@ -130,6 +131,7 @@ pub struct AgentTurnState {
     pub mode: AgentTurnMode,
     pub messages: Vec<serde_json::Value>,
     pub active_skills: BTreeSet<String>,
+    pub computer_permission_denied: bool,
 }
 
 impl AgentTurnState {
@@ -138,6 +140,7 @@ impl AgentTurnState {
             mode,
             messages,
             active_skills: BTreeSet::new(),
+            computer_permission_denied: false,
         }
     }
 }
@@ -181,11 +184,23 @@ pub(crate) fn emit_conversations_changed(app: &AppHandle) {
     let _ = app.emit("agent://conversations-changed", json!({}));
 }
 
+pub(crate) fn emit_computer_permission(
+    app: &AppHandle,
+    conversation_id: &str,
+    status: computer_control::ComputerPermissionStatus,
+) {
+    let _ = app.emit(
+        "agent://computer-permission",
+        json!({ "conversationId": conversation_id, "status": status }),
+    );
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CancelTurnState {
     CancelRequested,
     PendingCleared,
+    PermissionRevoked,
     Idle,
 }
 
@@ -277,6 +292,7 @@ impl AgentRuntime {
                 "对话正在运行或等待回答，暂时无法删除。",
             ));
         }
+        self.computer_control.stop_conversation(conversation_id);
         self.store.delete_conversation(conversation_id)?;
         self.images.delete_conversation_images(conversation_id)?;
         self.psd.delete_conversation_psds(conversation_id)
@@ -304,6 +320,33 @@ impl AgentRuntime {
         Ok((conversation_id, cancel))
     }
 
+    pub async fn begin_computer_permission_decision(
+        &self,
+        action_id: &str,
+    ) -> Result<(String, Arc<AtomicBool>), AgentError> {
+        let conversation_id = self
+            .pending_continuations
+            .lock()
+            .await
+            .get(action_id)
+            .filter(|continuation| continuation.action.is_computer_permission())
+            .map(|continuation| continuation.conversation_id.clone())
+            .ok_or_else(|| {
+                AgentError::new("computer_permission_not_found", "电脑操作权限请求已失效。")
+            })?;
+        let cancel = self.begin_turn(&conversation_id).await?;
+        Ok((conversation_id, cancel))
+    }
+
+    pub async fn pending_runtime_action(&self, conversation_id: &str) -> Option<PendingUserAction> {
+        self.pending_continuations
+            .lock()
+            .await
+            .values()
+            .find(|continuation| continuation.conversation_id == conversation_id)
+            .map(|continuation| continuation.action.clone())
+    }
+
     pub async fn finish_turn(&self, conversation_id: &str, cancel: &Arc<AtomicBool>) -> bool {
         let mut flags = self.cancel_flags.lock().await;
         if flags
@@ -324,7 +367,8 @@ impl AgentRuntime {
     ) -> Result<bool, AgentError> {
         let question_cleared = self.store.clear_pending_user_action(conversation_id)?;
         let grant_cleared = self.computer_control.has_active_grant(conversation_id);
-        self.computer_control.cancel_conversation(conversation_id);
+        self.computer_control
+            .revoke_grant_for_conversation(conversation_id);
         let mut pending = self.pending_continuations.lock().await;
         let previous_len = pending.len();
         pending.retain(|_, value| value.conversation_id != conversation_id);
@@ -335,6 +379,7 @@ impl AgentRuntime {
         &self,
         conversation_id: &str,
     ) -> Result<CancelTurnResult, AgentError> {
+        let permission_revoked = self.computer_control.stop_conversation(conversation_id);
         if let Some(flag) = self.cancel_flags.lock().await.get(conversation_id) {
             flag.store(true, std::sync::atomic::Ordering::SeqCst);
             return Ok(CancelTurnResult {
@@ -345,6 +390,10 @@ impl AgentRuntime {
         if self.clear_pending_user_action(conversation_id).await? {
             Ok(CancelTurnResult {
                 state: CancelTurnState::PendingCleared,
+            })
+        } else if permission_revoked {
+            Ok(CancelTurnResult {
+                state: CancelTurnState::PermissionRevoked,
             })
         } else {
             Ok(CancelTurnResult {
@@ -373,11 +422,12 @@ pub const COLLABORATION_PROMPT: &str = "\
 ## Collaboration
 - Resolve ambiguity (naming, group choice, whether to create BlendShape/Repeat, which Parts) with ask_user before gathering previews.
 - For Cubism edits, gather every preview needed this turn, then call ask_user once describing all operations together and request round approval. After approval, execute all confirmed edits without further per-edit ask; skip the round approval only if the current user message already authorizes that exact set of changes. If the plan changes mid-round but its targets, end state, affected scope, destructive impact, permission requirements, and external side effects remain semantically equivalent, continue without another ask_user; method, order, and batching may change. Otherwise stop and re-confirm.
+- Computer control is a separate permission domain. ask_user approval never authorizes request_computer_operation; wait for its dedicated permission result and do not capture or inject input before a grant is returned.
 - For multi-step work, maintain update_plan with clear step statuses.";
 
 pub const AUTO_APPROVE_PROMPT: &str = "\
 ## Auto-approve mode
-Operate autonomously this turn. Do not request user confirmation or per-turn approval before acting. The backend has pre-approved every tool call and computer-operation request for this turn. Gather previews and execute confirmed Cubism edits directly, and proceed with request_computer_operation / capture / perform / finish without waiting for user authorization. Still honor every preview, transaction, cancellation, disconnect cleanup, and reread-verification rule from the base prompt. Except for precondition_conflict handling defined there, report any failed step and stop; never claim success without a committed result.";
+Operate autonomously this turn for ordinary tool calls and Cubism edit approval. Gather previews and execute confirmed Cubism edits directly without another confirmation tool call. Computer control is never auto-approved: request_computer_operation may pause for its dedicated permission, and no capture or input is allowed until it returns a grant. Still honor every preview, transaction, cancellation, disconnect cleanup, and reread-verification rule from the base prompt. Except for precondition_conflict handling defined there, report any failed step and stop; never claim success without a committed result.";
 
 pub const CONVERSATION_ONLY_PROMPT: &str = "\
 ## Conversation-only mode
@@ -400,6 +450,7 @@ mod tests {
         let states = [
             (CancelTurnState::CancelRequested, "cancel_requested"),
             (CancelTurnState::PendingCleared, "pending_cleared"),
+            (CancelTurnState::PermissionRevoked, "permission_revoked"),
             (CancelTurnState::Idle, "idle"),
         ];
 
@@ -454,6 +505,12 @@ mod tests {
         let resumed = PendingContinuation {
             conversation_id: "conversation".into(),
             tool_call_id: "ask-call".into(),
+            action: PendingUserAction::from(PendingQuestion {
+                action_id: "ask".into(),
+                conversation_id: "conversation".into(),
+                question: "确认？".into(),
+                options: Vec::new(),
+            }),
             state,
         }
         .resume(Value::String("确认".into()));
@@ -543,10 +600,12 @@ mod tests {
             PendingContinuation {
                 conversation_id: conversation.id.clone(),
                 tool_call_id: "tool-call".into(),
+                action: PendingUserAction::from(question.clone()),
                 state: AgentTurnState {
                     mode: AgentTurnMode::Default,
                     messages: Vec::new(),
                     active_skills: BTreeSet::new(),
+                    computer_permission_denied: false,
                 },
             },
         );
@@ -569,6 +628,15 @@ mod tests {
                 state: CancelTurnState::Idle,
             }
         );
+
+        runtime.computer_control.grant_permission(&conversation.id);
+        assert_eq!(
+            runtime.request_cancel(&conversation.id).await.unwrap(),
+            CancelTurnResult {
+                state: CancelTurnState::PermissionRevoked,
+            }
+        );
+        assert!(!runtime.computer_control.has_permission(&conversation.id));
     }
 
     #[tokio::test]
@@ -611,6 +679,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ordinary_turn_cleanup_keeps_computer_permission() {
+        let runtime = AgentRuntime::default();
+        runtime.store.open(":memory:".into()).unwrap();
+        let conversation = runtime.store.create_conversation(None, None).unwrap();
+        runtime.computer_control.grant_permission(&conversation.id);
+
+        assert!(!runtime
+            .clear_pending_user_action(&conversation.id)
+            .await
+            .unwrap());
+        assert!(runtime.computer_control.has_permission(&conversation.id));
+    }
+
+    #[tokio::test]
     async fn free_text_answers_cannot_resume_a_structured_approval() {
         let runtime = AgentRuntime::default();
         runtime.store.open(":memory:".into()).unwrap();
@@ -620,6 +702,13 @@ mod tests {
             PendingContinuation {
                 conversation_id: conversation.id,
                 tool_call_id: "computer-call".into(),
+                action: PendingUserAction::ComputerPermission {
+                    action_id: "approval".into(),
+                    conversation_id: "conversation".into(),
+                    goal: "调整控制点".into(),
+                    window_title: "Cubism Editor".into(),
+                    includes_file_dialogs: false,
+                },
                 state: AgentTurnState::new(Vec::new(), AgentTurnMode::Default),
             },
         );

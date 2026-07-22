@@ -1,8 +1,10 @@
-use crate::agent::computer_control::ComputerOperationStatus;
+use crate::agent::computer_control::{ComputerOperationStatus, ComputerPermissionStatus};
 use crate::agent::images::{ChatImageAttachment, ImagePrepareInput, ImagePrepareRejection, ImagePrepareResult};
 use crate::agent::llm::test_connection;
 use crate::agent::psd::{ChatPsdDocument, PsdStructure};
-use crate::agent::runtime::{continue_after_question, run_turn};
+use crate::agent::runtime::{
+    continue_after_computer_permission, continue_after_question, run_turn,
+};
 use crate::agent::store::{
     ChatMessage, ConversationPlan, ConversationSummary, LlmConfigInput, LlmConfigView,
     MemoryViewRecord, ProjectRecord,
@@ -10,8 +12,9 @@ use crate::agent::store::{
 use crate::agent::title::generate_conversation_title;
 use crate::agent::tools::tool_display_name;
 use crate::agent::{
-    emit_conversations_changed, AgentError, AgentRuntime, AgentTurnMode, CancelTurnResult,
-    PendingUserAction, PlanDecision, PlanDecisionResult,
+    emit_computer_permission, emit_conversations_changed, AgentError, AgentRuntime, AgentTurnMode,
+    CancelTurnResult, ComputerPermissionDecision, PendingUserAction, PlanDecision,
+    PlanDecisionResult,
 };
 use crate::service::{official_api, EditorService};
 use serde::Serialize;
@@ -468,6 +471,11 @@ pub async fn agent_cancel_turn(
     let runtime = runtime(&app)?;
     let had_active_grant = runtime.computer_control.has_active_grant(&conversation_id);
     let result = runtime.request_cancel(&conversation_id).await?;
+    emit_computer_permission(
+        &app,
+        &conversation_id,
+        ComputerPermissionStatus::NotGranted,
+    );
     if had_active_grant {
         let _ = app.emit(
             "agent://computer-operation",
@@ -517,6 +525,53 @@ pub async fn agent_answer_question(
 }
 
 #[tauri::command]
+pub async fn agent_decide_computer_permission(
+    app: AppHandle,
+    action_id: String,
+    decision: ComputerPermissionDecision,
+) -> Result<(), AgentError> {
+    let runtime = runtime(&app)?;
+    let (conversation_id, cancel) = runtime
+        .begin_computer_permission_decision(&action_id)
+        .await?;
+    let status = match decision {
+        ComputerPermissionDecision::Allow => {
+            runtime.computer_control.grant_permission(&conversation_id);
+            ComputerPermissionStatus::Granted
+        }
+        ComputerPermissionDecision::Deny => {
+            runtime.computer_control.revoke_permission(&conversation_id);
+            ComputerPermissionStatus::NotGranted
+        }
+    };
+    emit_computer_permission(&app, &conversation_id, status);
+    let app_clone = app.clone();
+    let runtime_clone = runtime.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = continue_after_computer_permission(
+            app_clone,
+            runtime_clone,
+            action_id,
+            conversation_id,
+            decision,
+            cancel,
+        )
+        .await;
+    });
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn agent_get_computer_permission(
+    app: AppHandle,
+    conversation_id: String,
+) -> Result<ComputerPermissionStatus, AgentError> {
+    let runtime = runtime(&app)?;
+    runtime.store.ensure_active_conversation(&conversation_id)?;
+    Ok(runtime.computer_control.permission_status(&conversation_id))
+}
+
+#[tauri::command]
 pub async fn agent_get_plan(
     app: AppHandle,
     conversation_id: String,
@@ -535,6 +590,9 @@ pub async fn agent_get_pending_user_action(
     runtime.store.ensure_active_conversation(&conversation_id)?;
     if let Some(approval) = runtime.store.get_pending_plan_approval(&conversation_id)? {
         return Ok(Some(approval.action.into()));
+    }
+    if let Some(action) = runtime.pending_runtime_action(&conversation_id).await {
+        return Ok(Some(action));
     }
     Ok(runtime
         .store

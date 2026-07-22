@@ -228,7 +228,7 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
         read_tool(
             "ask_user",
             "请求本轮操作授权",
-            "提交本轮所有要做的 Cubism 编辑操作并请求用户允许。须把本轮全部操作（含各 preview 摘要）在 question 中一起说明；用户允许后整轮执行不再逐次询问。歧义消解请在调用前单独提问。",
+            "提交本轮所有要做的 Cubism 编辑操作并请求用户允许。须把本轮全部操作（含各 preview 摘要）在 question 中一起说明；用户允许后整轮执行不再逐次询问。电脑操作权限始终由 request_computer_operation 独立申请，ask_user 不能替代。歧义消解请在调用前单独提问。",
             json!({
                 "type": "object",
                 "properties": {
@@ -274,7 +274,7 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
         mutating_tool(
             "request_computer_operation",
             "请求电脑操作",
-            "仅当能力矩阵确认官方 API 缺失时，提交完整计划以获得操作 grant。",
+            "仅当能力矩阵确认官方 API 缺失时提交完整计划。首次调用会独立请求电脑权限；权限获批后再次调用并通过现场校验才返回操作 grant。自动批准和 ask_user 都不能跳过该权限。",
             json!({
                 "type": "object",
                 "properties": {
@@ -584,6 +584,7 @@ pub struct ToolExecutionContext<'a> {
     pub tool_call_id: &'a str,
     pub cancel: Arc<AtomicBool>,
     pub mode: AgentTurnMode,
+    pub computer_permission_denied: bool,
 }
 
 fn tool_result(content: impl Into<String>) -> ToolOutcome {
@@ -753,6 +754,7 @@ async fn execute_tool_inner(
         tool_call_id,
         cancel,
         mode,
+        computer_permission_denied,
     } = context;
     let args: Value = serde_json::from_str(arguments)
         .map_err(|error| AgentError::new("invalid_arguments", error.to_string()))?;
@@ -1014,6 +1016,32 @@ async fn execute_tool_inner(
                 .get("includesFileDialogs")
                 .and_then(Value::as_bool)
                 .ok_or_else(|| AgentError::new("invalid_arguments", "缺少 includesFileDialogs"))?;
+            let window_title = runtime.computer_control.validate_operation_request(
+                window_id,
+                capability,
+                &goal,
+                &steps,
+                &allowed_actions,
+            )?;
+            if !runtime.computer_control.has_permission(conversation_id) {
+                if computer_permission_denied {
+                    return Ok(tool_result(serde_json::to_string(&json!({
+                        "computerPermission": "denied",
+                        "message": "用户已拒绝本轮电脑操作权限；本轮不得再次申请。"
+                    }))?));
+                }
+                let action = PendingUserAction::ComputerPermission {
+                    action_id: new_id(),
+                    conversation_id: conversation_id.into(),
+                    goal,
+                    window_title,
+                    includes_file_dialogs,
+                };
+                return Ok(ToolOutcome::AwaitUser {
+                    action,
+                    tool_call_id: tool_call_id.into(),
+                });
+            }
             let document_instance_key =
                 crate::service::official_api::current_modeling_document(editor)
                 .await

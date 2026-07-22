@@ -4,6 +4,7 @@ import { domainError, isTauriRuntime, normalizeCommandError } from "../editor/br
 import type {
   AgentAskDraftEvent,
   AgentComputerOperationEvent,
+  AgentComputerPermissionEvent,
   AgentImageCapabilityEvent,
   AgentTurnMode,
   AgentPlanEvent,
@@ -16,6 +17,8 @@ import type {
   ChatPsdDocument,
   ConversationPlan,
   ConversationSummary,
+  ComputerPermissionDecision,
+  ComputerPermissionStatus,
   LlmConfigInput,
   LlmConfigView,
   LlmTestResult,
@@ -209,6 +212,23 @@ export async function listenTurnDelta(handler: (payload: AgentTurnDelta) => void
   return listen<AgentTurnDelta>("agent://turn-delta", (e) => handler(e.payload));
 }
 
+export async function decideComputerPermission(
+  actionId: string,
+  decision: ComputerPermissionDecision,
+): Promise<void> {
+  if (!isTauriRuntime()) {
+    throw domainError("desktop_required", "请在桌面应用中确认电脑操作权限。");
+  }
+  await invoke("agent_decide_computer_permission", { actionId, decision });
+}
+
+export async function getComputerPermission(
+  conversationId: string,
+): Promise<ComputerPermissionStatus> {
+  if (!isTauriRuntime()) return "not_granted";
+  return invoke<ComputerPermissionStatus>("agent_get_computer_permission", { conversationId });
+}
+
 export async function listenAskDraft(handler: (payload: AgentAskDraftEvent) => void) {
   if (!isTauriRuntime()) return noopUnlisten;
   return listen<AgentAskDraftEvent>("agent://ask-draft", (e) => handler(e.payload));
@@ -234,6 +254,15 @@ export async function listenComputerOperation(
 ) {
   if (!isTauriRuntime()) return noopUnlisten;
   return listen<AgentComputerOperationEvent>("agent://computer-operation", (e) =>
+    handler(e.payload),
+  );
+}
+
+export async function listenComputerPermission(
+  handler: (payload: AgentComputerPermissionEvent) => void,
+) {
+  if (!isTauriRuntime()) return noopUnlisten;
+  return listen<AgentComputerPermissionEvent>("agent://computer-permission", (e) =>
     handler(e.payload),
   );
 }
