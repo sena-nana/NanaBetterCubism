@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { domainError, isTauriRuntime, normalizeCommandError } from "../editor/bridge";
 import type {
+  AgentAskDraftEvent,
   AgentComputerOperationEvent,
   AgentImageCapabilityEvent,
   AgentTurnMode,
@@ -206,6 +207,11 @@ export async function listenConversationsChanged(handler: () => void) {
 export async function listenTurnDelta(handler: (payload: AgentTurnDelta) => void) {
   if (!isTauriRuntime()) return noopUnlisten;
   return listen<AgentTurnDelta>("agent://turn-delta", (e) => handler(e.payload));
+}
+
+export async function listenAskDraft(handler: (payload: AgentAskDraftEvent) => void) {
+  if (!isTauriRuntime()) return noopUnlisten;
+  return listen<AgentAskDraftEvent>("agent://ask-draft", (e) => handler(e.payload));
 }
 
 export async function listenToolEvent(handler: (payload: AgentToolEvent) => void) {

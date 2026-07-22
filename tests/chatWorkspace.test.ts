@@ -11,6 +11,7 @@ import {
   getConversationRuntime,
 } from "../src/features/agent/conversationRuntimeStore";
 import type {
+  AgentAskDraftEvent,
   AgentComputerOperationEvent,
   AgentPlanEvent,
   AgentToolEvent,
@@ -21,6 +22,7 @@ import type {
 } from "../src/features/agent/types";
 
 const listeners = vi.hoisted(() => ({
+  askDraft: null as null | ((payload: AgentAskDraftEvent) => void),
   computerOperation: null as null | ((payload: AgentComputerOperationEvent) => void),
   delta: null as null | ((payload: AgentTurnDelta) => void),
   plan: null as null | ((payload: AgentPlanEvent) => void),
@@ -53,6 +55,10 @@ const bridge = vi.hoisted(() => ({
   listProjects: vi.fn(async () => []),
   listPsds: vi.fn(async () => []),
   listenImageCapability: vi.fn(async () => () => {}),
+  listenAskDraft: vi.fn(async (handler) => {
+    listeners.askDraft = handler;
+    return () => undefined;
+  }),
   listenComputerOperation: vi.fn(async (handler) => {
     listeners.computerOperation = handler;
     return () => undefined;
@@ -196,6 +202,55 @@ describe("对话工作区", () => {
     expect(regular.emitted().send).toBeUndefined();
     await fireEvent.keyDown(input, { key: "Enter" });
     expect(regular.emitted().send).toHaveLength(1);
+  });
+
+  it("在 Ask 卡片中流式呈现计划和正文，完成后才开放回答", async () => {
+    await renderChat("a");
+    const input = await screen.findByPlaceholderText("描述你想在 Cubism Editor 中完成的事…");
+    await fireEvent.update(input, "调整参数");
+    await fireEvent.keyDown(input, { key: "Enter" });
+
+    listeners.delta?.({ conversationId: "a", text: "我会先核对当前状态。" });
+    listeners.askDraft?.({
+      conversationId: "a",
+      question: "## 操作计划\n\n1. 核对参数",
+    });
+
+    expect(await screen.findByText("我会先核对当前状态。")).toBeTruthy();
+    const streamingAsk = document.querySelector('[data-agent-id="agent.chat.ask"]');
+    expect(streamingAsk).toBeTruthy();
+    expect(streamingAsk?.querySelector("ol")).toBeTruthy();
+    expect(document.querySelector('[data-agent-id="agent.chat.ask-streaming"]')).toBeTruthy();
+    expect(screen.queryByPlaceholderText("输入回答")).toBeNull();
+
+    listeners.askDraft?.({
+      conversationId: "a",
+      question: "## 操作计划\n\n1. 核对参数\n2. 执行调整\n\n| 操作 | 影响 |\n| --- | --- |\n| 调整 | 当前参数 |",
+    });
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-agent-id="agent.chat.ask"] table')).toBeTruthy()
+    );
+    expect(getConversationRuntime("a").askDraft).toContain("执行调整");
+
+    listeners.userAction?.({
+      conversationId: "a",
+      action: {
+        kind: "question",
+        actionId: "ask-stream",
+        conversationId: "a",
+        question: "确认执行上述计划？",
+        options: ["继续"],
+      },
+    });
+
+    expect(getConversationRuntime("a").askDraft).toBeNull();
+    expect(await screen.findByPlaceholderText("输入回答")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "继续" })).toBeTruthy();
+    expect(document.querySelector('[data-agent-id="agent.chat.ask-streaming"]')).toBeNull();
+
+    listeners.askDraft?.({ conversationId: "a", question: "迟到的草稿" });
+    expect(getConversationRuntime("a").askDraft).toBeNull();
+    expect(screen.getByPlaceholderText("输入回答")).toBeTruthy();
   });
 
   it.each([

@@ -3,6 +3,7 @@ import {
   getMessages,
   getPendingUserAction,
   getPlan,
+  listenAskDraft,
   listPsds,
   listenComputerOperation,
   listenPlan,
@@ -31,6 +32,7 @@ export interface ConversationRuntimeState {
   messages: ChatMessage[];
   plan: ConversationPlan | null;
   pendingAction: PendingUserAction | null;
+  askDraft: string | null;
   computerStatus: ComputerOperationStatus;
   draft: string;
   imageDrafts: ChatImageDraft[];
@@ -56,10 +58,19 @@ let localSequence = 0;
 export function installConversationRuntimeStore() {
   if (installPromise) return installPromise;
   installPromise = Promise.all([
+    listenAskDraft((payload) => {
+      const state = runtimeState(payload.conversationId);
+      const question = payload.question?.trim() ? payload.question : null;
+      if (question && state.pendingAction) return;
+      if (state.askDraft === question) return;
+      state.askDraft = question;
+      touch(state);
+    }),
     listenTurnDelta((payload) => appendDelta(payload.conversationId, payload.text)),
     listenToolEvent((payload) => upsertToolEvent(payload.conversationId, payload)),
     listenTurnFinished((payload) => {
       const state = runtimeState(payload.conversationId);
+      state.askDraft = null;
       state.error = payload.ok ? null : payload.message;
       setConversationTurnPhase(payload.conversationId, "idle");
       touch(state);
@@ -72,6 +83,7 @@ export function installConversationRuntimeStore() {
     }),
     listenUserAction((payload) => {
       const state = runtimeState(payload.conversationId);
+      state.askDraft = null;
       state.pendingAction = payload.action;
       state.askAnswer = "";
       if (payload.action.kind === "plan_approval") {
@@ -142,6 +154,7 @@ export async function loadConversationRuntime(
     if (!changedWhileLoading) {
       state.plan = plan;
       state.pendingAction = pendingAction;
+      state.askDraft = null;
       state.psdDocuments = psdDocuments;
       if (pendingAction?.kind === "plan_approval") state.composerMode = "plan";
     }
@@ -163,6 +176,7 @@ export function beginConversationTurn(
   state.draft = "";
   state.imageDrafts = [];
   state.error = null;
+  state.askDraft = null;
   state.computerStatus = "idle";
   state.messages.push({
     id: messageId,
@@ -191,6 +205,7 @@ export function failConversationTurn(
   state.draft = content;
   state.imageDrafts = imageDrafts;
   state.error = message;
+  state.askDraft = null;
   setConversationTurnPhase(conversationId, "idle");
   touch(state);
 }
@@ -241,6 +256,7 @@ function runtimeState(conversationId: string) {
       messages: [],
       plan: null,
       pendingAction: null,
+      askDraft: null,
       computerStatus: "idle",
       draft: "",
       imageDrafts: [],
