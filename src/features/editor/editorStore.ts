@@ -22,6 +22,8 @@ const defaultSnapshot: EditorSnapshot = {
     officialEditApi: false,
   },
   message: "尚未连接 Cubism Editor。",
+  structureStale: false,
+  structureGeneration: 0,
 };
 
 const state = reactive({
