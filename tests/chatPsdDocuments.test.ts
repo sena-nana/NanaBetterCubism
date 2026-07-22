@@ -85,6 +85,31 @@ describe("聊天 PSD 文档", () => {
     expect(documents.value).toEqual([]);
   });
 
+  it("批量插入保留成功文档并汇总单个文件失败", async () => {
+    const documents = ref<ChatPsdDocument[]>([]);
+    bridge.preparePsd
+      .mockResolvedValueOnce({ document: { ...document, id: "first" }, structure: { layers: [] } } as never)
+      .mockRejectedValueOnce(new Error("invalid psd") as never)
+      .mockResolvedValueOnce({ document: { ...document, id: "last" }, structure: { layers: [] } } as never);
+    const controller = useChatPsdDocuments({
+      conversationId: () => "conv-1",
+      documents,
+      canInteract: () => true,
+      setError: () => undefined,
+    });
+
+    const errors = await controller.addPaths([
+      "C:\\first.psd",
+      "C:\\broken.psd",
+      "C:\\last.psd",
+    ]);
+
+    expect(bridge.preparePsd).toHaveBeenCalledTimes(3);
+    expect(documents.value.map((item) => item.id)).toEqual(["first", "last"]);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("broken.psd");
+  });
+
   it("移除失败时回滚本地状态并上报错误", async () => {
     const documents = ref<ChatPsdDocument[]>([document]);
     const error = ref<string | null>(null);

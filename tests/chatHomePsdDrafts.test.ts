@@ -78,6 +78,28 @@ describe("首页 PSD 草稿", () => {
     expect(drafts.value).toHaveLength(0);
   });
 
+  it("批量插入只占用剩余槽位且保持为未准备草稿", async () => {
+    const drafts = ref<ChatPsdDraft[]>(
+      Array.from({ length: 7 }, (_, index) => ({
+        id: String(index),
+        name: `${index}.psd`,
+        path: `C:\\${index}.psd`,
+      })),
+    );
+    const controller = useHomePsdDrafts({
+      drafts,
+      canInteract: () => true,
+      setError: () => undefined,
+    });
+
+    const errors = await controller.addPaths(["C:\\upper.PSD", "C:\\overflow.psd"]);
+
+    expect(bridge.preparePsd).not.toHaveBeenCalled();
+    expect(drafts.value).toHaveLength(8);
+    expect(drafts.value[7]?.path).toBe("C:\\upper.PSD");
+    expect(errors).toHaveLength(1);
+  });
+
   it("removePsdDraft 移除对应草稿", () => {
     const drafts = ref<ChatPsdDraft[]>([
       { id: "a", name: "a.psd", path: "C:\\a.psd" },

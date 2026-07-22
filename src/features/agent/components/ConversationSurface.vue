@@ -50,9 +50,9 @@ onUnmounted(() => unlisten?.());
     <div
       v-if="dropActive"
       class="conversation-surface__drop"
-      :data-agent-id="`${agentIdPrefix}.image-drop`"
+      :data-agent-id="`${agentIdPrefix}.file-drop`"
     >
-      <span>释放以添加图片</span>
+      <span>释放以添加文件</span>
     </div>
   </section>
 </template>

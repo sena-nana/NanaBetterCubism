@@ -29,8 +29,9 @@ import {
   applyConversationGroup,
 } from "./sidebarConversations";
 import type { ConversationSummary, PlanDecision } from "./types";
+import { addDroppedChatPaths } from "./chatDropPaths";
 import { useChatImageDrafts } from "./useChatImageDrafts";
-import { useChatPsdDocuments } from "./useChatPsdDocuments";
+import { MAX_CHAT_PSD, useChatPsdDocuments } from "./useChatPsdDocuments";
 
 const route = useRoute();
 const router = useRouter();
@@ -79,7 +80,6 @@ const canCompose = computed(
 );
 
 const imageInputDisabled = computed(() => llm.state.imageInputSupported === false);
-const canDropImages = computed(() => canCompose.value && !imageInputDisabled.value);
 
 const imageDraftController = useChatImageDrafts({
   drafts: imageDrafts,
@@ -104,6 +104,19 @@ const psdController = useChatPsdDocuments({
     runtime.value.error = message;
   },
 });
+const canDropFiles = computed(
+  () => canCompose.value && (!imageInputDisabled.value || psdDocuments.value.length < MAX_CHAT_PSD),
+);
+
+async function onDropPaths(paths: string[]) {
+  await addDroppedChatPaths(paths, {
+    addImages: imageDraftController.addPaths,
+    addPsds: psdController.addPaths,
+    setError: (message) => {
+      runtime.value.error = message;
+    },
+  });
+}
 
 const canSend = computed(
   () =>
@@ -252,8 +265,8 @@ async function onAnswerAsk(answer?: string) {
 <template>
   <ConversationSurface
     data-agent-id="agent.chat"
-    :drop-enabled="canDropImages"
-    @drop-paths="imageDraftController.addPaths"
+    :drop-enabled="canDropFiles"
+    @drop-paths="onDropPaths"
   >
     <ConversationTranscript
       :messages="runtime.messages"

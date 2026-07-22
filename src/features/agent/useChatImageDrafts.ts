@@ -35,25 +35,22 @@ export function useChatImageDrafts(options: {
 }) {
   const viewingImage = ref<UiImageViewerSource | null>(null);
 
-  async function addInputs(inputs: ImagePrepareInput[]) {
-    if (!options.canInteract() || inputs.length === 0) return;
-    options.setError(null);
+  async function addInputs(inputs: ImagePrepareInput[]): Promise<string[]> {
+    if (!options.canInteract() || inputs.length === 0) return [];
     try {
       const result = await prepareImages(
         inputs,
         Math.max(0, MAX_CHAT_IMAGES - options.drafts.value.length),
       );
       options.drafts.value = [...options.drafts.value, ...result.accepted];
-      if (result.rejected.length) {
-        options.setError(result.rejected.map((item) => `${item.name}：${item.message}`).join("\n"));
-      }
+      return result.rejected.map((item) => `${item.name}：${item.message}`);
     } catch (error) {
-      options.setError(normalizeCommandError(error).message);
+      return [normalizeCommandError(error).message];
     }
   }
 
-  async function addPaths(paths: string[]) {
-    await addInputs(paths.map((path) => ({ kind: "path", path })));
+  async function addPaths(paths: string[]): Promise<string[]> {
+    return addInputs(paths.map((path) => ({ kind: "path", path })));
   }
 
   async function pickImages() {
@@ -65,7 +62,8 @@ export function useChatImageDrafts(options: {
         filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "webp", "gif"] }],
       });
       if (!selected) return;
-      await addPaths(Array.isArray(selected) ? selected : [selected]);
+      const errors = await addPaths(Array.isArray(selected) ? selected : [selected]);
+      options.setError(errors.join("\n") || null);
     } catch (error) {
       options.setError(normalizeCommandError(error).message);
     }
@@ -86,7 +84,7 @@ export function useChatImageDrafts(options: {
         bytesBase64: bytesToBase64(new Uint8Array(await file.arrayBuffer())),
       })),
     );
-    await addInputs(inputs);
+    options.setError((await addInputs(inputs)).join("\n") || null);
   }
 
   async function removeImage(draftId: string) {

@@ -26,8 +26,10 @@ import type {
   ChatPsdDraft,
   ConversationSummary,
 } from "../agent/types";
+import { addDroppedChatPaths } from "../agent/chatDropPaths";
 import { useChatImageDrafts } from "../agent/useChatImageDrafts";
 import { useHomePsdDrafts } from "../agent/useHomePsdDrafts";
+import { MAX_CHAT_PSD } from "../agent/useChatPsdDocuments";
 
 const router = useRouter();
 const llm = useLlmConfigStore();
@@ -54,6 +56,20 @@ const psdDraftController = useHomePsdDrafts({
     error.value = message;
   },
 });
+const imageInputDisabled = computed(() => llm.state.imageInputSupported === false);
+const canDropFiles = computed(
+  () => canCompose.value && (!imageInputDisabled.value || psdDrafts.value.length < MAX_CHAT_PSD),
+);
+
+async function onDropPaths(paths: string[]) {
+  await addDroppedChatPaths(paths, {
+    addImages: imageDraftController.addPaths,
+    addPsds: psdDraftController.addPaths,
+    setError: (message) => {
+      error.value = message;
+    },
+  });
+}
 
 const canSend = computed(
   () =>
@@ -128,8 +144,8 @@ async function startConversation() {
   <ConversationSurface
     data-agent-id="home.page"
     agent-id-prefix="agent.home"
-    :drop-enabled="canCompose"
-    @drop-paths="imageDraftController.addPaths"
+    :drop-enabled="canDropFiles"
+    @drop-paths="onDropPaths"
   >
     <ConversationTranscript
       data-agent-id="home.header"
