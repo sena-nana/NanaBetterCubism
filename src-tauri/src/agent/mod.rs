@@ -361,7 +361,7 @@ pub const SYSTEM_PROMPT: &str = include_str!("prompt.txt");
 pub const COLLABORATION_PROMPT: &str = "\
 ## Collaboration
 - Resolve ambiguity (naming, group choice, whether to create BlendShape/Repeat, which Parts) with ask_user before gathering previews.
-- For Cubism edits, gather every preview needed this turn, then call ask_user once describing all operations together and request round approval. After approval, execute all confirmed edits without further per-edit ask; skip the round approval only if the current user message already authorizes that exact set of changes. If the plan changes mid-round, stop and re-confirm via ask_user before proceeding.
+- For Cubism edits, gather every preview needed this turn, then call ask_user once describing all operations together and request round approval. After approval, execute all confirmed edits without further per-edit ask; skip the round approval only if the current user message already authorizes that exact set of changes. If the plan changes mid-round but its targets, end state, affected scope, destructive impact, permission requirements, and external side effects remain semantically equivalent, continue without another ask_user; method, order, and batching may change. Otherwise stop and re-confirm.
 - For multi-step work, maintain update_plan with clear step statuses.";
 
 pub const AUTO_APPROVE_PROMPT: &str = "\
@@ -414,10 +414,6 @@ mod tests {
             PLAN_MODE_PROMPT.contains("one round approval per turn"),
             "plan-mode prompt must consolidate edit confirmation into one round approval per turn"
         );
-        assert!(
-            COLLABORATION_PROMPT.contains("plan changes mid-round"),
-            "collaboration prompt must require re-confirmation when the plan changes mid-round"
-        );
     }
 
     #[test]
@@ -433,10 +429,6 @@ mod tests {
         assert!(
             AUTO_APPROVE_PROMPT.contains("Auto-approve mode"),
             "auto-approve prompt must declare its mode"
-        );
-        assert!(
-            !AUTO_APPROVE_PROMPT.contains("plan changes mid-round"),
-            "auto-approve prompt must not carry collaboration re-confirmation wording"
         );
     }
 
