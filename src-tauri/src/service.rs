@@ -13,9 +13,9 @@ pub use commands::{
 
 use crate::domain::{
     build_preview, BatchFinished, BatchOutcome, BatchPhase, EditorCapabilities,
-    EditorConnectionState, EditorEditResult, EditorSnapshot, ModelStructure, OperationAccepted,
-    ParameterBatchInput, ParameterBatchPreview, ParameterBatchResult, PartParameterQueryResult,
-    StoredEditorEditPlan, StoredPlan, EDIT_API_VERSION,
+    EditorConnectionState, EditorEditOutcome, EditorEditResult, EditorSnapshot, ModelStructure,
+    OperationAccepted, ParameterBatchInput, ParameterBatchPreview, ParameterBatchResult,
+    PartParameterQueryResult, StoredEditorEditPlan, StoredPlan, EDIT_API_VERSION,
 };
 use crate::protocol::{RpcClient, RpcError};
 use credentials::{load_token, save_token};
@@ -165,6 +165,34 @@ impl ServiceState {
     fn clear_previews(&mut self) {
         self.previews.clear();
         self.editor_edit_previews.clear();
+    }
+
+    fn clear_batch_previews(&mut self) {
+        self.previews.clear();
+    }
+
+    fn apply_editor_edit_outcome(&mut self, outcome: &EditorEditOutcome) {
+        match outcome {
+            EditorEditOutcome::Committed => self.clear_batch_previews(),
+            EditorEditOutcome::Unknown => self.clear_previews(),
+            _ => {}
+        }
+    }
+
+    fn apply_batch_outcome(&mut self, outcome: &BatchOutcome) {
+        match outcome {
+            BatchOutcome::Committed => self.clear_batch_previews(),
+            BatchOutcome::Unknown => self.clear_previews(),
+            _ => {}
+        }
+    }
+
+    fn invalidate_previews_for_snapshot(&mut self, model_uid: &str, structure: &ModelStructure) {
+        if self.model_uid.as_deref() != Some(model_uid) {
+            self.clear_previews();
+        } else if self.structure.semantic_hash() != structure.semantic_hash() {
+            self.clear_batch_previews();
+        }
     }
 
     fn set_parameter_batch_result(&mut self, result: ParameterBatchResult) {
@@ -566,11 +594,7 @@ impl EditorService {
                 if inner.connection_request != request || !inner.desired_connected {
                     return Ok(());
                 }
-                let changed = inner.model_uid.as_deref() != Some(&model_uid)
-                    || inner.structure.semantic_hash() != structure.semantic_hash();
-                if changed {
-                    inner.clear_previews();
-                }
+                inner.invalidate_previews_for_snapshot(&model_uid, &structure);
                 apply_validated_structure(&mut inner, model_uid, structure.clone());
             }
             self.emit_snapshot(app).await;
@@ -1254,7 +1278,7 @@ impl EditorService {
                 return;
             }
             inner.operation = None;
-            inner.clear_previews();
+            inner.apply_batch_outcome(&finished.outcome);
             if let Some(structure) = structure {
                 inner.snapshot.groups = structure.groups.clone();
                 inner.structure = structure;
@@ -1448,8 +1472,7 @@ mod tests {
         assert!(inner.previews.contains(&second_id));
     }
 
-    #[test]
-    fn session_cleanup_invalidates_every_preview_type() {
+    fn state_with_pending_previews() -> ServiceState {
         let mut state = ServiceState::default();
         state.previews.insert(
             "batch".into(),
@@ -1473,8 +1496,78 @@ mod tests {
                 precondition: Value::Null,
             },
         );
+        state
+    }
+
+    #[test]
+    fn session_cleanup_invalidates_every_preview_type() {
+        let mut state = state_with_pending_previews();
 
         clear_session_data(&mut state);
+
+        assert!(!state.previews.contains("batch"));
+        assert!(!state.editor_edit_previews.contains("official"));
+    }
+
+    #[test]
+    fn known_edit_outcomes_preserve_unconsumed_official_previews() {
+        let mut committed = state_with_pending_previews();
+        committed.apply_editor_edit_outcome(&EditorEditOutcome::Committed);
+        assert!(!committed.previews.contains("batch"));
+        assert!(committed.editor_edit_previews.contains("official"));
+
+        let mut conflict = state_with_pending_previews();
+        conflict.apply_editor_edit_outcome(&EditorEditOutcome::Failed);
+        assert!(conflict.previews.contains("batch"));
+        assert!(conflict.editor_edit_previews.contains("official"));
+
+        let mut batch = state_with_pending_previews();
+        batch.apply_batch_outcome(&BatchOutcome::Committed);
+        assert!(!batch.previews.contains("batch"));
+        assert!(batch.editor_edit_previews.contains("official"));
+    }
+
+    #[test]
+    fn unknown_edit_outcome_invalidates_every_preview_type() {
+        let mut state = state_with_pending_previews();
+
+        state.apply_editor_edit_outcome(&EditorEditOutcome::Unknown);
+
+        assert!(!state.previews.contains("batch"));
+        assert!(!state.editor_edit_previews.contains("official"));
+    }
+
+    #[test]
+    fn same_model_structure_refresh_preserves_official_previews() {
+        let mut state = state_with_pending_previews();
+        state.model_uid = Some("model".into());
+        state.structure = ModelStructure::default();
+        let changed = ModelStructure {
+            parameters: vec![ExistingParameter {
+                id: "ParamA".into(),
+                name: "A".into(),
+                group_id: None,
+                min: 0.0,
+                default: 0.0,
+                max: 1.0,
+                is_blend_shape: false,
+                is_repeat: false,
+            }],
+            ..Default::default()
+        };
+
+        state.invalidate_previews_for_snapshot("model", &changed);
+
+        assert!(!state.previews.contains("batch"));
+        assert!(state.editor_edit_previews.contains("official"));
+    }
+
+    #[test]
+    fn model_change_invalidates_every_preview_type() {
+        let mut state = state_with_pending_previews();
+        state.model_uid = Some("old-model".into());
+
+        state.invalidate_previews_for_snapshot("new-model", &ModelStructure::default());
 
         assert!(!state.previews.contains("batch"));
         assert!(!state.editor_edit_previews.contains("official"));

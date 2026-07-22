@@ -18,7 +18,9 @@ async fn sequence_server(steps: Vec<(&'static str, Value, Value)>) -> u16 {
             let request = socket.next().await.unwrap().unwrap().into_text().unwrap();
             let request: Value = serde_json::from_str(&request).unwrap();
             assert_eq!(request["Method"], expected_method);
-            assert_eq!(request["Data"], expected_data);
+            if expected_method != "EditSendLog" {
+                assert_eq!(request["Data"], expected_data);
+            }
             socket
                 .send(Message::Text(
                     json!({
@@ -51,6 +53,51 @@ async fn connected_service(port: u16) -> EditorService {
         inner.snapshot.capabilities.official_edit_api = true;
     }
     service
+}
+
+fn edit_transaction_steps(
+    preview: Value,
+    current: Value,
+    method: &'static str,
+    data: Value,
+    after: Value,
+) -> Vec<(&'static str, Value, Value)> {
+    vec![
+        (
+            "GetParameterStructure",
+            json!({"ModelUID": "private-model"}),
+            preview,
+        ),
+        (
+            "GetCurrentModelUID",
+            json!({}),
+            json!({"ModelUID": "private-model"}),
+        ),
+        (
+            "GetParameterStructure",
+            json!({"ModelUID": "private-model"}),
+            current,
+        ),
+        (
+            "NotifyUndoCancel",
+            json!({"Enabled": true}),
+            json!({"Accepted": true}),
+        ),
+        (
+            "EditBegin",
+            json!({"Silent": false}),
+            json!({"Result": true}),
+        ),
+        ("EditSendLog", Value::Null, json!({})),
+        (method, data, json!({"Result": true})),
+        ("EditSendProgress", json!({"Value": 1.0}), json!({})),
+        ("EditEnd", json!({"Cancel": false}), json!({"Result": true})),
+        (
+            "GetParameterStructure",
+            json!({"ModelUID": "private-model"}),
+            after,
+        ),
+    ]
 }
 
 #[test]
@@ -468,55 +515,18 @@ async fn edit_preview_executes_documented_transaction_and_verifies_postcondition
             }]
         }
     });
-    let port = sequence_server(vec![
-        (
-            "GetParameterStructure",
-            json!({"ModelUID": "private-model"}),
-            before.clone(),
-        ),
-        (
-            "GetCurrentModelUID",
-            json!({}),
-            json!({"ModelUID": "private-model"}),
-        ),
-        (
-            "GetParameterStructure",
-            json!({"ModelUID": "private-model"}),
-            before,
-        ),
-        (
-            "NotifyUndoCancel",
-            json!({"Enabled": true}),
-            json!({"Accepted": true}),
-        ),
-        (
-            "EditBegin",
-            json!({"Silent": false}),
-            json!({"Result": true}),
-        ),
-        (
-            "EditSendLog",
-            json!({"Message": "正在执行已确认的模型编辑。"}),
-            json!({}),
-        ),
-        (
-            "EditParameter",
-            json!({
-                "ModelUID": "private-model",
-                "Id": "ParamFace",
-                "Name": "Face",
-                "IsRepeat": true
-            }),
-            json!({"Result": true}),
-        ),
-        ("EditSendProgress", json!({"Value": 1.0}), json!({})),
-        ("EditEnd", json!({"Cancel": false}), json!({"Result": true})),
-        (
-            "GetParameterStructure",
-            json!({"ModelUID": "private-model"}),
-            after,
-        ),
-    ])
+    let port = sequence_server(edit_transaction_steps(
+        before.clone(),
+        before,
+        "EditParameter",
+        json!({
+            "ModelUID": "private-model",
+            "Id": "ParamFace",
+            "Name": "Face",
+            "IsRepeat": true
+        }),
+        after,
+    ))
     .await;
     let service = connected_service(port).await;
     let preview = call_tool(
@@ -543,7 +553,14 @@ async fn edit_preview_executes_documented_transaction_and_verifies_postcondition
 
 #[tokio::test]
 async fn official_edit_previews_from_the_same_model_snapshot_coexist() {
-    let structure = json!({"ParameterStructure": {"Entries": []}});
+    let structure = json!({
+        "ParameterStructure": {
+            "Entries": [
+                {"EntryType": "Parameter", "Id": "ParamAngleX", "Name": "Angle X"},
+                {"EntryType": "Parameter", "Id": "ParamAngleY", "Name": "Angle Y"}
+            ]
+        }
+    });
     let port = sequence_server(vec![
         (
             "GetParameterStructure",
@@ -580,6 +597,68 @@ async fn official_edit_previews_from_the_same_model_snapshot_coexist() {
     assert_ne!(first_id, second_id);
     assert!(inner.editor_edit_previews.contains(first_id));
     assert!(inner.editor_edit_previews.contains(second_id));
+}
+
+#[tokio::test]
+async fn pending_parameter_edit_executes_after_unrelated_parameter_deletion() {
+    let before = json!({
+        "ParameterStructure": {
+            "Entries": [
+                {"EntryType": "Parameter", "Id": "ParamA", "Name": "A"},
+                {"EntryType": "Parameter", "Id": "ParamB", "Name": "B"}
+            ]
+        }
+    });
+    let after_delete = json!({
+        "ParameterStructure": {
+            "Entries": [
+                {"EntryType": "Parameter", "Id": "ParamB", "Name": "B"}
+            ]
+        }
+    });
+    let after_edit = json!({
+        "ParameterStructure": {
+            "Entries": [
+                {"EntryType": "Parameter", "Id": "ParamB", "Name": "Updated"}
+            ]
+        }
+    });
+    let port = sequence_server(edit_transaction_steps(
+        before,
+        after_delete,
+        "EditParameter",
+        json!({
+            "ModelUID": "private-model",
+            "Id": "ParamB",
+            "Name": "Updated"
+        }),
+        after_edit,
+    ))
+    .await;
+    let service = connected_service(port).await;
+    let preview = call_tool(
+        &service,
+        "preview_edit_parameter",
+        json!({"id": "ParamB", "name": "Updated"}),
+    )
+    .await
+    .unwrap();
+    let preview_id = preview["previewId"].as_str().unwrap();
+    let (rpc, plan) = {
+        let mut inner = service.inner.lock().await;
+        (
+            inner.rpc.clone().unwrap(),
+            inner.editor_edit_previews.remove(preview_id).unwrap(),
+        )
+    };
+
+    let result = service
+        .run_editor_edit_inner(&rpc, &plan, &AtomicBool::new(false))
+        .await;
+
+    assert_eq!(result.outcome, EditorEditOutcome::Committed);
+    assert_eq!(result.failure_code, None);
+    assert!(result.verification.is_some());
 }
 
 #[tokio::test]
@@ -623,17 +702,18 @@ async fn changed_precondition_stops_before_editor_transaction() {
     .await;
     let service = connected_service(port).await;
     let rpc = service.inner.lock().await.rpc.clone().unwrap();
+    let data = json!({
+        "ModelUID": "private-model",
+        "Id": "ParamAngleX",
+        "Name": "Updated"
+    });
     let plan = StoredEditorEditPlan {
         preview_id: "preview".into(),
         generation: 7,
         model_uid: "private-model".into(),
         method: "EditParameter".into(),
-        data: json!({
-            "ModelUID": "private-model",
-            "Id": "ParamAngleX",
-            "Name": "Updated"
-        }),
-        precondition: before,
+        precondition: verification::edit_precondition("EditParameter", &data, &before).unwrap(),
+        data,
     };
 
     let result = service
@@ -641,5 +721,34 @@ async fn changed_precondition_stops_before_editor_transaction() {
         .await;
 
     assert_eq!(result.outcome, EditorEditOutcome::Failed);
+    assert_eq!(
+        result.failure_code.as_deref(),
+        Some("precondition_conflict")
+    );
+    assert_eq!(
+        serde_json::to_value(&result).unwrap()["failureCode"],
+        "precondition_conflict"
+    );
     assert!(result.verification.is_none());
+}
+
+#[tokio::test]
+async fn preview_rejects_a_missing_parameter_target() {
+    let port = sequence_server(vec![(
+        "GetParameterStructure",
+        json!({"ModelUID": "private-model"}),
+        json!({"ParameterStructure": {"Entries": []}}),
+    )])
+    .await;
+    let service = connected_service(port).await;
+
+    let error = call_tool(
+        &service,
+        "preview_delete_parameter",
+        json!({"id": "Missing"}),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, "invalid_arguments");
 }

@@ -1,6 +1,6 @@
 use super::{
     read::sanitize_response,
-    verification::{snapshot_hash, verification_snapshot, verify_postcondition},
+    verification::{edit_precondition, verification_snapshot, verify_postcondition},
     CommandError, EditorService,
 };
 use crate::domain::{
@@ -76,6 +76,7 @@ impl EditorService {
                     operation: plan.method.clone(),
                     outcome: EditorEditOutcome::Running,
                     message: "编辑事务正在执行。".into(),
+                    failure_code: None,
                     verification: None,
                 },
             );
@@ -143,7 +144,16 @@ impl EditorService {
             operation: plan.method.clone(),
             outcome,
             message,
+            failure_code: None,
             verification,
+        };
+        let conflict = |message: String| EditorEditResult {
+            operation_id: operation_id.clone(),
+            operation: plan.method.clone(),
+            outcome: EditorEditOutcome::Failed,
+            message,
+            failure_code: Some("precondition_conflict".into()),
+            verification: None,
         };
         let current_model = match rpc.request("GetCurrentModelUID", json!({})).await {
             Ok(value) => value,
@@ -158,18 +168,23 @@ impl EditorService {
                 None,
             );
         }
-        let precondition = match verification_snapshot(rpc, &plan.method, &plan.data).await {
+        let snapshot = match verification_snapshot(rpc, &plan.method, &plan.data).await {
             Ok(value) => value,
             Err(error) => {
                 return result(EditorEditOutcome::Failed, error.to_string(), None);
             }
         };
-        if snapshot_hash(&precondition) != snapshot_hash(&plan.precondition) {
-            return result(
-                EditorEditOutcome::Failed,
-                "目标模型状态已变化，请重新预览。".into(),
-                None,
-            );
+        let precondition = match edit_precondition(&plan.method, &plan.data, &snapshot) {
+            Ok(value) => value,
+            Err(error) if error.invalid_target => {
+                return conflict(format!("目标状态与预览不再一致：{}", error.message));
+            }
+            Err(error) => {
+                return result(EditorEditOutcome::Failed, error.message, None);
+            }
+        };
+        if precondition != plan.precondition {
+            return conflict("目标状态与预览不再一致，已阻止该项编辑。".into());
         }
         let mut events = rpc.subscribe();
         match rpc
@@ -344,7 +359,7 @@ impl EditorService {
             {
                 inner.operation = None;
             }
-            inner.clear_previews();
+            inner.apply_editor_edit_outcome(&result.outcome);
             insert_bounded_result(
                 &mut inner.editor_edit_results,
                 operation_id.into(),
