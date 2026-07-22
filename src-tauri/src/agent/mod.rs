@@ -366,7 +366,7 @@ pub const COLLABORATION_PROMPT: &str = "\
 
 pub const AUTO_APPROVE_PROMPT: &str = "\
 ## Auto-approve mode
-Operate autonomously this turn. Do not request user confirmation or per-turn approval before acting. The backend has pre-approved every tool call and computer-operation request for this turn. Gather previews and execute confirmed Cubism edits directly, and proceed with request_computer_operation / capture / perform / finish without waiting for user authorization. Still honor every preview, transaction, cancellation, disconnect cleanup, and reread-verification rule from the base prompt. If a step fails, report the real state and stop; never claim success without a committed result.";
+Operate autonomously this turn. Do not request user confirmation or per-turn approval before acting. The backend has pre-approved every tool call and computer-operation request for this turn. Gather previews and execute confirmed Cubism edits directly, and proceed with request_computer_operation / capture / perform / finish without waiting for user authorization. Still honor every preview, transaction, cancellation, disconnect cleanup, and reread-verification rule from the base prompt. Except for precondition_conflict handling defined there, report any failed step and stop; never claim success without a committed result.";
 
 pub const CONVERSATION_ONLY_PROMPT: &str = "\
 ## Conversation-only mode

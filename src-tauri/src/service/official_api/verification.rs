@@ -1,11 +1,280 @@
 use crate::domain::StoredEditorEditPlan;
 use crate::protocol::{RpcClient, RpcError};
 use serde_json::{json, Map, Value};
-use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 
-pub(super) fn snapshot_hash(value: &Value) -> String {
-    let bytes = serde_json::to_vec(value).unwrap_or_default();
-    format!("{:x}", Sha256::digest(bytes))
+#[derive(Debug)]
+pub(super) struct PreconditionError {
+    pub(super) invalid_target: bool,
+    pub(super) message: String,
+}
+
+impl PreconditionError {
+    fn invalid(message: impl Into<String>) -> Self {
+        Self {
+            invalid_target: true,
+            message: message.into(),
+        }
+    }
+
+    fn protocol(message: impl Into<String>) -> Self {
+        Self {
+            invalid_target: false,
+            message: message.into(),
+        }
+    }
+}
+
+fn parameter_entries(snapshot: &Value) -> Result<&[Value], PreconditionError> {
+    snapshot
+        .get("ParameterStructure")
+        .and_then(|value| value.get("Entries"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| {
+            PreconditionError::protocol(
+                "GetParameterStructure 响应缺少 ParameterStructure.Entries。",
+            )
+        })
+}
+
+fn validate_entries(entries: &[Value]) -> Result<(), PreconditionError> {
+    let mut ids = HashSet::new();
+    for entry in entries {
+        let entry_type = entry
+            .get("EntryType")
+            .and_then(Value::as_str)
+            .ok_or_else(|| PreconditionError::protocol("参数结构条目缺少 EntryType。"))?;
+        if !matches!(entry_type, "Parameter" | "ParameterGroup") {
+            return Err(PreconditionError::protocol(format!(
+                "无法解析参数结构条目类型 {entry_type}。"
+            )));
+        }
+        let id = entry
+            .get("Id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| PreconditionError::protocol("参数结构条目缺少 Id。"))?;
+        if !ids.insert(id) {
+            return Err(PreconditionError::protocol(format!(
+                "参数结构包含重复 ID {id}。"
+            )));
+        }
+        if entry_type == "ParameterGroup" {
+            let parameters = entry
+                .get("Parameters")
+                .and_then(Value::as_array)
+                .ok_or_else(|| PreconditionError::protocol("参数组缺少 Parameters。"))?;
+            for parameter in parameters {
+                let id = parameter
+                    .get("Id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| PreconditionError::protocol("参数条目缺少 Id。"))?;
+                if !ids.insert(id) {
+                    return Err(PreconditionError::protocol(format!(
+                        "参数结构包含重复 ID {id}。"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn find_group_entry<'a>(entries: &'a [Value], id: &str) -> Option<&'a Value> {
+    entries.iter().find(|entry| {
+        entry.get("EntryType").and_then(Value::as_str) == Some("ParameterGroup")
+            && entry.get("Id").and_then(Value::as_str) == Some(id)
+    })
+}
+
+fn find_parameter_state(entries: &[Value], id: &str) -> Option<(Value, Option<String>)> {
+    for entry in entries {
+        if entry.get("EntryType").and_then(Value::as_str) == Some("ParameterGroup") {
+            let parent = entry.get("Id").and_then(Value::as_str).map(str::to_string);
+            if let Some(parameter) =
+                entry
+                    .get("Parameters")
+                    .and_then(Value::as_array)
+                    .and_then(|parameters| {
+                        parameters.iter().find(|parameter| {
+                            parameter.get("Id").and_then(Value::as_str) == Some(id)
+                        })
+                    })
+            {
+                return Some((parameter.clone(), parent));
+            }
+        } else if entry.get("Id").and_then(Value::as_str) == Some(id) {
+            return Some((entry.clone(), None));
+        }
+    }
+    None
+}
+
+fn id_exists(entries: &[Value], id: &str) -> bool {
+    entries.iter().any(|entry| {
+        entry.get("Id").and_then(Value::as_str) == Some(id)
+            || entry
+                .get("Parameters")
+                .and_then(Value::as_array)
+                .is_some_and(|parameters| {
+                    parameters
+                        .iter()
+                        .any(|parameter| parameter.get("Id").and_then(Value::as_str) == Some(id))
+                })
+    })
+}
+
+fn required_id<'a>(data: &'a Value, key: &str) -> Result<&'a str, PreconditionError> {
+    data.get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| PreconditionError::invalid(format!("缺少 {key}。")))
+}
+
+fn require_parameter(
+    entries: &[Value],
+    id: &str,
+) -> Result<(Value, Option<String>), PreconditionError> {
+    find_parameter_state(entries, id)
+        .ok_or_else(|| PreconditionError::invalid(format!("参数 {id} 不存在。")))
+}
+
+fn require_group(entries: &[Value], id: &str) -> Result<Value, PreconditionError> {
+    find_group_entry(entries, id)
+        .cloned()
+        .ok_or_else(|| PreconditionError::invalid(format!("参数组 {id} 不存在。")))
+}
+
+fn group_metadata(group: &Value) -> Value {
+    let mut metadata = group.clone();
+    if let Some(object) = metadata.as_object_mut() {
+        object.remove("Parameters");
+    }
+    metadata
+}
+
+fn parent_group(entries: &[Value], id: Option<&str>) -> Result<Value, PreconditionError> {
+    id.map(|id| require_group(entries, id).map(|group| group_metadata(&group)))
+        .unwrap_or(Ok(Value::Null))
+}
+
+fn direct_ids(container: &Value, field: &str) -> Result<Value, PreconditionError> {
+    let values = container
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| PreconditionError::protocol(format!("参数结构缺少 {field}。")))?;
+    values
+        .iter()
+        .map(|value| {
+            value
+                .get("Id")
+                .and_then(Value::as_str)
+                .map(|id| Value::String(id.to_string()))
+                .ok_or_else(|| PreconditionError::protocol("参数结构条目缺少 Id。"))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Value::Array)
+}
+
+fn ensure_id_available(
+    entries: &[Value],
+    candidate: Option<&str>,
+    current: Option<&str>,
+) -> Result<(), PreconditionError> {
+    if let Some(id) = candidate.filter(|id| Some(*id) != current && id_exists(entries, id)) {
+        return Err(PreconditionError::invalid(format!(
+            "目标 ID {id} 已被占用。"
+        )));
+    }
+    Ok(())
+}
+
+fn is_parameter_structure_method(method: &str) -> bool {
+    matches!(
+        method,
+        "AddParameter"
+            | "AddParameterGroup"
+            | "EditParameter"
+            | "EditParameterGroup"
+            | "DeleteParameter"
+            | "DeleteParameterGroup"
+            | "MoveParameter"
+            | "MoveParameterGroup"
+    )
+}
+
+pub(super) fn edit_precondition(
+    method: &str,
+    data: &Value,
+    snapshot: &Value,
+) -> Result<Value, PreconditionError> {
+    if !is_parameter_structure_method(method) {
+        return Ok(snapshot.clone());
+    }
+
+    let entries = parameter_entries(snapshot)?;
+    validate_entries(entries)?;
+    match method {
+        "AddParameter" | "AddParameterGroup" => {
+            let target = required_id(data, "Id")?;
+            ensure_id_available(entries, Some(target), None)?;
+            if method == "AddParameter" {
+                if let Some(id) = data
+                    .get("GroupId")
+                    .and_then(Value::as_str)
+                    .filter(|id| find_group_entry(entries, id).is_none())
+                {
+                    return Err(PreconditionError::invalid(format!("参数组 {id} 不存在。")));
+                }
+            }
+            Ok(Value::Null)
+        }
+        "EditParameter" | "DeleteParameter" => {
+            let id = required_id(data, "Id")?;
+            let (target, parent) = require_parameter(entries, id)?;
+            if method == "EditParameter" {
+                ensure_id_available(entries, data.get("NewId").and_then(Value::as_str), Some(id))?;
+            }
+            let parent = parent_group(entries, parent.as_deref())?;
+            Ok(json!({"target": target, "parentGroup": parent}))
+        }
+        "EditParameterGroup" | "DeleteParameterGroup" => {
+            let id = required_id(data, "Id")?;
+            let target = require_group(entries, id)?;
+            if method == "EditParameterGroup" {
+                ensure_id_available(entries, data.get("NewId").and_then(Value::as_str), Some(id))?;
+                Ok(json!({"target": group_metadata(&target)}))
+            } else {
+                Ok(json!({"target": target}))
+            }
+        }
+        "MoveParameter" => {
+            let id = required_id(data, "Id")?;
+            let group_id = required_id(data, "GroupId")?;
+            let (target, parent) = require_parameter(entries, id)?;
+            let destination = require_group(entries, group_id)?;
+            let source = parent_group(entries, parent.as_deref())?;
+            let destination_order = if data.get("InsertIndex").is_some() {
+                direct_ids(&destination, "Parameters")?
+            } else {
+                Value::Null
+            };
+            Ok(json!({
+                "target": target,
+                "sourceGroup": source,
+                "destinationGroup": group_metadata(&destination),
+                "destinationOrder": destination_order,
+            }))
+        }
+        "MoveParameterGroup" => {
+            let id = required_id(data, "Id")?;
+            let target = require_group(entries, id)?;
+            Ok(json!({
+                "target": group_metadata(&target),
+                "rootOrder": direct_ids(&snapshot["ParameterStructure"], "Entries")?,
+            }))
+        }
+        _ => unreachable!(),
+    }
 }
 
 pub(super) async fn verification_snapshot(
@@ -24,14 +293,7 @@ pub(super) async fn verification_snapshot(
             )
             .await
         }
-        "AddParameter"
-        | "AddParameterGroup"
-        | "EditParameter"
-        | "EditParameterGroup"
-        | "DeleteParameter"
-        | "DeleteParameterGroup"
-        | "MoveParameter"
-        | "MoveParameterGroup" => {
+        method if is_parameter_structure_method(method) => {
             rpc.request("GetParameterStructure", json!({"ModelUID": model_uid}))
                 .await
         }
@@ -384,7 +646,11 @@ mod tests {
 
     #[test]
     fn add_parameter_with_group_id_matches_parent() {
-        let snapshot = structure(json!([group("FaceGroup", "脸部", vec![parameter("ParamAngleX", "角度X", false)])]));
+        let snapshot = structure(json!([group(
+            "FaceGroup",
+            "脸部",
+            vec![parameter("ParamAngleX", "角度X", false)]
+        )]));
         assert_eq!(verify(snapshot, Some("FaceGroup")), Some(true));
     }
 
@@ -401,7 +667,11 @@ mod tests {
     fn add_parameter_with_group_id_in_wrong_group_reports_mismatch() {
         let snapshot = structure(json!([
             group("FaceGroup", "脸部", vec![]),
-            group("BodyGroup", "身体", vec![parameter("ParamAngleX", "角度X", false)]),
+            group(
+                "BodyGroup",
+                "身体",
+                vec![parameter("ParamAngleX", "角度X", false)]
+            ),
         ]));
         assert_eq!(verify(snapshot, Some("FaceGroup")), Some(false));
     }
@@ -414,7 +684,11 @@ mod tests {
 
     #[test]
     fn add_parameter_without_group_id_but_nested_reports_mismatch() {
-        let snapshot = structure(json!([group("FaceGroup", "脸部", vec![parameter("ParamAngleX", "角度X", false)])]));
+        let snapshot = structure(json!([group(
+            "FaceGroup",
+            "脸部",
+            vec![parameter("ParamAngleX", "角度X", false)]
+        )]));
         assert_eq!(verify(snapshot, None), Some(false));
     }
 
@@ -432,6 +706,129 @@ mod tests {
     fn add_parameter_absent_from_snapshot_returns_none() {
         let snapshot = structure(json!([parameter("Other", "其他", true)]));
         assert_eq!(verify(snapshot, Some("FaceGroup")), None);
+    }
+
+    #[test]
+    fn parameter_precondition_ignores_unrelated_deletion() {
+        let before = structure(json!([group(
+            "FaceGroup",
+            "脸部",
+            vec![
+                parameter("ParamA", "A", false),
+                parameter("ParamB", "B", false),
+            ],
+        )]));
+        let after = structure(json!([group(
+            "FaceGroup",
+            "脸部",
+            vec![parameter("ParamB", "B", false)],
+        )]));
+        let data = json!({"ModelUID": "model", "Id": "ParamB", "Name": "Updated"});
+
+        assert_eq!(
+            edit_precondition("EditParameter", &data, &before).unwrap(),
+            edit_precondition("EditParameter", &data, &after).unwrap()
+        );
+    }
+
+    #[test]
+    fn parameter_precondition_detects_target_change_and_missing_target() {
+        let before = structure(json!([parameter("ParamB", "B", true)]));
+        let changed = structure(json!([parameter("ParamB", "Changed", true)]));
+        let missing = structure(json!([]));
+        let data = json!({"ModelUID": "model", "Id": "ParamB", "Name": "Updated"});
+
+        assert_ne!(
+            edit_precondition("EditParameter", &data, &before).unwrap(),
+            edit_precondition("EditParameter", &data, &changed).unwrap()
+        );
+        assert!(
+            edit_precondition("EditParameter", &data, &missing)
+                .unwrap_err()
+                .invalid_target
+        );
+    }
+
+    #[test]
+    fn group_delete_precondition_includes_approved_children() {
+        let before = structure(json!([group(
+            "FaceGroup",
+            "脸部",
+            vec![
+                parameter("ParamA", "A", false),
+                parameter("ParamB", "B", false)
+            ],
+        )]));
+        let changed = structure(json!([group(
+            "FaceGroup",
+            "脸部",
+            vec![parameter("ParamB", "B", false)],
+        )]));
+        let data = json!({"ModelUID": "model", "Id": "FaceGroup"});
+
+        assert_ne!(
+            edit_precondition("DeleteParameterGroup", &data, &before).unwrap(),
+            edit_precondition("DeleteParameterGroup", &data, &changed).unwrap()
+        );
+    }
+
+    #[test]
+    fn rename_rejects_an_occupied_id() {
+        let snapshot = structure(json!([
+            parameter("ParamA", "A", true),
+            parameter("ParamB", "B", true),
+        ]));
+        let data = json!({"ModelUID": "model", "Id": "ParamA", "NewId": "ParamB"});
+
+        assert!(
+            edit_precondition("EditParameter", &data, &snapshot)
+                .unwrap_err()
+                .invalid_target
+        );
+    }
+
+    #[test]
+    fn duplicate_ids_reject_the_snapshot() {
+        let snapshot = structure(json!([
+            parameter("ParamA", "A", true),
+            group(
+                "FaceGroup",
+                "脸部",
+                vec![parameter("ParamA", "Duplicate", false)],
+            ),
+        ]));
+        let data = json!({"ModelUID": "model", "Id": "ParamA", "Name": "Updated"});
+
+        let error = edit_precondition("EditParameter", &data, &snapshot).unwrap_err();
+        assert!(!error.invalid_target);
+    }
+
+    #[test]
+    fn indexed_move_precondition_tracks_destination_order() {
+        let before = structure(json!([group(
+            "FaceGroup",
+            "脸部",
+            vec![
+                parameter("ParamA", "A", false),
+                parameter("ParamB", "B", false)
+            ],
+        )]));
+        let changed = structure(json!([group(
+            "FaceGroup",
+            "脸部",
+            vec![parameter("ParamB", "B", false)],
+        )]));
+        let data = json!({
+            "ModelUID": "model",
+            "Id": "ParamB",
+            "GroupId": "FaceGroup",
+            "InsertIndex": 0,
+        });
+
+        assert_ne!(
+            edit_precondition("MoveParameter", &data, &before).unwrap(),
+            edit_precondition("MoveParameter", &data, &changed).unwrap()
+        );
     }
 
     fn object_snapshot(data: Value) -> Value {
@@ -481,7 +878,9 @@ mod tests {
 
     #[test]
     fn add_warp_deformer_with_target_object_ids_reports_unknown() {
-        let snapshot = object_snapshot(json!({ "Id": "Rotator", "Name": "旋转", "WarpDivH": 2, "WarpDivV": 2 }));
+        let snapshot = object_snapshot(
+            json!({ "Id": "Rotator", "Name": "旋转", "WarpDivH": 2, "WarpDivV": 2 }),
+        );
         let plan = deformer_plan(
             "AddWarpDeformer",
             json!({ "TargetObjectIds": ["ArtMesh1"], "WarpDivH": 2, "WarpDivV": 2 }),
@@ -491,7 +890,8 @@ mod tests {
 
     #[test]
     fn add_part_with_ids_still_verifies_fields() {
-        let snapshot = object_snapshot(json!({ "Id": "PartA", "Name": "头部", "Ids": ["ArtMesh1"] }));
+        let snapshot =
+            object_snapshot(json!({ "Id": "PartA", "Name": "头部", "Ids": ["ArtMesh1"] }));
         let plan = plan(
             "AddPart",
             json!({ "ModelUID": "model", "Id": "PartA", "Name": "头部", "Ids": ["ArtMesh1"] }),

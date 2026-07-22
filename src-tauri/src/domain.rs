@@ -210,6 +210,8 @@ pub struct EditorEditResult {
     pub operation: String,
     pub outcome: EditorEditOutcome,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_code: Option<String>,
     pub verification: Option<serde_json::Value>,
 }
 

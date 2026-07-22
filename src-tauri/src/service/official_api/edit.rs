@@ -5,7 +5,7 @@ use super::{
         preview, string, strings, ToolSpec, ALPHA_BLENDS, COLOR_BLENDS, DEFORMER_MODES,
         LABEL_COLORS,
     },
-    verification::verification_snapshot,
+    verification::{edit_precondition, verification_snapshot},
     CommandError, EditorService,
 };
 use crate::domain::{EditorEditPreview, StoredEditorEditPlan};
@@ -377,20 +377,6 @@ fn validate_constraints(method: &str, data: &Value) -> Result<(), CommandError> 
     Ok(())
 }
 
-fn group_exists_in_structure(snapshot: &Value, group_id: &str) -> bool {
-    let Some(entries) = snapshot
-        .get("ParameterStructure")
-        .and_then(|value| value.get("Entries"))
-        .and_then(Value::as_array)
-    else {
-        return false;
-    };
-    entries.iter().any(|entry| {
-        entry.get("EntryType").and_then(Value::as_str) == Some("ParameterGroup")
-            && entry.get("Id").and_then(Value::as_str) == Some(group_id)
-    })
-}
-
 pub(super) async fn preview_edit(
     service: &EditorService,
     spec: &ToolSpec,
@@ -402,19 +388,19 @@ pub(super) async fn preview_edit(
     let data = normalize_arguments(spec, args.clone(), Some(&model_uid))?;
     validate_constraints(spec.method, &data)?;
 
-    let precondition = verification_snapshot(&rpc, spec.method, &data)
+    let snapshot = verification_snapshot(&rpc, spec.method, &data)
         .await
         .map_err(CommandError::from)?;
-    if spec.method == "AddParameter" {
-        if let Some(group_id) = data.get("GroupId").and_then(Value::as_str) {
-            if !group_exists_in_structure(&precondition, group_id) {
-                return Err(CommandError::new(
-                    "invalid_arguments",
-                    format!("参数组 {group_id} 不存在，请先创建并提交参数组。"),
-                ));
-            }
-        }
-    }
+    let precondition = edit_precondition(spec.method, &data, &snapshot).map_err(|error| {
+        CommandError::new(
+            if error.invalid_target {
+                "invalid_arguments"
+            } else {
+                "protocol_error"
+            },
+            error.message,
+        )
+    })?;
     let preview_id = Uuid::new_v4().simple().to_string();
     let summary = format!(
         "{} {}",
