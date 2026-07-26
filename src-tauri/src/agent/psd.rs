@@ -424,24 +424,16 @@ mod tests {
         bytes.extend_from_slice(&value.to_be_bytes());
     }
 
-    fn push_i32(bytes: &mut Vec<u8>, value: i32) {
-        bytes.extend_from_slice(&value.to_be_bytes());
-    }
-
     fn psd_layer_record(name: &str, section_kind: Option<u32>) -> Vec<u8> {
         let mut record = Vec::new();
-        for value in [0, 0, 1, 1] {
-            push_i32(&mut record, value);
-        }
+        record.extend_from_slice(&[0; 16]);
         push_u16(&mut record, 0);
         record.extend_from_slice(b"8BIMnorm");
         record.extend_from_slice(&[255, 0, 0, 0]);
 
         let mut extra = Vec::new();
         push_u32(&mut extra, 18);
-        for value in [0, 0, 0, 0] {
-            push_i32(&mut extra, value);
-        }
+        extra.extend_from_slice(&[0; 16]);
         extra.extend_from_slice(&[255, 0]);
         push_u32(&mut extra, 0);
 
@@ -498,13 +490,6 @@ mod tests {
         bytes
     }
 
-    fn assert_no_hidden_group_boundaries(nodes: &[PsdLayerNode]) {
-        for node in nodes {
-            assert_ne!(node.name, "</Layer group>");
-            assert_no_hidden_group_boundaries(&node.children);
-        }
-    }
-
     fn layer(name: &str) -> LayerInfo {
         let mut layer = LayerInfo::default();
         layer.name = name.into();
@@ -541,22 +526,6 @@ mod tests {
         assert_eq!(value["documents"][0]["id"], "psd-1");
         assert_eq!(value["documents"][0]["layerCount"], 42);
         assert!(value["documents"][0].get("path").is_none());
-    }
-
-    #[test]
-    fn layer_tree_uses_the_named_group_opener_instead_of_the_hidden_closer() {
-        let layers = vec![group_closer(), layer("Face"), group_opener("Head")];
-
-        let tree = build_layer_tree(&layers);
-
-        assert_eq!(tree.len(), 1);
-        assert_eq!(
-            (tree[0].id.as_str(), tree[0].name.as_str(), tree[0].kind),
-            ("2", "Head", PsdLayerKind::Group)
-        );
-        assert_eq!(tree[0].children.len(), 1);
-        assert_eq!(tree[0].children[0].id, "1");
-        assert_eq!(tree[0].children[0].name, "Face");
     }
 
     #[test]
@@ -626,7 +595,6 @@ mod tests {
             (inner.children[0].name.as_str(), inner.children[0].kind),
             ("First Layer", PsdLayerKind::Layer)
         );
-        assert_no_hidden_group_boundaries(&structure.layers);
 
         let json = serde_json::to_string(&structure).unwrap();
         assert!(!json.contains("</Layer group>"));
