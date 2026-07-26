@@ -2,7 +2,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const bridge = vi.hoisted(() => ({
   getLlmConfig: vi.fn(),
+  listLlmModels: vi.fn(),
   testLlmConnection: vi.fn(),
+  testLlmModel: vi.fn(),
   listenImageCapability: vi.fn().mockResolvedValue(() => {}),
 }));
 
@@ -17,14 +19,15 @@ const completeConfig = {
 const successfulCheck = {
   ok: true,
   message: "connected",
-  models: ["example-model"],
 };
 
 describe("共享模型连接状态", () => {
   beforeEach(() => {
     vi.resetModules();
     bridge.getLlmConfig.mockReset();
+    bridge.listLlmModels.mockReset();
     bridge.testLlmConnection.mockReset();
+    bridge.testLlmModel.mockReset();
   });
 
   it("仅在完整配置通过真实连接检查后标记就绪", async () => {
@@ -45,7 +48,6 @@ describe("共享模型连接状态", () => {
     bridge.testLlmConnection.mockResolvedValue({
       ok: false,
       message: "unavailable",
-      models: [],
     });
     const { modelStatus, store } = await setupStore();
 
@@ -68,7 +70,7 @@ describe("共享模型连接状态", () => {
     expect(modelStatus.tone).toBe("error");
   });
 
-  it("配置不完整时保持未配置且不发起自动检查", async () => {
+  it("API 已配置但未选模型时保持待选择且不发起自动检查", async () => {
     bridge.getLlmConfig.mockResolvedValue({
       baseUrl: "https://api.example.test/v1",
       model: null,
@@ -79,8 +81,59 @@ describe("共享模型连接状态", () => {
     await store.initialize();
 
     expect(bridge.testLlmConnection).not.toHaveBeenCalled();
-    expect(store.state.connectionStatus).toBe("unconfigured");
+    expect(store.state.connectionStatus).toBe("model_required");
     expect(modelStatus.tone).toBe("warn");
+  });
+
+  it("API 检查成功后发布模型列表但不自动选择或标记就绪", async () => {
+    bridge.getLlmConfig.mockResolvedValue({ ...completeConfig, model: null });
+    bridge.listLlmModels.mockResolvedValue({
+      models: ["example-model", "example-model-mini"],
+    });
+    const { modelStatus, store } = await setupStore();
+    await store.initialize();
+
+    const result = await store.discoverModels();
+
+    expect(result?.models).toEqual(["example-model", "example-model-mini"]);
+    expect(store.state.config.model).toBeNull();
+    expect(store.state.connectionStatus).toBe("model_required");
+    expect(modelStatus.tone).toBe("warn");
+  });
+
+  it("候选模型测试成功后才应用后端返回的已保存配置", async () => {
+    bridge.getLlmConfig.mockResolvedValue({ ...completeConfig, model: null });
+    bridge.testLlmModel.mockResolvedValue({
+      ...successfulCheck,
+      imageSupported: true,
+      config: completeConfig,
+    });
+    const { modelStatus, store } = await setupStore();
+    await store.initialize();
+
+    await store.testModel("example-model");
+
+    expect(bridge.testLlmModel).toHaveBeenCalledWith("example-model");
+    expect(store.state.config.model).toBe("example-model");
+    expect(store.state.connectionStatus).toBe("ready");
+    expect(store.state.imageInputSupported).toBe(true);
+    expect(modelStatus).toMatchObject({ label: "example-model", tone: "ok" });
+  });
+
+  it("候选模型失败时不应用配置且聊天保持不可用", async () => {
+    bridge.getLlmConfig.mockResolvedValue({ ...completeConfig, model: null });
+    bridge.testLlmModel.mockResolvedValue({
+      ok: false,
+      message: "unavailable",
+    });
+    const { modelStatus, store } = await setupStore();
+    await store.initialize();
+
+    await store.testModel("example-model");
+
+    expect(store.state.config.model).toBeNull();
+    expect(store.state.connectionStatus).toBe("failed");
+    expect(modelStatus.tone).toBe("error");
   });
 
   it("配置写入会使成功结果过期，清除密钥后恢复未配置", async () => {
@@ -116,6 +169,25 @@ describe("共享模型连接状态", () => {
 
     expect(store.state.connectionStatus).toBe("stale");
     expect(modelStatus.tone).toBe("warn");
+  });
+
+  it("忽略配置变更前尚未返回的模型列表", async () => {
+    let resolveModels!: (result: { models: string[] }) => void;
+    bridge.getLlmConfig.mockResolvedValue({ ...completeConfig, model: null });
+    bridge.listLlmModels.mockReturnValue(new Promise((resolve) => {
+      resolveModels = resolve;
+    }));
+    const { store } = await setupStore();
+    await store.initialize();
+
+    const discovering = store.discoverModels();
+    await vi.waitFor(() => expect(store.state.connectionStatus).toBe("checking"));
+    store.applyConfig({ ...completeConfig, baseUrl: "https://next.example.test/v1" });
+    resolveModels({ models: ["stale-model"] });
+    const result = await discovering;
+
+    expect(result).toBeNull();
+    expect(store.state.connectionStatus).toBe("stale");
   });
 
   it("读取配置失败时呈现异常状态并允许调用方重试", async () => {

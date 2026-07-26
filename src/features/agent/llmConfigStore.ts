@@ -1,11 +1,18 @@
 import { reactive } from "vue";
-import { getLlmConfig, listenImageCapability, testLlmConnection } from "./bridge";
+import {
+  getLlmConfig,
+  listLlmModels,
+  listenImageCapability,
+  testLlmConnection,
+  testLlmModel,
+} from "./bridge";
 import { publishModelFooter } from "../shell/footerSelfCheck";
-import type { LlmConfigView, LlmTestResult } from "./types";
+import type { LlmConfigView, LlmModelListResult, LlmTestResult } from "./types";
 
 export type LlmConnectionStatus =
   | "unconfigured"
   | "checking"
+  | "model_required"
   | "ready"
   | "stale"
   | "failed";
@@ -81,13 +88,13 @@ function applyConfig(config: LlmConfigView) {
   state.initialized = true;
   state.imageInputSupported = config.imageInputSupported ?? null;
   checkToken += 1;
-  if (hasCompleteConfig(config)) publishStale();
-  else publishUnconfigured();
+  publishConfiguredState();
 }
 
 async function testConnection(): Promise<LlmTestResult> {
   const token = ++checkToken;
-  publishChecking();
+  state.imageInputSupported = null;
+  publishChecking("正在验证已保存的模型连接。");
   try {
     const result = await testLlmConnection();
     if (token === checkToken) applyCheckResult(result);
@@ -104,8 +111,63 @@ async function testConnection(): Promise<LlmTestResult> {
   }
 }
 
+async function discoverModels(): Promise<LlmModelListResult | null> {
+  const token = ++checkToken;
+  state.imageInputSupported = null;
+  publishChecking("正在验证 API 并读取模型列表。");
+  try {
+    const result = await listLlmModels();
+    if (token !== checkToken) return null;
+    publishModelRequired(result.models.length);
+    return result;
+  } catch (error) {
+    if (token === checkToken) {
+      publishFailed("API 连接异常", "无法获取模型列表。点击进入设置重试。");
+    }
+    throw error;
+  }
+}
+
+async function testModel(model: string): Promise<LlmTestResult> {
+  const token = ++checkToken;
+  state.imageInputSupported = null;
+  publishChecking("正在验证所选模型连接。");
+  try {
+    const result = await testLlmModel(model);
+    if (token === checkToken) {
+      if (result.ok && result.config) {
+        state.config = { ...result.config };
+        state.imageInputSupported = result.imageSupported ?? null;
+        publishReady();
+      } else {
+        publishFailed("模型连接异常", "所选模型未通过连接测试。点击进入设置重试。");
+      }
+    }
+    return result;
+  } catch (error) {
+    if (token === checkToken) {
+      publishFailed("模型连接异常", "所选模型连接测试失败。点击进入设置重试。");
+    }
+    throw error;
+  }
+}
+
+function invalidateConnection() {
+  checkToken += 1;
+  state.imageInputSupported = null;
+  publishConfiguredState();
+}
+
 export function useLlmConfigStore() {
-  return { state, initialize, applyConfig, testConnection };
+  return {
+    state,
+    initialize,
+    applyConfig,
+    testConnection,
+    discoverModels,
+    testModel,
+    invalidateConnection,
+  };
 }
 
 function applyCheckResult(result: LlmTestResult) {
@@ -125,6 +187,16 @@ function hasCompleteConfig(config: LlmConfigView) {
   return Boolean(config.hasApiKey && config.baseUrl?.trim() && config.model?.trim());
 }
 
+function hasEndpointConfig(config: LlmConfigView) {
+  return Boolean(config.hasApiKey && config.baseUrl?.trim());
+}
+
+function publishConfiguredState() {
+  if (hasCompleteConfig(state.config)) publishStale();
+  else if (hasEndpointConfig(state.config)) publishModelRequired();
+  else publishUnconfigured();
+}
+
 function publishUnconfigured() {
   setConnection("unconfigured", {
     label: "模型未配置",
@@ -133,10 +205,21 @@ function publishUnconfigured() {
   });
 }
 
-function publishChecking() {
+function publishChecking(title: string) {
   setConnection("checking", {
     label: "模型检查中",
-    title: "正在验证模型连接。",
+    title,
+    tone: "warn",
+  });
+}
+
+function publishModelRequired(modelCount?: number) {
+  const empty = modelCount === 0;
+  setConnection("model_required", {
+    label: empty ? "无可用模型" : "待选择模型",
+    title: empty
+      ? "API 已连接，但没有返回可选模型。点击进入设置。"
+      : "API 已配置，请选择模型并测试连接。",
     tone: "warn",
   });
 }
