@@ -170,8 +170,12 @@ export interface LlmConfigInput {
 export interface LlmTestResult {
   ok: boolean;
   message: string;
-  models: string[];
   imageSupported?: boolean | null;
+  config?: LlmConfigView;
+}
+
+export interface LlmModelListResult {
+  models: string[];
 }
 
 export interface AgentTurnDelta {
