@@ -85,7 +85,7 @@ export interface PsdMaskInfo {
 export interface PsdLayerNode {
   id: string;
   name: string;
-  kind: "group" | "group_end" | "layer";
+  kind: "group" | "layer";
   visible: boolean;
   opacity: number;
   blendMode: string;
