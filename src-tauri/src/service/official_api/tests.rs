@@ -321,6 +321,38 @@ fn object_creation_arguments_require_stable_ids() {
 }
 
 #[test]
+fn root_deformer_parent_must_be_omitted() {
+    for name in ["preview_add_rotation_deformer", "preview_add_warp_deformer"] {
+        let spec = spec(name).unwrap();
+        let omitted = schema::normalize_operations(
+            spec,
+            json!({"operations": [{"id": "DeformerA"}]}),
+            "private-model",
+        )
+        .unwrap();
+        assert!(omitted[0].1.get("ParentId").is_none());
+        edit::validate_constraints(spec.method, &omitted[0].1).unwrap();
+
+        let empty = schema::normalize_operations(
+            spec,
+            json!({"operations": [{"id": "DeformerA", "parentId": ""}]}),
+            "private-model",
+        )
+        .unwrap_err();
+        assert_eq!(empty.code, "invalid_arguments");
+
+        let virtual_root = schema::normalize_operations(
+            spec,
+            json!({"operations": [{"id": "DeformerA", "parentId": "%Root"}]}),
+            "private-model",
+        )
+        .unwrap();
+        let error = edit::validate_constraints(spec.method, &virtual_root[0].1).unwrap_err();
+        assert_eq!(error.code, "invalid_arguments");
+    }
+}
+
+#[test]
 fn batch_conflicts_reject_duplicate_stable_ids_and_unsafe_dependencies() {
     assert!(edit::validate_batch_conflicts(
         "AddPart",
@@ -745,22 +777,28 @@ async fn edit_preview_executes_documented_transaction_and_verifies_postcondition
 #[tokio::test]
 async fn warp_batch_with_explicit_ids_previews_and_verifies_hierarchy() {
     let before = json!({
-        "DeformerStructure": [
-            {"Id": "ArtMeshA", "Name": "A", "Type": "ArtMesh", "Children": []},
-            {"Id": "ArtMeshB", "Name": "B", "Type": "ArtMesh", "Children": []}
-        ]
+        "DeformerStructure": [{
+            "Id": "%Root", "Name": "Root",
+            "Children": [
+                {"Id": "ArtMeshA", "Name": "A", "Type": "ArtMesh", "Children": []},
+                {"Id": "ArtMeshB", "Name": "B", "Type": "ArtMesh", "Children": []}
+            ]
+        }]
     });
     let after = json!({
-        "DeformerStructure": [
-            {
-                "Id": "DeformerA", "Name": "A", "Type": "WarpDeformer",
-                "Children": [{"Id": "ArtMeshA", "Name": "A", "Type": "ArtMesh", "Children": []}]
-            },
-            {
-                "Id": "DeformerB", "Name": "B", "Type": "WarpDeformer",
-                "Children": [{"Id": "ArtMeshB", "Name": "B", "Type": "ArtMesh", "Children": []}]
-            }
-        ]
+        "DeformerStructure": [{
+            "Id": "%Root", "Name": "Root",
+            "Children": [
+                {
+                    "Id": "DeformerA", "Name": "A", "Type": "WarpDeformer",
+                    "Children": [{"Id": "ArtMeshA", "Name": "A", "Type": "ArtMesh", "Children": []}]
+                },
+                {
+                    "Id": "DeformerB", "Name": "B", "Type": "WarpDeformer",
+                    "Children": [{"Id": "ArtMeshB", "Name": "B", "Type": "ArtMesh", "Children": []}]
+                }
+            ]
+        }]
     });
     let first = json!({
         "ModelUID": "private-model",

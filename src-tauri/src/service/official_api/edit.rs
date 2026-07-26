@@ -276,7 +276,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         "preview_add_rotation_deformer",
         "预览添加 Rotation Deformer",
         "AddRotationDeformer",
-        "用稳定 ID 预览添加 Rotation Deformer；AsParent 把目标对象置于新 Deformer 下，AsChild 只接受一个目标对象。",
+        "用稳定 ID 预览添加 Rotation Deformer；AsParent 把目标对象置于新 Deformer 下，AsChild 只接受一个目标对象；根级创建必须省略 parentId，不能传 %Root 或空字符串。",
         false,
         add_deformer.clone(),
     ));
@@ -293,7 +293,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         "preview_add_warp_deformer",
         "预览添加 Warp Deformer",
         "AddWarpDeformer",
-        "用稳定 ID 预览添加 Warp Deformer；AsParent 把目标对象置于新 Deformer 下，AsChild 只接受一个目标对象。",
+        "用稳定 ID 预览添加 Warp Deformer；AsParent 把目标对象置于新 Deformer 下，AsChild 只接受一个目标对象；根级创建必须省略 parentId，不能传 %Root 或空字符串。",
         false,
         add_warp,
     ));
@@ -343,7 +343,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
     specs
 }
 
-fn validate_constraints(method: &str, data: &Value) -> Result<(), CommandError> {
+pub(super) fn validate_constraints(method: &str, data: &Value) -> Result<(), CommandError> {
     if matches!(method, "DeleteParameterKey" | "MoveParameterKey")
         && data.get("ObjectId").is_none()
         && data.get("ParameterId").is_none()
@@ -361,6 +361,14 @@ fn validate_constraints(method: &str, data: &Value) -> Result<(), CommandError> 
         return Err(CommandError::new(
             "invalid_arguments",
             "snapCenter=true 仅在 considerChildKeyforms=true 时有效。",
+        ));
+    }
+    if matches!(method, "AddRotationDeformer" | "AddWarpDeformer")
+        && data.get("ParentId").and_then(Value::as_str) == Some("%Root")
+    {
+        return Err(CommandError::new(
+            "invalid_arguments",
+            "根级创建必须省略 parentId，不能使用 %Root。",
         ));
     }
     if matches!(method, "AddRotationDeformer" | "AddWarpDeformer")
