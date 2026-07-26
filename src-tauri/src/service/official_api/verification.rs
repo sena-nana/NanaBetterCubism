@@ -218,6 +218,8 @@ struct HierarchyNode {
     parent_id: Option<String>,
 }
 
+const VIRTUAL_ROOT_ID: &str = "%Root";
+
 fn index_hierarchy_node(
     value: &Value,
     parent_id: Option<&str>,
@@ -262,6 +264,27 @@ fn index_hierarchy_node(
     Ok(())
 }
 
+fn index_hierarchy_root(
+    value: &Value,
+    allow_virtual_root: bool,
+    nodes: &mut HashMap<String, HierarchyNode>,
+) -> Result<(), PreconditionError> {
+    if allow_virtual_root && value.get("Id").and_then(Value::as_str) == Some(VIRTUAL_ROOT_ID) {
+        let children = value
+            .get("Children")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                PreconditionError::protocol(format!(
+                    "虚拟根 {VIRTUAL_ROOT_ID} 的 Children 不是数组。"
+                ))
+            })?;
+        return children
+            .iter()
+            .try_for_each(|child| index_hierarchy_node(child, None, nodes));
+    }
+    index_hierarchy_node(value, None, nodes)
+}
+
 fn hierarchy_index(
     snapshot: &Value,
     field: &str,
@@ -270,11 +293,12 @@ fn hierarchy_index(
         .get(field)
         .ok_or_else(|| PreconditionError::protocol(format!("结构响应缺少 {field}。")))?;
     let mut nodes = HashMap::new();
+    let allow_virtual_root = field == "DeformerStructure";
     match root {
-        Value::Object(_) => index_hierarchy_node(root, None, &mut nodes)?,
+        Value::Object(_) => index_hierarchy_root(root, allow_virtual_root, &mut nodes)?,
         Value::Array(roots) => {
             for root in roots {
-                index_hierarchy_node(root, None, &mut nodes)?;
+                index_hierarchy_root(root, allow_virtual_root, &mut nodes)?;
             }
         }
         _ => {
@@ -1060,6 +1084,10 @@ mod tests {
         json!({ "Id": id, "Name": id, "Type": kind, "Children": children })
     }
 
+    fn virtual_root(children: Vec<Value>) -> Value {
+        json!({ "Id": VIRTUAL_ROOT_ID, "Name": "Root", "Children": children })
+    }
+
     fn deformer_data(extras: Value) -> Value {
         let mut data = json!({ "ModelUID": "model", "Id": "Rotator", "Name": "旋转" });
         if let Some(object) = extras.as_object() {
@@ -1068,6 +1096,55 @@ mod tests {
             }
         }
         data
+    }
+
+    #[test]
+    fn virtual_deformer_root_is_unwrapped_for_object_and_array_responses() {
+        for hierarchy in [
+            virtual_root(vec![hierarchy_node("ArtMesh1", "ArtMesh", vec![])]),
+            json!([virtual_root(vec![hierarchy_node(
+                "ArtMesh1",
+                "ArtMesh",
+                vec![]
+            )])]),
+        ] {
+            let snapshot = json!({"DeformerStructure": hierarchy});
+            let nodes = hierarchy_index(&snapshot, "DeformerStructure").unwrap();
+
+            assert!(!nodes.contains_key(VIRTUAL_ROOT_ID));
+            assert_eq!(nodes["ArtMesh1"].kind, "ArtMesh");
+            assert_eq!(nodes["ArtMesh1"].parent_id, None);
+        }
+    }
+
+    #[test]
+    fn virtual_deformer_root_does_not_relax_hierarchy_validation() {
+        let missing_type = json!({"DeformerStructure": {
+            "Id": "OrdinaryRoot",
+            "Children": [],
+        }});
+        assert!(hierarchy_index(&missing_type, "DeformerStructure").is_err());
+
+        let nested_virtual_root = json!({"DeformerStructure": virtual_root(vec![
+            hierarchy_node(
+                "Parent",
+                "WarpDeformer",
+                vec![virtual_root(vec![])]
+            ),
+        ])});
+        assert!(hierarchy_index(&nested_virtual_root, "DeformerStructure").is_err());
+
+        let invalid_children = json!({"DeformerStructure": {
+            "Id": VIRTUAL_ROOT_ID,
+            "Children": {},
+        }});
+        assert!(hierarchy_index(&invalid_children, "DeformerStructure").is_err());
+
+        let duplicate_ids = json!({"DeformerStructure": virtual_root(vec![
+            hierarchy_node("Duplicate", "ArtMesh", vec![]),
+            hierarchy_node("Duplicate", "ArtMesh", vec![]),
+        ])});
+        assert!(hierarchy_index(&duplicate_ids, "DeformerStructure").is_err());
     }
 
     #[test]
