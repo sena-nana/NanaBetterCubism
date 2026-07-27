@@ -29,7 +29,6 @@
   "dependencies": {
     "@lilia/build": "github:sena-nana/LiliaUI#workspace=@lilia/build&commit=fefcd3bc4a4a454276f2162bc21ab4faef14fd3f",
     "@lilia/config": "github:sena-nana/LiliaUI#workspace=@lilia/config&commit=fefcd3bc4a4a454276f2162bc21ab4faef14fd3f",
-    "@lilia/image-viewer": "github:sena-nana/LiliaUI#workspace=@lilia/ui&commit=fefcd3bc4a4a454276f2162bc21ab4faef14fd3f",
     "@lilia/theme": "github:sena-nana/LiliaUI#workspace=@lilia/theme&commit=fefcd3bc4a4a454276f2162bc21ab4faef14fd3f",
     "@lilia/tools": "github:sena-nana/LiliaUI#workspace=@lilia/tools&commit=fefcd3bc4a4a454276f2162bc21ab4faef14fd3f",
     "@lilia/ui": "github:sena-nana/LiliaUI#workspace=@lilia/ui&commit=fefcd3bc4a4a454276f2162bc21ab4faef14fd3f",

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
-import UiImageViewer from "@lilia/image-viewer/components/ImageViewer";
+import UiImageViewer from "@lilia/ui/components/ImageViewer";
 import {
   createConversation,
   deleteConversation,

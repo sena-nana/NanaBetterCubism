@@ -1,6 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { UiImageViewerSource } from "@lilia/image-viewer/components/ImageViewer";
+import type { UiImageViewerSource } from "@lilia/ui/components/ImageViewer";
 import { ref, type Ref } from "vue";
 import { discardImageDrafts, normalizeCommandError, prepareImages } from "./bridge";
 import { isTauriRuntime } from "../editor/bridge";
