@@ -21,6 +21,7 @@ import type {
   ComputerPermissionStatus,
   LlmConfigInput,
   LlmConfigView,
+  LlmModelListResult,
   LlmTestResult,
   MemoryRecord,
   MemoryScope,
@@ -200,6 +201,20 @@ export async function testLlmConnection(): Promise<LlmTestResult> {
     throw domainError("desktop_required", "请在桌面应用中测试连接。");
   }
   return invoke<LlmTestResult>("llm_test_connection");
+}
+
+export async function listLlmModels(): Promise<LlmModelListResult> {
+  if (!isTauriRuntime()) {
+    throw domainError("desktop_required", "请在桌面应用中获取模型列表。");
+  }
+  return invoke<LlmModelListResult>("llm_list_models");
+}
+
+export async function testLlmModel(model: string): Promise<LlmTestResult> {
+  if (!isTauriRuntime()) {
+    throw domainError("desktop_required", "请在桌面应用中测试模型连接。");
+  }
+  return invoke<LlmTestResult>("llm_test_model", { model });
 }
 
 export async function listenConversationsChanged(handler: () => void) {

@@ -83,7 +83,7 @@ pub struct PsdMaskInfo {
 pub struct PsdLayerNode {
     pub id: String,
     pub name: String,
-    pub kind: String,
+    pub kind: PsdLayerKind,
     pub visible: bool,
     pub opacity: f32,
     pub blend_mode: String,
@@ -92,6 +92,13 @@ pub struct PsdLayerNode {
     pub mask: PsdMaskInfo,
     pub bounds: PsdBounds,
     pub children: Vec<PsdLayerNode>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PsdLayerKind {
+    Group,
+    Layer,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -278,49 +285,44 @@ fn parse_psd(bytes: &[u8]) -> Result<PsdStructure, AgentError> {
 }
 
 fn build_layer_tree(layers: &[LayerInfo]) -> Vec<PsdLayerNode> {
-    // rawpsd returns layers bottom-to-top, with group boundaries marked by
-    // group_opener (bottom of group) and group_closer (top of group).
-    // Reverse to top-to-bottom so the closer becomes the group header.
-    let order: Vec<(usize, &LayerInfo)> = layers.iter().enumerate().rev().collect();
-    // Each frame holds the group header as its first element, followed by children.
-    let mut frames: Vec<Vec<PsdLayerNode>> = vec![Vec::new()];
-    for (idx, layer) in order {
-        if layer.group_closer {
-            // Start a new group: push its header node as the first element.
-            frames.push(vec![layer_node(idx, layer)]);
-        } else if layer.group_opener {
-            // Close the current group frame into a group node.
-            let frame = frames.pop().unwrap_or_default();
-            let mut group_node = if let Some(header) = frame.first() {
-                header.clone()
-            } else {
-                layer_node(idx, layer)
+    // rawpsd returns bottom-to-top; reversing makes named openers precede their
+    // children and hidden closers complete the current group.
+    let mut root = Vec::new();
+    let mut groups: Vec<PsdLayerNode> = Vec::new();
+    for (idx, layer) in layers.iter().enumerate().rev() {
+        if layer.group_opener {
+            groups.push(layer_node(idx, layer));
+            continue;
+        }
+        let node = if layer.group_closer {
+            let Some(group) = groups.pop() else {
+                continue;
             };
-            group_node.children = frame.into_iter().skip(1).collect();
-            if let Some(parent) = frames.last_mut() {
-                parent.push(group_node);
-            }
+            group
         } else {
-            if let Some(frame) = frames.last_mut() {
-                frame.push(layer_node(idx, layer));
-            }
+            layer_node(idx, layer)
+        };
+        if let Some(parent) = groups.last_mut() {
+            parent.children.push(node);
+        } else {
+            root.push(node);
         }
     }
-    // Flatten any unclosed frames into root.
-    let mut root: Vec<PsdLayerNode> = Vec::new();
-    while let Some(frame) = frames.pop() {
-        root.extend(frame);
+    while let Some(group) = groups.pop() {
+        if let Some(parent) = groups.last_mut() {
+            parent.children.push(group);
+        } else {
+            root.push(group);
+        }
     }
     root
 }
 
 fn layer_node(idx: usize, layer: &LayerInfo) -> PsdLayerNode {
     let kind = if layer.group_opener {
-        "group_end".to_string()
-    } else if layer.group_closer {
-        "group".to_string()
+        PsdLayerKind::Group
     } else {
-        "layer".to_string()
+        PsdLayerKind::Layer
     };
     let has_mask = layer.mask_channel_count > 0 && layer.image_data_mask.len() > 0;
     PsdLayerNode {
@@ -414,6 +416,98 @@ fn psd_io_error(error: std::io::Error) -> AgentError {
 mod tests {
     use super::*;
 
+    fn push_u16(bytes: &mut Vec<u8>, value: u16) {
+        bytes.extend_from_slice(&value.to_be_bytes());
+    }
+
+    fn push_u32(bytes: &mut Vec<u8>, value: u32) {
+        bytes.extend_from_slice(&value.to_be_bytes());
+    }
+
+    fn psd_layer_record(name: &str, section_kind: Option<u32>) -> Vec<u8> {
+        let mut record = Vec::new();
+        record.extend_from_slice(&[0; 16]);
+        push_u16(&mut record, 0);
+        record.extend_from_slice(b"8BIMnorm");
+        record.extend_from_slice(&[255, 0, 0, 0]);
+
+        let mut extra = Vec::new();
+        push_u32(&mut extra, 18);
+        extra.extend_from_slice(&[0; 16]);
+        extra.extend_from_slice(&[255, 0]);
+        push_u32(&mut extra, 0);
+
+        let mut pascal_name = vec![name.len() as u8];
+        pascal_name.extend_from_slice(name.as_bytes());
+        while pascal_name.len() % 4 != 0 {
+            pascal_name.push(0);
+        }
+        extra.extend(pascal_name);
+
+        if let Some(kind) = section_kind {
+            extra.extend_from_slice(b"8BIMlsct");
+            push_u32(&mut extra, 4);
+            push_u32(&mut extra, kind);
+        }
+
+        push_u32(&mut record, extra.len() as u32);
+        record.extend(extra);
+        record
+    }
+
+    fn nested_group_psd_fixture() -> Vec<u8> {
+        let records = [
+            psd_layer_record("</Layer group>", Some(3)),
+            psd_layer_record("</Layer group>", Some(3)),
+            psd_layer_record("First Layer", None),
+            psd_layer_record("group inside", Some(1)),
+            psd_layer_record("group outside", Some(1)),
+        ]
+        .concat();
+
+        let mut layer_info = Vec::new();
+        push_u16(&mut layer_info, 5);
+        layer_info.extend(records);
+
+        let mut layer_mask_info = Vec::new();
+        push_u32(&mut layer_mask_info, layer_info.len() as u32);
+        layer_mask_info.extend(layer_info);
+        push_u32(&mut layer_mask_info, 0);
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"8BPS");
+        push_u16(&mut bytes, 1);
+        bytes.extend_from_slice(&[0; 6]);
+        push_u16(&mut bytes, 3);
+        push_u32(&mut bytes, 1);
+        push_u32(&mut bytes, 1);
+        push_u16(&mut bytes, 8);
+        push_u16(&mut bytes, 3);
+        push_u32(&mut bytes, 0);
+        push_u32(&mut bytes, 0);
+        push_u32(&mut bytes, layer_mask_info.len() as u32);
+        bytes.extend(layer_mask_info);
+        bytes
+    }
+
+    fn layer(name: &str) -> LayerInfo {
+        let mut layer = LayerInfo::default();
+        layer.name = name.into();
+        layer
+    }
+
+    fn group_opener(name: &str) -> LayerInfo {
+        let mut layer = layer(name);
+        layer.group_opener = true;
+        layer
+    }
+
+    fn group_closer() -> LayerInfo {
+        let mut layer = layer("</Layer group>");
+        layer.group_closer = true;
+        layer
+    }
+
     #[test]
     fn attachment_manifest_exposes_only_safe_conversation_metadata() {
         let manifest = attachment_manifest(&[ChatPsdDocument {
@@ -432,6 +526,79 @@ mod tests {
         assert_eq!(value["documents"][0]["id"], "psd-1");
         assert_eq!(value["documents"][0]["layerCount"], 42);
         assert!(value["documents"][0].get("path").is_none());
+    }
+
+    #[test]
+    fn layer_tree_preserves_nested_groups_and_top_level_order() {
+        let layers = vec![
+            layer("Bottom"),
+            group_closer(),
+            layer("Outer bottom"),
+            group_closer(),
+            layer("Inner child"),
+            group_opener("Inner"),
+            layer("Outer top"),
+            group_opener("Outer"),
+            layer("Top"),
+        ];
+
+        let tree = build_layer_tree(&layers);
+
+        assert_eq!(
+            tree.iter()
+                .map(|node| node.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Top", "Outer", "Bottom"]
+        );
+        assert_eq!(tree[1].id, "7");
+        assert_eq!(
+            tree[1]
+                .children
+                .iter()
+                .map(|node| node.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Outer top", "Inner", "Outer bottom"]
+        );
+        assert_eq!(tree[1].children[1].id, "5");
+        assert_eq!(tree[1].children[1].kind, PsdLayerKind::Group);
+        assert_eq!(tree[1].children[1].children[0].name, "Inner child");
+    }
+
+    #[test]
+    fn parsed_nested_group_structure_never_exposes_hidden_boundaries() {
+        let bytes = nested_group_psd_fixture();
+        let raw_layers = rawpsd::parse_layer_records(&bytes)
+            .map_err(|(_, error)| error)
+            .unwrap();
+        assert_eq!(
+            raw_layers.iter().filter(|layer| layer.group_closer).count(),
+            2
+        );
+
+        let structure = parse_psd(&bytes).unwrap();
+
+        assert_eq!((structure.width, structure.height), (1, 1));
+        assert_eq!(structure.layers.len(), 1);
+        let outer = &structure.layers[0];
+        assert_eq!(
+            (outer.name.as_str(), outer.kind),
+            ("group outside", PsdLayerKind::Group)
+        );
+        assert_eq!(outer.children.len(), 1);
+        let inner = &outer.children[0];
+        assert_eq!(
+            (inner.name.as_str(), inner.kind),
+            ("group inside", PsdLayerKind::Group)
+        );
+        assert_eq!(inner.children.len(), 1);
+        assert_eq!(
+            (inner.children[0].name.as_str(), inner.children[0].kind),
+            ("First Layer", PsdLayerKind::Layer)
+        );
+
+        let json = serde_json::to_string(&structure).unwrap();
+        assert!(!json.contains("</Layer group>"));
+        assert!(!json.contains("group_end"));
     }
 }
 

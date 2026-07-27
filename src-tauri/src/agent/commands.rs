@@ -1,13 +1,15 @@
 use crate::agent::computer_control::{ComputerOperationStatus, ComputerPermissionStatus};
-use crate::agent::images::{ChatImageAttachment, ImagePrepareInput, ImagePrepareRejection, ImagePrepareResult};
-use crate::agent::llm::test_connection;
+use crate::agent::images::{
+    ChatImageAttachment, ImagePrepareInput, ImagePrepareRejection, ImagePrepareResult,
+};
+use crate::agent::llm::{list_models, test_connection};
 use crate::agent::psd::{ChatPsdDocument, PsdStructure};
 use crate::agent::runtime::{
     continue_after_computer_permission, continue_after_question, run_turn,
 };
 use crate::agent::store::{
-    ChatMessage, ConversationPlan, ConversationSummary, LlmConfigInput, LlmConfigView,
-    MemoryViewRecord, ProjectRecord,
+    AgentStore, ChatMessage, ConversationPlan, ConversationSummary, LlmConfigInput,
+    LlmConfigInternal, LlmConfigView, MemoryViewRecord, ProjectRecord,
 };
 use crate::agent::title::generate_conversation_title;
 use crate::agent::tools::tool_display_name;
@@ -26,8 +28,15 @@ use tauri::{AppHandle, Emitter, Manager};
 pub struct LlmTestResult {
     pub ok: bool,
     pub message: String,
-    pub models: Vec<String>,
     pub image_supported: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<LlmConfigView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmModelListResult {
+    pub models: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -69,6 +78,43 @@ fn runtime(app: &AppHandle) -> Result<Arc<AgentRuntime>, AgentError> {
         .ok_or_else(|| AgentError::new("runtime_missing", "Agent 运行时未初始化。"))
 }
 
+fn persist_tested_model(
+    store: &AgentStore,
+    config: &LlmConfigInternal,
+    ok: bool,
+    image_supported: Option<bool>,
+) -> Result<Option<LlmConfigView>, AgentError> {
+    if !ok {
+        return Ok(None);
+    }
+    let mut view = store.set_llm_config(LlmConfigInput {
+        base_url: config.base_url.clone(),
+        api_key: None,
+        model: config.model.clone(),
+        clear_api_key: false,
+        context_window: config.context_window,
+        max_input_tokens: config.max_input_tokens,
+    })?;
+    view.image_input_supported = image_supported;
+    Ok(Some(view))
+}
+
+fn publish_image_support(
+    runtime: &AgentRuntime,
+    app: &AppHandle,
+    image_supported: Option<bool>,
+) {
+    let Some(supported) = image_supported else {
+        return;
+    };
+    let capability = if supported {
+        crate::agent::ImageInputSupport::Supported
+    } else {
+        crate::agent::ImageInputSupport::Unsupported
+    };
+    runtime.set_image_capability(app, capability, None);
+}
+
 #[tauri::command]
 pub async fn llm_get_config(app: AppHandle) -> Result<LlmConfigView, AgentError> {
     let runtime = runtime(&app)?;
@@ -93,23 +139,50 @@ pub async fn llm_set_config(
 }
 
 #[tauri::command]
+pub async fn llm_list_models(app: AppHandle) -> Result<LlmModelListResult, AgentError> {
+    let runtime = runtime(&app)?;
+    let config = runtime.store.get_llm_config()?;
+    Ok(LlmModelListResult {
+        models: list_models(&config).await?,
+    })
+}
+
+#[tauri::command]
 pub async fn llm_test_connection(app: AppHandle) -> Result<LlmTestResult, AgentError> {
     let runtime = runtime(&app)?;
     let config = runtime.store.get_llm_config()?;
-    let (ok, message, models, image_supported) = test_connection(&config).await?;
-    if let Some(supported) = image_supported {
-        let capability = if supported {
-            crate::agent::ImageInputSupport::Supported
-        } else {
-            crate::agent::ImageInputSupport::Unsupported
-        };
-        runtime.set_image_capability(&app, capability, None);
-    }
+    runtime.reset_image_capability(&app);
+    let (ok, message, image_supported) = test_connection(&config).await?;
+    publish_image_support(&runtime, &app, image_supported);
     Ok(LlmTestResult {
         ok,
         message,
-        models,
         image_supported,
+        config: None,
+    })
+}
+
+#[tauri::command]
+pub async fn llm_test_model(app: AppHandle, model: String) -> Result<LlmTestResult, AgentError> {
+    let model = model.trim();
+    if model.is_empty() {
+        return Err(AgentError::new("llm_model_required", "请先选择模型。"));
+    }
+
+    let runtime = runtime(&app)?;
+    let mut config = runtime.store.get_llm_config()?;
+    config.model = Some(model.to_string());
+    runtime.reset_image_capability(&app);
+    let (ok, message, image_supported) = test_connection(&config).await?;
+    let saved_config = persist_tested_model(&runtime.store, &config, ok, image_supported)?;
+
+    publish_image_support(&runtime, &app, image_supported);
+
+    Ok(LlmTestResult {
+        ok,
+        message,
+        image_supported,
+        config: saved_config,
     })
 }
 
@@ -634,15 +707,79 @@ mod tests {
         let result = LlmTestResult {
             ok: true,
             message: "连接成功".into(),
-            models: vec!["mock".into()],
             image_supported: Some(false),
+            config: None,
         };
         let value = serde_json::to_value(&result).unwrap();
         assert_eq!(value["ok"], true);
         assert_eq!(value["message"], "连接成功");
-        assert_eq!(value["models"], json!(["mock"]));
         assert_eq!(value["imageSupported"], false);
         assert!(value.get("image_supported").is_none());
+        assert!(value.get("config").is_none());
+    }
+
+    #[test]
+    fn llm_model_list_result_serializes_models() {
+        let result = LlmModelListResult {
+            models: vec!["mock".into()],
+        };
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(value["models"], json!(["mock"]));
+    }
+
+    #[test]
+    fn failed_candidate_test_does_not_replace_saved_model() {
+        let store = AgentStore::default();
+        store.open(":memory:".into()).unwrap();
+        store
+            .set_llm_config(LlmConfigInput {
+                base_url: Some("https://example.test/v1".into()),
+                api_key: None,
+                model: Some("saved-model".into()),
+                clear_api_key: false,
+                context_window: Some(128_000),
+                max_input_tokens: Some(100_000),
+            })
+            .unwrap();
+        let candidate = LlmConfigInternal {
+            base_url: Some("https://example.test/v1".into()),
+            api_key: None,
+            model: Some("candidate-model".into()),
+            context_window: Some(128_000),
+            max_input_tokens: Some(100_000),
+        };
+
+        let result = persist_tested_model(&store, &candidate, false, None).unwrap();
+
+        assert!(result.is_none());
+        assert_eq!(
+            store.get_llm_config_view().unwrap().model.as_deref(),
+            Some("saved-model")
+        );
+    }
+
+    #[test]
+    fn successful_candidate_test_persists_selected_model() {
+        let store = AgentStore::default();
+        store.open(":memory:".into()).unwrap();
+        let candidate = LlmConfigInternal {
+            base_url: Some("https://example.test/v1".into()),
+            api_key: None,
+            model: Some("candidate-model".into()),
+            context_window: None,
+            max_input_tokens: None,
+        };
+
+        let result = persist_tested_model(&store, &candidate, true, Some(true))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(result.model.as_deref(), Some("candidate-model"));
+        assert_eq!(result.image_input_supported, Some(true));
+        assert_eq!(
+            store.get_llm_config_view().unwrap().model.as_deref(),
+            Some("candidate-model")
+        );
     }
 
     #[test]

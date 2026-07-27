@@ -85,7 +85,7 @@ export interface PsdMaskInfo {
 export interface PsdLayerNode {
   id: string;
   name: string;
-  kind: "group" | "group_end" | "layer";
+  kind: "group" | "layer";
   visible: boolean;
   opacity: number;
   blendMode: string;
@@ -170,8 +170,12 @@ export interface LlmConfigInput {
 export interface LlmTestResult {
   ok: boolean;
   message: string;
-  models: string[];
   imageSupported?: boolean | null;
+  config?: LlmConfigView;
+}
+
+export interface LlmModelListResult {
+  models: string[];
 }
 
 export interface AgentTurnDelta {

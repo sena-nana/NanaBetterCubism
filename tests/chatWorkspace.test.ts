@@ -103,7 +103,9 @@ const bridge = vi.hoisted(() => ({
     createdAt: "2026-07-15T00:00:00Z",
   })),
   setConversationPinned: vi.fn(async () => true),
+  listLlmModels: vi.fn(),
   testLlmConnection: vi.fn(),
+  testLlmModel: vi.fn(),
 }));
 
 vi.mock("../src/features/agent/bridge", () => bridge);
@@ -117,7 +119,6 @@ const completeLlmConfig = {
 const successfulLlmCheck = {
   ok: true,
   message: "connected",
-  models: ["test-model"],
 };
 
 beforeEach(async () => {
@@ -274,7 +275,7 @@ describe("对话工作区", () => {
     await fireEvent.update(input, "保留这份草稿");
     expect(send).toBeEnabled();
 
-    bridge.testLlmConnection.mockResolvedValueOnce({ ok: false, message: "unavailable", models: [] });
+    bridge.testLlmConnection.mockResolvedValueOnce({ ok: false, message: "unavailable" });
     await llm.testConnection();
     await vi.waitFor(() => expect(send).toBeDisabled());
     expect(input).toHaveValue("保留这份草稿");

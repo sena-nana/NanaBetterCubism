@@ -1,6 +1,6 @@
 # Cubism Editor External API Capability Matrix
 
-Last checked: 2026-07-15
+Last checked: 2026-07-26
 
 Only the methods and fields below are implementation contracts. Sources are the
 [stable function list](https://docs.live2d.com/en/cubism-editor-manual/external-application-integration-api-list/),
@@ -105,7 +105,7 @@ expose mesh geometry, vertices, UVs, or topology. Glue creation is not exposed.
 
 | Method | Request fields after `ModelUID` | Response |
 | --- | --- | --- |
-| `GetDeformerStructure` | none | recursive `DeformerStructure{Name, Id, Type, Children}` |
+| `GetDeformerStructure` | none | recursive `DeformerStructure{Name, Id, Type, Children}`; the real Editor may wrap roots in `%Root{Name, Id, Children}` without `Type` |
 | `AddRotationDeformer` | `Name?`, `Id?`, `ParentId?`, `TargetObjectIds?`, `Mode?: AsParent|AsChild` | `Result` |
 | `AddWarpDeformer` | rotation-add fields plus `WarpDivH/V?: 2..100`, `BezierDivH/V?: 1..100`, `ConsiderChildKeyforms?`, `SnapCenter?` | `Result` |
 | `EditRotationDeformer` | `Id`, `Parameters?`, `isExactMatch?`, `NewId?`, `Name?`, `ParentId?`, `ParentDeformerId?`, angle/base-angle/scale/opacity/color/label fields | `Result` |
@@ -114,6 +114,12 @@ expose mesh geometry, vertices, UVs, or topology. Glue creation is not exposed.
 For add-deformer `Mode=AsChild`, the official manual requires exactly one
 target object. `SnapCenter=true` is valid only with
 `ConsiderChildKeyforms=true`.
+
+For `AddRotationDeformer` and `AddWarpDeformer`, omitting `ParentId` selects the
+root. `%Root` is a virtual `GetDeformerStructure` wrapper, not an object ID, and
+must not be sent as `ParentId`. A real-Editor response observed on 2026-07-26
+(API 1.1.0, Windows; Editor build not captured) returned this wrapper without
+the documented `Type`; its children retain the documented recursive shape.
 
 ## Enumerations and documented inconsistencies
 

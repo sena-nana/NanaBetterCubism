@@ -3,7 +3,7 @@ use crate::agent::AgentError;
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionResponse {
@@ -333,9 +333,7 @@ fn take_sse_line(buffer: &mut Vec<u8>) -> Result<Option<String>, AgentError> {
         .map_err(|_| AgentError::new("llm_stream_invalid", "模型流返回了无效 UTF-8。"))
 }
 
-pub async fn test_connection(
-    config: &LlmConfigInternal,
-) -> Result<(bool, String, Vec<String>, Option<bool>), AgentError> {
+fn resolve_credentials(config: &LlmConfigInternal) -> Result<(String, String), AgentError> {
     let base = config
         .base_url
         .as_ref()
@@ -346,67 +344,53 @@ pub async fn test_connection(
         .api_key
         .as_ref()
         .filter(|value| !value.is_empty())
+        .cloned()
         .ok_or_else(|| AgentError::new("llm_not_configured", "请先配置 API Key。"))?;
+    Ok((base, api_key))
+}
 
-    let (models_ok, models) = match reqwest::Client::new()
+pub async fn list_models(config: &LlmConfigInternal) -> Result<Vec<String>, AgentError> {
+    let (base, api_key) = resolve_credentials(config)?;
+    let response = reqwest::Client::new()
         .get(format!("{base}/models"))
         .bearer_auth(api_key)
         .send()
-        .await
-    {
-        Ok(response) if response.status().is_success() => {
-            let models = response
-                .json::<Value>()
-                .await
-                .ok()
-                .and_then(|value| {
-                    value.get("data")?.as_array().map(|items| {
-                        items
-                            .iter()
-                            .filter_map(|item| item.get("id")?.as_str().map(str::to_string))
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .unwrap_or_default();
-            (true, models)
-        }
-        _ => (false, Vec::new()),
-    };
-
-    if config
-        .model
-        .as_ref()
-        .is_some_and(|model| !model.trim().is_empty())
-    {
-        return match chat_completions(
-            config,
-            &[json!({"role": "user", "content": "ping"})],
-            &[],
-        )
-        .await
-        {
-            Ok(_) => {
-                let image_supported = probe_image_support(config).await;
-                Ok((true, "连接成功，对话测试通过。".into(), models, image_supported))
-            }
-            Err(error) => Ok((false, format!("对话失败：{}", error.message), models, None)),
-        };
+        .await?;
+    if !response.status().is_success() {
+        return Err(AgentError::new(
+            "llm_models_failed",
+            format!("API 连接失败（{}）。", response.status()),
+        ));
     }
 
-    if models_ok {
-        let detail = if models.is_empty() {
-            "端点未返回模型列表".into()
-        } else {
-            format!("发现 {} 个模型", models.len())
-        };
-        Ok((
-            true,
-            format!("已连接（{detail}）。未配置模型，已跳过对话测试。"),
-            models,
-            None,
-        ))
-    } else {
-        Ok((false, "连接失败：无法访问模型列表。".into(), models, None))
+    let value = response
+        .json::<Value>()
+        .await
+        .map_err(|_| AgentError::new("llm_models_invalid", "API 返回了无效的模型列表。"))?;
+    let items = value
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| AgentError::new("llm_models_invalid", "API 返回了无效的模型列表。"))?;
+    let mut seen = HashSet::new();
+    Ok(items
+        .iter()
+        .filter_map(|item| item.get("id").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .filter(|id| seen.insert((*id).to_string()))
+        .map(str::to_string)
+        .collect())
+}
+
+pub async fn test_connection(
+    config: &LlmConfigInternal,
+) -> Result<(bool, String, Option<bool>), AgentError> {
+    match chat_completions(config, &[json!({"role": "user", "content": "ping"})], &[]).await {
+        Ok(_) => {
+            let image_supported = probe_image_support(config).await;
+            Ok((true, "连接成功，对话测试通过。".into(), image_supported))
+        }
+        Err(error) => Ok((false, format!("对话失败：{}", error.message), None)),
     }
 }
 
@@ -556,12 +540,93 @@ data: [DONE]
     }
 
     #[tokio::test]
+    async fn list_models_sanitizes_ids_without_chat_request() {
+        let base_url = spawn_mock_http(vec![MockHttpResponse {
+            status: 200,
+            content_type: "application/json",
+            body: r#"{"data":[{"id":" mock-model "},{"id":""},{"id":"mock-mini"},{"id":"mock-model"},{"name":"ignored"}]}"#.into(),
+        }])
+        .await;
+        let config = LlmConfigInternal {
+            base_url: Some(base_url),
+            api_key: Some("test-key".into()),
+            model: None,
+            context_window: None,
+            max_input_tokens: None,
+        };
+
+        let models = list_models(&config).await.unwrap();
+
+        assert_eq!(
+            models,
+            vec!["mock-model".to_string(), "mock-mini".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn list_models_rejects_http_and_malformed_responses() {
+        for reply in [
+            MockHttpResponse {
+                status: 401,
+                content_type: "application/json",
+                body: r#"{"error":"secret provider detail"}"#.into(),
+            },
+            MockHttpResponse {
+                status: 200,
+                content_type: "application/json",
+                body: r#"{"models":[]}"#.into(),
+            },
+            MockHttpResponse {
+                status: 200,
+                content_type: "application/json",
+                body: "not-json".into(),
+            },
+        ] {
+            let base_url = spawn_mock_http(vec![reply]).await;
+            let config = LlmConfigInternal {
+                base_url: Some(base_url),
+                api_key: Some("test-key".into()),
+                model: None,
+                context_window: None,
+                max_input_tokens: None,
+            };
+
+            let error = list_models(&config).await.unwrap_err();
+
+            assert!(matches!(
+                error.code.as_str(),
+                "llm_models_failed" | "llm_models_invalid"
+            ));
+            assert!(!error.message.contains("secret provider detail"));
+        }
+    }
+
+    #[tokio::test]
+    async fn list_models_accepts_a_valid_empty_list() {
+        let base_url = spawn_mock_http(vec![MockHttpResponse {
+            status: 200,
+            content_type: "application/json",
+            body: r#"{"data":[]}"#.into(),
+        }])
+        .await;
+        let config = LlmConfigInternal {
+            base_url: Some(base_url),
+            api_key: Some("test-key".into()),
+            model: None,
+            context_window: None,
+            max_input_tokens: None,
+        };
+
+        assert!(list_models(&config).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn test_connection_runs_short_chat_when_model_configured() {
         let base_url = spawn_mock_http(vec![
             MockHttpResponse {
                 status: 200,
                 content_type: "application/json",
-                body: r#"{"data":[{"id":"mock-model"},{"id":"mock-mini"}]}"#.into(),
+                body: r#"{"choices":[{"message":{"role":"assistant","content":"pong"}}]}"#.into(),
             },
             MockHttpResponse {
                 status: 200,
@@ -578,27 +643,19 @@ data: [DONE]
             max_input_tokens: None,
         };
 
-        let (ok, message, models, image_supported) = test_connection(&config).await.unwrap();
+        let (ok, message, image_supported) = test_connection(&config).await.unwrap();
         assert!(ok);
         assert_eq!(message, "连接成功，对话测试通过。");
-        assert_eq!(models, vec!["mock-model".to_string(), "mock-mini".to_string()]);
-        let _ = image_supported;
+        assert_eq!(image_supported, Some(true));
     }
 
     #[tokio::test]
-    async fn test_connection_fails_when_chat_fails_even_if_models_ok() {
-        let base_url = spawn_mock_http(vec![
-            MockHttpResponse {
-                status: 200,
-                content_type: "application/json",
-                body: r#"{"data":[{"id":"mock-model"}]}"#.into(),
-            },
-            MockHttpResponse {
-                status: 500,
-                content_type: "application/json",
-                body: r#"{"error":"boom"}"#.into(),
-            },
-        ])
+    async fn test_connection_fails_when_chat_fails() {
+        let base_url = spawn_mock_http(vec![MockHttpResponse {
+            status: 500,
+            content_type: "application/json",
+            body: r#"{"error":"boom"}"#.into(),
+        }])
         .await;
         let config = LlmConfigInternal {
             base_url: Some(base_url),
@@ -608,11 +665,10 @@ data: [DONE]
             max_input_tokens: None,
         };
 
-        let (ok, message, models, image_supported) = test_connection(&config).await.unwrap();
+        let (ok, message, image_supported) = test_connection(&config).await.unwrap();
         assert!(!ok);
         assert!(message.starts_with("对话失败："));
-        assert_eq!(models, vec!["mock-model".to_string()]);
-        let _ = image_supported;
+        assert_eq!(image_supported, None);
     }
 
     #[tokio::test]
