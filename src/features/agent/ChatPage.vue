@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import UiImageViewer from "@lilia/image-viewer/components/ImageViewer";
+import UiImageViewer from "@lilia/ui/components/ImageViewer";
 import {
   answerQuestion,
   cancelTurn,
