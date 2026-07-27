@@ -1,7 +1,7 @@
 use crate::agent::computer_control::ComputerOperationStatus;
 use crate::agent::llm::{
     chat_completions_stream, content_to_text, image_file_to_data_url, ChatStreamDelta,
-    ToolCallPayload,
+    ToolCallPayload, ToolChoiceMode,
 };
 use crate::agent::plan::{PendingPlanApproval, PlanApprovalAction};
 use crate::agent::psd::PsdAttachmentManifest;
@@ -324,9 +324,14 @@ async fn run_turn_inner(
         let app_for_capability = app.clone();
         let mut ask_draft_streamed = false;
         let mut last_ask_draft = None;
+        let tool_choice = tool_choice_for_turn(state.mode, &pending_preview_ids);
         let assistant = {
-            match chat_completions_stream(&config, &state.messages, &tools, |delta| {
-                match delta {
+            match chat_completions_stream(
+                &config,
+                &state.messages,
+                &tools,
+                tool_choice,
+                |delta| match delta {
                     ChatStreamDelta::Text(text) => {
                         let _ = app.emit(
                             "agent://turn-delta",
@@ -349,8 +354,8 @@ async fn run_turn_inner(
                         last_ask_draft = Some(question);
                         ask_draft_streamed = true;
                     }
-                }
-            })
+                },
+            )
             .await
             {
                 Ok(message) => message,
@@ -810,6 +815,17 @@ fn requires_structured_preview_approval(
     mode == AgentTurnMode::Default && !pending_preview_ids.is_empty()
 }
 
+fn tool_choice_for_turn(
+    mode: AgentTurnMode,
+    pending_preview_ids: &BTreeSet<String>,
+) -> ToolChoiceMode {
+    if requires_structured_preview_approval(mode, pending_preview_ids) {
+        ToolChoiceMode::Required
+    } else {
+        ToolChoiceMode::Auto
+    }
+}
+
 fn structured_preview_approval_error(preview_count: usize) -> AgentError {
     AgentError::new(
         "approval_tool_required",
@@ -931,9 +947,12 @@ fn assistant_tool_call_message(
     assistant: &crate::agent::llm::ChatMessagePayload,
     tool_calls: &[ToolCallPayload],
 ) -> Value {
-    json!({
+    let mut message = json!({
         "role": "assistant",
-        "content": assistant.content.clone().unwrap_or(Value::Null),
+        "content": assistant
+            .content
+            .clone()
+            .unwrap_or_else(|| Value::String(String::new())),
         "tool_calls": tool_calls.iter().map(|call| json!({
             "id": call.id,
             "type": call.r#type.clone().unwrap_or_else(|| "function".into()),
@@ -942,7 +961,11 @@ fn assistant_tool_call_message(
                 "arguments": call.function.arguments,
             }
         })).collect::<Vec<_>>(),
-    })
+    });
+    if let Some(reasoning_content) = &assistant.reasoning_content {
+        message["reasoning_content"] = Value::String(reasoning_content.clone());
+    }
+    message
 }
 
 fn tool_batch_rejection_messages(
@@ -1082,22 +1105,34 @@ mod tests {
     }
 
     #[test]
-    fn preview_guard_tracks_successful_previews_until_execution() {
+    fn preview_guard_requires_tools_until_every_preview_is_handled() {
         let mut pending = BTreeSet::new();
         record_pending_preview(
             &mut pending,
             "preview_edit_art_mesh",
-            r#"{"previewId":"preview-artmesh","operation":"EditArtMesh"}"#,
+            r#"{"previewId":"preview-a","operation":"EditArtMesh"}"#,
         );
-        assert_eq!(pending, BTreeSet::from(["preview-artmesh".to_string()]));
-        assert!(requires_structured_preview_approval(
-            AgentTurnMode::Default,
-            &pending
-        ));
+        record_pending_preview(
+            &mut pending,
+            "preview_edit_part",
+            r#"{"previewId":"preview-b"}"#,
+        );
+        assert_eq!(
+            pending,
+            BTreeSet::from(["preview-a".to_string(), "preview-b".to_string()])
+        );
+        assert_eq!(
+            tool_choice_for_turn(AgentTurnMode::Default, &pending),
+            ToolChoiceMode::Required
+        );
         assert!(!requires_structured_preview_approval(
             AgentTurnMode::AutoApprove,
             &pending
         ));
+        assert_eq!(
+            tool_choice_for_turn(AgentTurnMode::AutoApprove, &pending),
+            ToolChoiceMode::Auto
+        );
         assert_eq!(
             structured_preview_approval_error(pending.len()).code,
             "approval_tool_required"
@@ -1106,13 +1141,24 @@ mod tests {
         consume_pending_preview(
             &mut pending,
             "execute_editor_edit",
-            r#"{"previewId":"preview-artmesh"}"#,
+            r#"{"previewId":"preview-a"}"#,
+        );
+        assert_eq!(pending, BTreeSet::from(["preview-b".to_string()]));
+        assert_eq!(
+            tool_choice_for_turn(AgentTurnMode::Default, &pending),
+            ToolChoiceMode::Required
+        );
+
+        consume_pending_preview(
+            &mut pending,
+            "execute_editor_edit",
+            r#"{"previewId":"preview-b"}"#,
         );
         assert!(pending.is_empty());
-        assert!(!requires_structured_preview_approval(
-            AgentTurnMode::Default,
-            &pending
-        ));
+        assert_eq!(
+            tool_choice_for_turn(AgentTurnMode::Default, &pending),
+            ToolChoiceMode::Auto
+        );
     }
 
     #[test]
@@ -1125,6 +1171,7 @@ mod tests {
         let assistant = crate::agent::llm::ChatMessagePayload {
             role: Some("assistant".into()),
             content: None,
+            reasoning_content: Some("internal reasoning".into()),
             tool_calls: Some(calls.clone()),
         };
         let messages = tool_batch_rejection_messages(
@@ -1134,6 +1181,8 @@ mod tests {
         );
 
         assert_eq!(messages.len(), calls.len() + 1);
+        assert_eq!(messages[0]["content"], "");
+        assert_eq!(messages[0]["reasoning_content"], "internal reasoning");
         let answered = messages
             .iter()
             .skip(1)

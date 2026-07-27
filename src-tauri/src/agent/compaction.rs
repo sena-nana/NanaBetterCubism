@@ -63,6 +63,9 @@ pub fn estimate_tokens(messages: &[Value], tools: &[Value]) -> usize {
 
 fn estimate_message_tokens(message: &Value) -> usize {
     let mut tokens = 0usize;
+    if let Some(reasoning_content) = message.get("reasoning_content").and_then(Value::as_str) {
+        tokens += text_tokens(reasoning_content);
+    }
     match message.get("content") {
         Some(Value::String(text)) => tokens += text_tokens(text),
         Some(Value::Array(parts)) => {
@@ -684,6 +687,14 @@ mod tests {
         let ascii_tokens = estimate_tokens(&ascii, &[]);
         let cjk_tokens = estimate_tokens(&cjk, &[]);
         assert!((ascii_tokens as i64 - cjk_tokens as i64).abs() < 40);
+
+        let with_reasoning = vec![json!({
+            "role":"assistant",
+            "content":null,
+            "reasoning_content":"r".repeat(3000),
+            "tool_calls":[]
+        })];
+        assert!(estimate_tokens(&with_reasoning, &[]) > estimate_tokens(&small, &[]));
     }
 
     #[test]
