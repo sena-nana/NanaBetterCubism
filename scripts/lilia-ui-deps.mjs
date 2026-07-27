@@ -12,6 +12,7 @@ const localRoot = resolve(repoRoot, process.env.LILIA_UI_LOCAL_PATH || "../Lilia
 const packages = [
   ["@lilia/build", "packages/build"],
   ["@lilia/config", "packages/config"],
+  ["@lilia/theme", "packages/theme"],
   ["@lilia/tools", "packages/tools"],
   ["@lilia/ui-contract", "packages/ui-contract"],
   ["@lilia/ui-foundation", "packages/ui-foundation"],

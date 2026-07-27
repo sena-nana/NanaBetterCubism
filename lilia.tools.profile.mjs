@@ -5,6 +5,7 @@ export default defineToolsProfile({
   expectedDependencies: [
     "@lilia/build",
     "@lilia/config",
+    "@lilia/theme",
     "@lilia/tools",
     "@lilia/ui-contract",
     "@lilia/ui-foundation",

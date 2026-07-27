@@ -25,8 +25,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-tauri = { version = "2", features = ["protocol-asset", "image-png"] }
-tauri-plugin-lilia = { git = "https://github.com/sena-nana/LiliaUI", rev = "addf2eb878deae09c844f0fd473906dde5052060" }
+tauri = { version = "2", features = ["protocol-asset", "image-png", "macos-private-api"] }
+tauri-plugin-lilia = { git = "https://github.com/sena-nana/LiliaUI", rev = "fefcd3bc4a4a454276f2162bc21ab4faef14fd3f" }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2.5.4"
 tauri-plugin-store = "2"
