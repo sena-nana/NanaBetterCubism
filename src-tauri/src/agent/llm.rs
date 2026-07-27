@@ -1,7 +1,7 @@
 use crate::agent::store::LlmConfigInternal;
 use crate::agent::AgentError;
 use futures_util::StreamExt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
 
@@ -20,6 +20,7 @@ pub struct ChatMessagePayload {
     #[allow(dead_code)]
     pub role: Option<String>,
     pub content: Option<Value>,
+    pub reasoning_content: Option<String>,
     pub tool_calls: Option<Vec<ToolCallPayload>>,
 }
 
@@ -43,6 +44,13 @@ pub enum ChatStreamDelta {
         name: String,
         arguments: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolChoiceMode {
+    Auto,
+    Required,
 }
 
 #[derive(Debug, Default)]
@@ -77,19 +85,43 @@ fn resolve_endpoint(
     Ok((base, api_key, model))
 }
 
-fn request_body(model: &str, messages: &[Value], tools: &[Value], stream: bool) -> Value {
+fn request_body(
+    model: &str,
+    messages: &[Value],
+    tools: &[Value],
+    tool_choice: ToolChoiceMode,
+    disable_thinking: bool,
+    stream: bool,
+) -> Value {
     if tools.is_empty() {
         json!({ "model": model, "messages": messages, "stream": stream })
     } else {
-        json!({
+        let mut body = json!({
             "model": model,
             "messages": messages,
             "tools": tools,
-            "tool_choice": "auto",
+            "tool_choice": tool_choice,
             "parallel_tool_calls": false,
             "stream": stream,
-        })
+        });
+        if disable_thinking {
+            body["thinking"] = json!({ "type": "disabled" });
+        }
+        body
     }
+}
+
+fn requires_non_thinking_tool_choice(
+    base_url: &str,
+    model: &str,
+    tool_choice: ToolChoiceMode,
+) -> bool {
+    tool_choice == ToolChoiceMode::Required
+        && matches!(model, "deepseek-v4-pro" | "deepseek-v4-flash")
+        && reqwest::Url::parse(base_url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .is_some_and(|host| host.eq_ignore_ascii_case("api.deepseek.com"))
 }
 
 fn first_message(parsed: ChatCompletionResponse) -> Result<ChatMessagePayload, AgentError> {
@@ -148,7 +180,14 @@ pub async fn chat_completions(
     let response = client
         .post(format!("{base}/chat/completions"))
         .bearer_auth(api_key)
-        .json(&request_body(&model, messages, tools, false))
+        .json(&request_body(
+            &model,
+            messages,
+            tools,
+            ToolChoiceMode::Auto,
+            false,
+            false,
+        ))
         .send()
         .await?;
     if !response.status().is_success() {
@@ -163,17 +202,26 @@ pub async fn chat_completions_stream<F>(
     config: &LlmConfigInternal,
     messages: &[Value],
     tools: &[Value],
+    tool_choice: ToolChoiceMode,
     mut on_delta: F,
 ) -> Result<ChatMessagePayload, AgentError>
 where
     F: FnMut(ChatStreamDelta),
 {
     let (base, api_key, model) = resolve_endpoint(config)?;
+    let disable_thinking = requires_non_thinking_tool_choice(&base, &model, tool_choice);
     let client = reqwest::Client::new();
     let response = client
         .post(format!("{base}/chat/completions"))
         .bearer_auth(&api_key)
-        .json(&request_body(&model, messages, tools, true))
+        .json(&request_body(
+            &model,
+            messages,
+            tools,
+            tool_choice,
+            disable_thinking,
+            true,
+        ))
         .send()
         .await?;
 
@@ -202,6 +250,7 @@ where
     let mut stream = response.bytes_stream();
     let mut buffer = Vec::new();
     let mut content = String::new();
+    let mut reasoning_content = String::new();
     let mut tool_calls: BTreeMap<u64, StreamingToolCall> = BTreeMap::new();
     let mut finished = false;
 
@@ -242,6 +291,12 @@ where
                     content.push_str(piece);
                     on_delta(ChatStreamDelta::Text(piece.to_string()));
                 }
+            }
+            if let Some(piece) = delta
+                .get("reasoning_content")
+                .and_then(|value| value.as_str())
+            {
+                reasoning_content.push_str(piece);
             }
             if let Some(calls) = delta.get("tool_calls").and_then(|value| value.as_array()) {
                 for call in calls {
@@ -314,6 +369,11 @@ where
             None
         } else {
             Some(Value::String(content))
+        },
+        reasoning_content: if reasoning_content.is_empty() {
+            None
+        } else {
+            Some(reasoning_content)
         },
         tool_calls,
     })
@@ -466,16 +526,74 @@ mod tests {
     use tokio::sync::Mutex;
 
     #[test]
-    fn tool_requests_explicitly_disable_parallel_calls() {
-        let body = request_body(
+    fn tool_requests_apply_choice_and_explicitly_disable_parallel_calls() {
+        let auto = request_body(
             "model",
             &[json!({"role": "user", "content": "hello"})],
             &[json!({"type": "function", "function": {"name": "tool"}})],
+            ToolChoiceMode::Auto,
+            false,
+            true,
+        );
+        let required = request_body(
+            "model",
+            &[json!({"role": "user", "content": "hello"})],
+            &[json!({"type": "function", "function": {"name": "tool"}})],
+            ToolChoiceMode::Required,
+            false,
             true,
         );
 
-        assert_eq!(body["parallel_tool_calls"], Value::Bool(false));
-        assert_eq!(body["tool_choice"], Value::String("auto".into()));
+        assert_eq!(auto["parallel_tool_calls"], Value::Bool(false));
+        assert_eq!(auto["tool_choice"], Value::String("auto".into()));
+        assert_eq!(required["parallel_tool_calls"], Value::Bool(false));
+        assert_eq!(required["tool_choice"], Value::String("required".into()));
+        assert!(required.get("thinking").is_none());
+    }
+
+    #[test]
+    fn official_deepseek_v4_disables_thinking_for_required_tool_choice() {
+        assert!(requires_non_thinking_tool_choice(
+            "https://api.deepseek.com/v1",
+            "deepseek-v4-pro",
+            ToolChoiceMode::Required,
+        ));
+        assert!(requires_non_thinking_tool_choice(
+            "https://api.deepseek.com",
+            "deepseek-v4-flash",
+            ToolChoiceMode::Required,
+        ));
+        for (base_url, model, choice) in [
+            (
+                "https://api.deepseek.com/v1",
+                "deepseek-v4-pro",
+                ToolChoiceMode::Auto,
+            ),
+            (
+                "https://example.com/v1",
+                "deepseek-v4-pro",
+                ToolChoiceMode::Required,
+            ),
+            (
+                "https://api.deepseek.com/v1",
+                "other-model",
+                ToolChoiceMode::Required,
+            ),
+        ] {
+            assert!(!requires_non_thinking_tool_choice(
+                base_url, model, choice
+            ));
+        }
+
+        let body = request_body(
+            "deepseek-v4-pro",
+            &[json!({"role":"user","content":"approve"})],
+            &[json!({"type":"function","function":{"name":"ask_user"}})],
+            ToolChoiceMode::Required,
+            true,
+            true,
+        );
+        assert_eq!(body["thinking"]["type"], "disabled");
     }
 
     #[derive(Clone)]
@@ -671,6 +789,32 @@ data: [DONE]
         assert_eq!(image_supported, None);
     }
 
+    #[test]
+    fn non_streaming_tool_call_preserves_reasoning_content() {
+        let parsed = serde_json::from_value(json!({
+            "choices":[{
+                "message":{
+                    "role":"assistant",
+                    "content":null,
+                    "reasoning_content":"先核对预览，再请求批准。",
+                    "tool_calls":[{
+                        "id":"ask-1",
+                        "type":"function",
+                        "function":{"name":"ask_user","arguments":"{\"question\":\"继续？\"}"}
+                    }]
+                }
+            }]
+        }))
+        .unwrap();
+        let message = first_message(parsed).unwrap();
+
+        assert_eq!(
+            message.reasoning_content.as_deref(),
+            Some("先核对预览，再请求批准。")
+        );
+        assert_eq!(message.tool_calls.unwrap()[0].function.name, "ask_user");
+    }
+
     #[tokio::test]
     async fn streaming_react_loop_parses_tool_then_final() {
         let tool_sse = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_editor_snapshot","arguments":"{}"}}]}}]}
@@ -696,11 +840,13 @@ data: [DONE]
             &config,
             &[json!({"role":"user","content":"看一下编辑器"})],
             &[json!({"type":"function","function":{"name":"get_editor_snapshot"}})],
+            ToolChoiceMode::Auto,
             |_| {},
         )
         .await
         .unwrap();
         assert!(first.tool_calls.as_ref().unwrap()[0].function.name == "get_editor_snapshot");
+        assert!(first.reasoning_content.is_none());
 
         let mut deltas = String::new();
         let second = chat_completions_stream(
@@ -711,6 +857,7 @@ data: [DONE]
                 json!({"role":"tool","tool_call_id":"call_1","content":"{}"}),
             ],
             &[],
+            ToolChoiceMode::Auto,
             |delta| {
                 if let ChatStreamDelta::Text(piece) = delta {
                     deltas.push_str(&piece);
@@ -721,11 +868,14 @@ data: [DONE]
         .unwrap();
         assert_eq!(content_to_text(&second.content), "截屏完成");
         assert_eq!(deltas, "截屏完成");
+        assert!(second.reasoning_content.is_none());
     }
 
     #[tokio::test]
     async fn streaming_tool_calls_report_accumulated_ask_arguments() {
         let chunks = [
+            json!({"choices":[{"delta":{"reasoning_content":"需要先"}}]}),
+            json!({"choices":[{"delta":{"reasoning_content":"获得批准。"}}]}),
             json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"ask-1","type":"function","function":{"name":"ask_user","arguments":"{\"question\":\"## 计划\\n"}}]}}]}),
             json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"- 核对参数\\n- 执行调整\""}}]}}]}),
             json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":",\"options\":[\"继续\"]}"}}]}}]}),
@@ -749,6 +899,7 @@ data: [DONE]
             &config,
             &[json!({"role":"user","content":"调整参数"})],
             &[json!({"type":"function","function":{"name":"ask_user"}})],
+            ToolChoiceMode::Required,
             |delta| {
                 if let ChatStreamDelta::ToolCall {
                     name, arguments, ..
@@ -765,6 +916,10 @@ data: [DONE]
         assert_eq!(snapshots[0].0, "ask_user");
         assert!(snapshots[0].1.ends_with("## 计划\\n"));
         assert!(snapshots[1].1.contains("执行调整"));
+        assert_eq!(
+            message.reasoning_content.as_deref(),
+            Some("需要先获得批准。")
+        );
         let call = &message.tool_calls.unwrap()[0];
         assert_eq!(call.function.name, "ask_user");
         assert_eq!(
