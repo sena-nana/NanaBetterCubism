@@ -282,6 +282,9 @@ async fn run_turn_inner(
             AgentTurnMode::AutoApprove => AUTO_APPROVE_PROMPT,
             AgentTurnMode::Default => COLLABORATION_PROMPT,
         };
+        if let Some(prompt) = skills::default_skill_prompt(mode)? {
+            seeded.push(json!({ "role": "system", "content": prompt }));
+        }
         seeded.push(json!({ "role": "system", "content": mode_prompt }));
         if let Some(prompt) = additional_prompt {
             seeded.push(json!({
@@ -302,6 +305,8 @@ async fn run_turn_inner(
     };
     refresh_conversation_psd_context(runtime, conversation_id, &mut state.messages)?;
     let mut tool_sequence_corrections = 0_u8;
+    let mut structured_approval_corrections = 0_u8;
+    let mut pending_preview_ids = BTreeSet::new();
 
     loop {
         if cancel.load(Ordering::SeqCst) {
@@ -376,6 +381,22 @@ async fn run_turn_inner(
             ask_draft_streamed = false;
         }
         if tool_calls.is_empty() {
+            if requires_structured_preview_approval(state.mode, &pending_preview_ids) {
+                let error = structured_preview_approval_error(pending_preview_ids.len());
+                if structured_approval_corrections >= 1 {
+                    return Err(error);
+                }
+                state.messages.push(json!({
+                    "role": "assistant",
+                    "content": assistant.content.clone().unwrap_or(Value::Null),
+                }));
+                state.messages.push(json!({
+                    "role": "system",
+                    "content": error.message,
+                }));
+                structured_approval_corrections += 1;
+                continue;
+            }
             let text = content_to_text(&assistant.content);
             if !text.is_empty() {
                 let _ = runtime
@@ -518,6 +539,11 @@ async fn run_turn_inner(
             if cancel.load(Ordering::SeqCst) {
                 return Err(AgentError::new("cancelled", "已取消。"));
             }
+            consume_pending_preview(
+                &mut pending_preview_ids,
+                &call.function.name,
+                &call.function.arguments,
+            );
             let outcome = execute_tool(
                 ToolExecutionContext {
                     app,
@@ -612,6 +638,7 @@ async fn run_turn_inner(
                     content,
                     image_path,
                 } => {
+                    record_pending_preview(&mut pending_preview_ids, &call.function.name, &content);
                     state.messages.push(json!({
                         "role": "tool",
                         "tool_call_id": call.id,
@@ -774,6 +801,56 @@ fn tool_error_content(error: &AgentError) -> String {
         }
     })
     .to_string()
+}
+
+fn requires_structured_preview_approval(
+    mode: AgentTurnMode,
+    pending_preview_ids: &BTreeSet<String>,
+) -> bool {
+    mode == AgentTurnMode::Default && !pending_preview_ids.is_empty()
+}
+
+fn structured_preview_approval_error(preview_count: usize) -> AgentError {
+    AgentError::new(
+        "approval_tool_required",
+        format!(
+            "本回合已有 {preview_count} 个有效编辑预览尚未处理。需要用户批准时必须调用 ask_user；如果当前用户消息已经明确授权这些操作，则使用对应 previewId 执行，不能用普通文本询问后结束回合。"
+        ),
+    )
+}
+
+fn record_pending_preview(
+    pending_preview_ids: &mut BTreeSet<String>,
+    tool_name: &str,
+    content: &str,
+) {
+    if !tool_name.starts_with("preview_") {
+        return;
+    }
+    if let Some(preview_id) = preview_id(content) {
+        pending_preview_ids.insert(preview_id);
+    }
+}
+
+fn consume_pending_preview(
+    pending_preview_ids: &mut BTreeSet<String>,
+    tool_name: &str,
+    arguments: &str,
+) {
+    if !matches!(tool_name, "execute_editor_edit" | "execute_parameter_batch") {
+        return;
+    }
+    if let Some(preview_id) = preview_id(arguments) {
+        pending_preview_ids.remove(&preview_id);
+    }
+}
+
+fn preview_id(json: &str) -> Option<String> {
+    serde_json::from_str::<Value>(json)
+        .ok()?
+        .get("previewId")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// 将消息序列中的 `image_url` 多模态片段替换为文本占位，纯图消息退化为文本。
@@ -1002,6 +1079,40 @@ mod tests {
         )
         .unwrap()
         .requires_sequence_retry);
+    }
+
+    #[test]
+    fn preview_guard_tracks_successful_previews_until_execution() {
+        let mut pending = BTreeSet::new();
+        record_pending_preview(
+            &mut pending,
+            "preview_edit_art_mesh",
+            r#"{"previewId":"preview-artmesh","operation":"EditArtMesh"}"#,
+        );
+        assert_eq!(pending, BTreeSet::from(["preview-artmesh".to_string()]));
+        assert!(requires_structured_preview_approval(
+            AgentTurnMode::Default,
+            &pending
+        ));
+        assert!(!requires_structured_preview_approval(
+            AgentTurnMode::AutoApprove,
+            &pending
+        ));
+        assert_eq!(
+            structured_preview_approval_error(pending.len()).code,
+            "approval_tool_required"
+        );
+
+        consume_pending_preview(
+            &mut pending,
+            "execute_editor_edit",
+            r#"{"previewId":"preview-artmesh"}"#,
+        );
+        assert!(pending.is_empty());
+        assert!(!requires_structured_preview_approval(
+            AgentTurnMode::Default,
+            &pending
+        ));
     }
 
     #[test]

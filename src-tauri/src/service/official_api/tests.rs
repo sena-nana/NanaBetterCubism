@@ -303,6 +303,31 @@ fn batch_arguments_reject_legacy_empty_and_oversized_inputs() {
 }
 
 #[test]
+fn art_mesh_color_blend_accepts_a_fifteen_item_batch() {
+    let operations = (1..=15)
+        .map(|index| json!({"id": format!("ArtMesh{index}"), "colorBlend": "Multiply"}))
+        .collect::<Vec<_>>();
+    let normalized = schema::normalize_operations(
+        spec("preview_edit_art_mesh").unwrap(),
+        json!({"operations": operations}),
+        "private-model",
+    )
+    .unwrap();
+
+    assert_eq!(normalized.len(), 15);
+    for (index, (_, data)) in normalized.iter().enumerate() {
+        assert_eq!(
+            data,
+            &json!({
+                "ModelUID": "private-model",
+                "Id": format!("ArtMesh{}", index + 1),
+                "ColorBlend": "Multiply",
+            })
+        );
+    }
+}
+
+#[test]
 fn object_creation_arguments_require_stable_ids() {
     for name in [
         "preview_add_part",

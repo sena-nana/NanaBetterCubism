@@ -1,9 +1,10 @@
-use crate::agent::AgentError;
+use crate::agent::{AgentError, AgentTurnMode};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::sync::LazyLock;
 
 pub const READ_SKILL_TOOL_NAME: &str = "read_skill";
+pub const DEFAULT_OBJECT_EDITING_SKILL_NAME: &str = "object-editing";
 
 const CORE_DOMAIN_TOOLS: &[&str] = &[
     "get_editor_snapshot",
@@ -229,6 +230,29 @@ pub fn catalog_prompt() -> Result<String, AgentError> {
     ))
 }
 
+pub fn default_active_skills(mode: AgentTurnMode) -> BTreeSet<String> {
+    if object_editing_enabled_by_default(mode) {
+        BTreeSet::from([DEFAULT_OBJECT_EDITING_SKILL_NAME.to_string()])
+    } else {
+        BTreeSet::new()
+    }
+}
+
+pub fn default_skill_prompt(mode: AgentTurnMode) -> Result<Option<String>, AgentError> {
+    if !object_editing_enabled_by_default(mode) {
+        return Ok(None);
+    }
+    let skill = get(DEFAULT_OBJECT_EDITING_SKILL_NAME)?;
+    Ok(Some(format!(
+        "## 默认已激活 SKILL：{}\n\n{}",
+        skill.name, skill.instructions
+    )))
+}
+
+fn object_editing_enabled_by_default(mode: AgentTurnMode) -> bool {
+    matches!(mode, AgentTurnMode::Default | AgentTurnMode::AutoApprove)
+}
+
 pub fn read_skill_tool_definition() -> Result<Value, AgentError> {
     let names = all()?
         .iter()
@@ -318,5 +342,21 @@ mod tests {
             parse_read_arguments(r#"{"name":"editor-context","extra":true}"#),
             Err(error) if error.code == "invalid_arguments"
         ));
+    }
+
+    #[test]
+    fn object_editing_is_default_only_for_writable_turn_modes() {
+        for mode in [AgentTurnMode::Default, AgentTurnMode::AutoApprove] {
+            assert_eq!(
+                default_active_skills(mode),
+                BTreeSet::from([DEFAULT_OBJECT_EDITING_SKILL_NAME.to_string()])
+            );
+            let prompt = default_skill_prompt(mode).unwrap().unwrap();
+            assert!(prompt.contains(&get(DEFAULT_OBJECT_EDITING_SKILL_NAME).unwrap().instructions));
+        }
+        for mode in [AgentTurnMode::ConversationOnly, AgentTurnMode::Plan] {
+            assert!(default_active_skills(mode).is_empty());
+            assert_eq!(default_skill_prompt(mode).unwrap(), None);
+        }
     }
 }

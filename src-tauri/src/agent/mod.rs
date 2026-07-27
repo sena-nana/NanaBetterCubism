@@ -138,7 +138,7 @@ impl AgentTurnState {
         Self {
             mode,
             messages,
-            active_skills: BTreeSet::new(),
+            active_skills: skills::default_active_skills(mode),
             computer_permission_denied: false,
         }
     }
@@ -527,7 +527,11 @@ mod tests {
                 "content": "确认",
             })
         );
-        assert!(AgentTurnState::new(Vec::new(), AgentTurnMode::Default)
+        assert_eq!(
+            AgentTurnState::new(Vec::new(), AgentTurnMode::Default).active_skills,
+            BTreeSet::from([skills::DEFAULT_OBJECT_EDITING_SKILL_NAME.to_string()])
+        );
+        assert!(AgentTurnState::new(Vec::new(), AgentTurnMode::Plan)
             .active_skills
             .is_empty());
     }
@@ -600,12 +604,7 @@ mod tests {
                 conversation_id: conversation.id.clone(),
                 tool_call_id: "tool-call".into(),
                 action: PendingUserAction::from(question.clone()),
-                state: AgentTurnState {
-                    mode: AgentTurnMode::Default,
-                    messages: Vec::new(),
-                    active_skills: BTreeSet::new(),
-                    computer_permission_denied: false,
-                },
+                state: AgentTurnState::new(Vec::new(), AgentTurnMode::Default),
             },
         );
 
