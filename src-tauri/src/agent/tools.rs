@@ -1474,19 +1474,23 @@ mod tests {
     }
 
     #[test]
-    fn initial_tool_set_only_contains_core_tools() {
-        let definitions = tool_definitions(&BTreeSet::new(), AgentTurnMode::Default, true).unwrap();
-        assert_eq!(
-            names(&definitions),
-            BTreeSet::from([
-                "read_skill",
-                "get_editor_snapshot",
-                "connect_editor",
-                "disconnect_editor",
-                "ask_user",
-                "update_plan",
-            ])
-        );
+    fn writable_turns_open_the_complete_object_editing_tool_set_by_default() {
+        let explicit = BTreeSet::from([skills::DEFAULT_OBJECT_EDITING_SKILL_NAME.to_string()]);
+        let explicit_definitions =
+            tool_definitions(&explicit, AgentTurnMode::Default, true).unwrap();
+        let expected = names(&explicit_definitions);
+        for mode in [AgentTurnMode::Default, AgentTurnMode::AutoApprove] {
+            let active = skills::default_active_skills(mode);
+            let definitions = tool_definitions(&active, mode, true).unwrap();
+            let advertised = names(&definitions);
+            assert_eq!(advertised, expected);
+            assert!(advertised.contains("preview_edit_art_mesh"));
+            assert!(advertised.contains("execute_editor_edit"));
+            assert!(advertised.contains("get_editor_edit_result"));
+            assert!(advertised.contains("cancel_editor_edit"));
+            assert!(!advertised.contains("preview_add_parameter"));
+            assert!(!advertised.contains("set_artmesh_color_blend"));
+        }
     }
 
     #[test]
@@ -1758,6 +1762,14 @@ mod tests {
             !names(&tool_definitions(&active, AgentTurnMode::ConversationOnly, true).unwrap())
                 .contains("submit_plan")
         );
+        for mode in [AgentTurnMode::ConversationOnly, AgentTurnMode::Plan] {
+            let defaults = skills::default_active_skills(mode);
+            let definitions = tool_definitions(&defaults, mode, true).unwrap();
+            let advertised = names(&definitions);
+            assert!(!advertised.contains("preview_edit_art_mesh"));
+            assert!(!advertised.contains("execute_editor_edit"));
+            assert!(!advertised.contains("cancel_editor_edit"));
+        }
     }
 
     #[test]
