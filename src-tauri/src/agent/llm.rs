@@ -40,10 +40,7 @@ pub struct ToolFunctionPayload {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatStreamDelta {
     Text(String),
-    ToolCall {
-        name: String,
-        arguments: String,
-    },
+    ToolCall { name: String, arguments: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -61,9 +58,7 @@ struct StreamingToolCall {
     arguments: String,
 }
 
-fn resolve_endpoint(
-    config: &LlmConfigInternal,
-) -> Result<(String, String, String), AgentError> {
+fn resolve_endpoint(config: &LlmConfigInternal) -> Result<(String, String, String), AgentError> {
     let base = config
         .base_url
         .as_ref()
@@ -495,10 +490,7 @@ pub fn content_to_text(content: &Option<Value>) -> String {
 
 pub fn image_file_to_data_url(path: &str) -> Result<String, AgentError> {
     let bytes = std::fs::read(path).map_err(|error| {
-        AgentError::new(
-            "capture_read_failed",
-            format!("无法读取截屏文件：{error}"),
-        )
+        AgentError::new("capture_read_failed", format!("无法读取截屏文件：{error}"))
     })?;
     let lower = path.to_ascii_lowercase();
     let mime = if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
@@ -580,9 +572,7 @@ mod tests {
                 ToolChoiceMode::Required,
             ),
         ] {
-            assert!(!requires_non_thinking_tool_choice(
-                base_url, model, choice
-            ));
+            assert!(!requires_non_thinking_tool_choice(base_url, model, choice));
         }
 
         let body = request_body(
@@ -617,15 +607,17 @@ mod tests {
                 let _ = socket.read(&mut buf).await;
                 let reply = {
                     let list = bodies.lock().await;
-                    list.get(index).cloned().unwrap_or_else(|| MockHttpResponse {
-                        status: 200,
-                        content_type: "text/event-stream",
-                        body: r#"data: {"choices":[{"delta":{"content":"done"}}]}
+                    list.get(index)
+                        .cloned()
+                        .unwrap_or_else(|| MockHttpResponse {
+                            status: 200,
+                            content_type: "text/event-stream",
+                            body: r#"data: {"choices":[{"delta":{"content":"done"}}]}
 
 data: [DONE]
 "#
-                        .into(),
-                    })
+                            .into(),
+                        })
                 };
                 index += 1;
                 let reason = if reply.status == 200 { "OK" } else { "Error" };

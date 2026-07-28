@@ -25,6 +25,8 @@ use tauri::{AppHandle, Emitter, Manager};
 
 const PSD_CONTEXT_PREFIX: &str = "Current conversation PSD attachments. This is a compact, authoritative snapshot, not a full layer tree. Use the document id with PSD inspection tools. After loading psd-inspection, refresh with list_attached_psds before claiming that no PSD is attached or after user interaction. This local context does not imply Cubism Editor PSD operations. JSON:\n";
 const ASK_USER_TOOL_NAME: &str = "ask_user";
+const PREVIEW_UNRESOLVED_HINT: &str =
+    "系统通知：仍有未处理的编辑预览。请重试执行、查询终态、取消，或重新预览；在 committed/cancelled 前禁止用普通文本结束。";
 
 pub async fn run_turn(
     app: AppHandle,
@@ -305,8 +307,7 @@ async fn run_turn_inner(
     };
     refresh_conversation_psd_context(runtime, conversation_id, &mut state.messages)?;
     let mut tool_sequence_corrections = 0_u8;
-    let mut structured_approval_corrections = 0_u8;
-    let mut pending_preview_ids = BTreeSet::new();
+    let mut preview_obligation_corrections = 0_u8;
 
     loop {
         if cancel.load(Ordering::SeqCst) {
@@ -316,6 +317,7 @@ async fn run_turn_inner(
         let image_supported = runtime.image_capability() != ImageInputSupport::Unsupported;
         let tools = tool_definitions(&state.active_skills, state.mode, image_supported)?;
         let advertised = advertised_tool_names(&tools);
+        let tool_choice = tool_choice_for_turn(state.mode, &state);
 
         if let Some(budget) = crate::agent::compaction::resolve_budget(&config) {
             crate::agent::compaction::compact(&config, &mut state.messages, &tools, budget).await?;
@@ -324,14 +326,9 @@ async fn run_turn_inner(
         let app_for_capability = app.clone();
         let mut ask_draft_streamed = false;
         let mut last_ask_draft = None;
-        let tool_choice = tool_choice_for_turn(state.mode, &pending_preview_ids);
         let assistant = {
-            match chat_completions_stream(
-                &config,
-                &state.messages,
-                &tools,
-                tool_choice,
-                |delta| match delta {
+            match chat_completions_stream(&config, &state.messages, &tools, tool_choice, |delta| {
+                match delta {
                     ChatStreamDelta::Text(text) => {
                         let _ = app.emit(
                             "agent://turn-delta",
@@ -354,8 +351,8 @@ async fn run_turn_inner(
                         last_ask_draft = Some(question);
                         ask_draft_streamed = true;
                     }
-                },
-            )
+                }
+            })
             .await
             {
                 Ok(message) => message,
@@ -386,9 +383,18 @@ async fn run_turn_inner(
             ask_draft_streamed = false;
         }
         if tool_calls.is_empty() {
-            if requires_structured_preview_approval(state.mode, &pending_preview_ids) {
-                let error = structured_preview_approval_error(pending_preview_ids.len());
-                if structured_approval_corrections >= 1 {
+            if state.mode == AgentTurnMode::Plan {
+                return Err(AgentError::new(
+                    "plan_not_submitted",
+                    "规划回合必须通过 submit_plan 提交完整计划。",
+                ));
+            }
+            if state.has_pending_preview_obligation() {
+                let error = AgentError::new(
+                    "preview_unresolved",
+                    "仍有未提交或未取消的编辑预览，不能以普通文本结束本回合。",
+                );
+                if state.mode != AgentTurnMode::Default || preview_obligation_corrections >= 1 {
                     return Err(error);
                 }
                 state.messages.push(json!({
@@ -397,22 +403,17 @@ async fn run_turn_inner(
                 }));
                 state.messages.push(json!({
                     "role": "system",
-                    "content": error.message,
+                    "content": PREVIEW_UNRESOLVED_HINT,
                 }));
-                structured_approval_corrections += 1;
+                preview_obligation_corrections += 1;
                 continue;
             }
             let text = content_to_text(&assistant.content);
             if !text.is_empty() {
-                let _ = runtime
-                    .store
-                    .append_message(conversation_id, "assistant", &text, None, None);
-            }
-            if state.mode == AgentTurnMode::Plan {
-                return Err(AgentError::new(
-                    "plan_not_submitted",
-                    "规划回合必须通过 submit_plan 提交完整计划。",
-                ));
+                let _ =
+                    runtime
+                        .store
+                        .append_message(conversation_id, "assistant", &text, None, None);
             }
             if runtime.computer_control.has_active_grant(conversation_id) {
                 runtime
@@ -544,11 +545,6 @@ async fn run_turn_inner(
             if cancel.load(Ordering::SeqCst) {
                 return Err(AgentError::new("cancelled", "已取消。"));
             }
-            consume_pending_preview(
-                &mut pending_preview_ids,
-                &call.function.name,
-                &call.function.arguments,
-            );
             let outcome = execute_tool(
                 ToolExecutionContext {
                     app,
@@ -564,8 +560,19 @@ async fn run_turn_inner(
                 &call.function.arguments,
             )
             .await;
-            let outcome = match outcome {
-                Ok(outcome) => outcome,
+            let (outcome, preview_hint) = match outcome {
+                Ok(outcome) => {
+                    let hint = resolve_preview_obligation(
+                        &mut state,
+                        &call.function.name,
+                        &call.function.arguments,
+                        &outcome,
+                    );
+                    if matches!(outcome, ToolOutcome::Result { .. }) {
+                        remember_preview_if_any(&mut state, &call.function.name, &outcome);
+                    }
+                    (outcome, hint)
+                }
                 Err(error) if error.code == "cancelled" => return Err(error),
                 Err(error) => {
                     if call.function.name == ASK_USER_TOOL_NAME && ask_draft_streamed {
@@ -643,12 +650,17 @@ async fn run_turn_inner(
                     content,
                     image_path,
                 } => {
-                    record_pending_preview(&mut pending_preview_ids, &call.function.name, &content);
                     state.messages.push(json!({
                         "role": "tool",
                         "tool_call_id": call.id,
                         "content": content,
                     }));
+                    if preview_hint {
+                        state.messages.push(json!({
+                            "role": "system",
+                            "content": PREVIEW_UNRESOLVED_HINT,
+                        }));
+                    }
                     if let Some(path) = image_path {
                         if runtime.image_capability() == ImageInputSupport::Unsupported {
                             state.messages.push(json!({
@@ -731,10 +743,7 @@ fn refresh_conversation_psd_context(
     conversation_id: &str,
     messages: &mut Vec<Value>,
 ) -> Result<(), AgentError> {
-    replace_psd_context(
-        messages,
-        &runtime.psd_attachment_manifest(conversation_id)?,
-    )
+    replace_psd_context(messages, &runtime.psd_attachment_manifest(conversation_id)?)
 }
 
 fn replace_psd_context(
@@ -806,67 +815,6 @@ fn tool_error_content(error: &AgentError) -> String {
         }
     })
     .to_string()
-}
-
-fn requires_structured_preview_approval(
-    mode: AgentTurnMode,
-    pending_preview_ids: &BTreeSet<String>,
-) -> bool {
-    mode == AgentTurnMode::Default && !pending_preview_ids.is_empty()
-}
-
-fn tool_choice_for_turn(
-    mode: AgentTurnMode,
-    pending_preview_ids: &BTreeSet<String>,
-) -> ToolChoiceMode {
-    if requires_structured_preview_approval(mode, pending_preview_ids) {
-        ToolChoiceMode::Required
-    } else {
-        ToolChoiceMode::Auto
-    }
-}
-
-fn structured_preview_approval_error(preview_count: usize) -> AgentError {
-    AgentError::new(
-        "approval_tool_required",
-        format!(
-            "本回合已有 {preview_count} 个有效编辑预览尚未处理。需要用户批准时必须调用 ask_user；如果当前用户消息已经明确授权这些操作，则使用对应 previewId 执行，不能用普通文本询问后结束回合。"
-        ),
-    )
-}
-
-fn record_pending_preview(
-    pending_preview_ids: &mut BTreeSet<String>,
-    tool_name: &str,
-    content: &str,
-) {
-    if !tool_name.starts_with("preview_") {
-        return;
-    }
-    if let Some(preview_id) = preview_id(content) {
-        pending_preview_ids.insert(preview_id);
-    }
-}
-
-fn consume_pending_preview(
-    pending_preview_ids: &mut BTreeSet<String>,
-    tool_name: &str,
-    arguments: &str,
-) {
-    if !matches!(tool_name, "execute_editor_edit" | "execute_parameter_batch") {
-        return;
-    }
-    if let Some(preview_id) = preview_id(arguments) {
-        pending_preview_ids.remove(&preview_id);
-    }
-}
-
-fn preview_id(json: &str) -> Option<String> {
-    serde_json::from_str::<Value>(json)
-        .ok()?
-        .get("previewId")?
-        .as_str()
-        .map(str::to_string)
 }
 
 /// 将消息序列中的 `image_url` 多模态片段替换为文本占位，纯图消息退化为文本。
@@ -1014,6 +962,88 @@ fn load_skills(
         .collect())
 }
 
+fn tool_choice_for_turn(mode: AgentTurnMode, state: &AgentTurnState) -> ToolChoiceMode {
+    if mode == AgentTurnMode::Default && state.has_pending_preview_obligation() {
+        ToolChoiceMode::Required
+    } else {
+        ToolChoiceMode::Auto
+    }
+}
+
+fn json_str(raw: &str, key: &str) -> Option<String> {
+    serde_json::from_str::<Value>(raw)
+        .ok()?
+        .get(key)?
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn remember_preview_if_any(state: &mut AgentTurnState, tool_name: &str, outcome: &ToolOutcome) {
+    if !crate::service::official_api::is_preview_tool(tool_name) {
+        return;
+    }
+    let ToolOutcome::Result { content, .. } = outcome else {
+        return;
+    };
+    let Some(preview_id) = json_str(content, "previewId") else {
+        return;
+    };
+    state.preview_failed = false;
+    state.awaiting_preview_ids.insert(preview_id);
+}
+
+/// Returns true when the model should receive an unresolved-preview hint.
+fn resolve_preview_obligation(
+    state: &mut AgentTurnState,
+    tool_name: &str,
+    arguments: &str,
+    outcome: &ToolOutcome,
+) -> bool {
+    let ToolOutcome::Result { content, .. } = outcome else {
+        return false;
+    };
+    match tool_name {
+        "execute_editor_edit" | "execute_parameter_batch" => {
+            let Some(preview_id) = json_str(arguments, "previewId") else {
+                return false;
+            };
+            if !state.awaiting_preview_ids.contains(&preview_id) {
+                return false;
+            }
+            let Some(operation_id) = json_str(content, "operationId") else {
+                return false;
+            };
+            state.awaiting_preview_ids.remove(&preview_id);
+            state.in_flight_operation_ids.insert(operation_id);
+            false
+        }
+        "get_editor_edit_result" | "get_parameter_batch_result" => {
+            let Some(operation_id) = json_str(arguments, "operationId") else {
+                return false;
+            };
+            if !state.in_flight_operation_ids.contains(&operation_id) {
+                return false;
+            }
+            match json_str(content, "outcome").as_deref() {
+                Some("committed" | "cancelled_rolled_back") => {
+                    state.in_flight_operation_ids.remove(&operation_id);
+                    false
+                }
+                Some("running") => false,
+                Some("failed" | "failed_rolled_back" | "unknown") | None => {
+                    state.in_flight_operation_ids.remove(&operation_id);
+                    state.preview_failed = true;
+                    true
+                }
+                Some(_) => true,
+            }
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1077,87 +1107,33 @@ mod tests {
         );
 
         let computer = BTreeSet::from(["perform_computer_action"]);
-        assert!(!validate_tool_call_batch(
-            &[call("1", "perform_computer_action", "{}")],
-            &computer,
-        )
-        .unwrap()
-        .requires_sequence_retry);
+        assert!(
+            !validate_tool_call_batch(&[call("1", "perform_computer_action", "{}")], &computer,)
+                .unwrap()
+                .requires_sequence_retry
+        );
         let mixed_computer = BTreeSet::from(["read_skill", "perform_computer_action"]);
-        assert!(!validate_tool_call_batch(
-            &[
-                call("1", "read_skill", r#"{"name":"computer-operation"}"#),
-                call("2", "perform_computer_action", "{}"),
-            ],
-            &mixed_computer,
-        )
-        .unwrap()
-        .requires_sequence_retry);
-        assert!(validate_tool_call_batch(
-            &[
-                call("1", "perform_computer_action", "{}"),
-                call("2", "perform_computer_action", "{}"),
-            ],
-            &computer,
-        )
-        .unwrap()
-        .requires_sequence_retry);
-    }
-
-    #[test]
-    fn preview_guard_requires_tools_until_every_preview_is_handled() {
-        let mut pending = BTreeSet::new();
-        record_pending_preview(
-            &mut pending,
-            "preview_edit_art_mesh",
-            r#"{"previewId":"preview-a","operation":"EditArtMesh"}"#,
+        assert!(
+            !validate_tool_call_batch(
+                &[
+                    call("1", "read_skill", r#"{"name":"computer-operation"}"#),
+                    call("2", "perform_computer_action", "{}"),
+                ],
+                &mixed_computer,
+            )
+            .unwrap()
+            .requires_sequence_retry
         );
-        record_pending_preview(
-            &mut pending,
-            "preview_edit_part",
-            r#"{"previewId":"preview-b"}"#,
-        );
-        assert_eq!(
-            pending,
-            BTreeSet::from(["preview-a".to_string(), "preview-b".to_string()])
-        );
-        assert_eq!(
-            tool_choice_for_turn(AgentTurnMode::Default, &pending),
-            ToolChoiceMode::Required
-        );
-        assert!(!requires_structured_preview_approval(
-            AgentTurnMode::AutoApprove,
-            &pending
-        ));
-        assert_eq!(
-            tool_choice_for_turn(AgentTurnMode::AutoApprove, &pending),
-            ToolChoiceMode::Auto
-        );
-        assert_eq!(
-            structured_preview_approval_error(pending.len()).code,
-            "approval_tool_required"
-        );
-
-        consume_pending_preview(
-            &mut pending,
-            "execute_editor_edit",
-            r#"{"previewId":"preview-a"}"#,
-        );
-        assert_eq!(pending, BTreeSet::from(["preview-b".to_string()]));
-        assert_eq!(
-            tool_choice_for_turn(AgentTurnMode::Default, &pending),
-            ToolChoiceMode::Required
-        );
-
-        consume_pending_preview(
-            &mut pending,
-            "execute_editor_edit",
-            r#"{"previewId":"preview-b"}"#,
-        );
-        assert!(pending.is_empty());
-        assert_eq!(
-            tool_choice_for_turn(AgentTurnMode::Default, &pending),
-            ToolChoiceMode::Auto
+        assert!(
+            validate_tool_call_batch(
+                &[
+                    call("1", "perform_computer_action", "{}"),
+                    call("2", "perform_computer_action", "{}"),
+                ],
+                &computer,
+            )
+            .unwrap()
+            .requires_sequence_retry
         );
     }
 
@@ -1174,11 +1150,8 @@ mod tests {
             reasoning_content: Some("internal reasoning".into()),
             tool_calls: Some(calls.clone()),
         };
-        let messages = tool_batch_rejection_messages(
-            &assistant,
-            &calls,
-            &tool_sequence_required_error(),
-        );
+        let messages =
+            tool_batch_rejection_messages(&assistant, &calls, &tool_sequence_required_error());
 
         assert_eq!(messages.len(), calls.len() + 1);
         assert_eq!(messages[0]["content"], "");
@@ -1264,7 +1237,13 @@ mod tests {
         }];
         replace_psd_context(&mut messages, &attachment_manifest(&documents)).unwrap();
 
-        assert_eq!(messages.iter().filter(|message| is_psd_context(message)).count(), 1);
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| is_psd_context(message))
+                .count(),
+            1
+        );
         let payload = psd_context_payload(&messages);
         assert_eq!(payload["count"], 1);
         assert_eq!(payload["documents"][0]["id"], "psd-1");
@@ -1427,5 +1406,189 @@ mod tests {
             "[图片不可用：image.webp]"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn tool_ok(content: &str) -> ToolOutcome {
+        ToolOutcome::Result {
+            content: content.into(),
+            image_path: None,
+        }
+    }
+
+    #[test]
+    fn preview_execute_error_keeps_pending_and_requires_tool_choice() {
+        let mut state = AgentTurnState::new(Vec::new(), AgentTurnMode::Default);
+        remember_preview_if_any(
+            &mut state,
+            "preview_parameter_batch",
+            &tool_ok(r#"{"previewId":"preview-a","canExecute":true}"#),
+        );
+        assert!(state.awaiting_preview_ids.contains("preview-a"));
+        assert_eq!(
+            tool_choice_for_turn(AgentTurnMode::Default, &state),
+            ToolChoiceMode::Required
+        );
+
+        // execute Err 不调用 resolve，awaiting 保持不变。
+        assert!(state.awaiting_preview_ids.contains("preview-a"));
+        assert!(state.in_flight_operation_ids.is_empty());
+
+        assert!(!resolve_preview_obligation(
+            &mut state,
+            "execute_parameter_batch",
+            r#"{"previewId":"preview-a"}"#,
+            &tool_ok(r#"{"operationId":"op-1"}"#),
+        ));
+        assert!(!state.awaiting_preview_ids.contains("preview-a"));
+        assert!(state.in_flight_operation_ids.contains("op-1"));
+        assert_eq!(
+            tool_choice_for_turn(AgentTurnMode::Default, &state),
+            ToolChoiceMode::Required
+        );
+
+        assert!(!resolve_preview_obligation(
+            &mut state,
+            "get_parameter_batch_result",
+            r#"{"operationId":"op-1"}"#,
+            &tool_ok(r#"{"operationId":"op-1","outcome":"committed"}"#),
+        ));
+        assert!(!state.has_pending_preview_obligation());
+        assert_eq!(
+            tool_choice_for_turn(AgentTurnMode::Default, &state),
+            ToolChoiceMode::Auto
+        );
+    }
+
+    #[test]
+    fn wrong_preview_id_does_not_clear_other_pending_previews() {
+        let mut state = AgentTurnState::new(Vec::new(), AgentTurnMode::Default);
+        remember_preview_if_any(
+            &mut state,
+            "preview_parameter_batch",
+            &tool_ok(r#"{"previewId":"preview-a"}"#),
+        );
+        remember_preview_if_any(
+            &mut state,
+            "preview_parameter_batch",
+            &tool_ok(r#"{"previewId":"preview-b"}"#),
+        );
+        assert!(!resolve_preview_obligation(
+            &mut state,
+            "execute_editor_edit",
+            r#"{"previewId":"preview-missing"}"#,
+            &tool_ok(r#"{"operationId":"op-x"}"#),
+        ));
+        assert_eq!(
+            state.awaiting_preview_ids,
+            BTreeSet::from(["preview-a".into(), "preview-b".into()])
+        );
+    }
+
+    #[test]
+    fn async_running_keeps_gate_until_cancelled_terminal() {
+        let mut state = AgentTurnState::new(Vec::new(), AgentTurnMode::Default);
+        remember_preview_if_any(
+            &mut state,
+            "preview_edit_art_mesh",
+            &tool_ok(r#"{"previewId":"preview-a"}"#),
+        );
+        assert!(!resolve_preview_obligation(
+            &mut state,
+            "execute_editor_edit",
+            r#"{"previewId":"preview-a"}"#,
+            &tool_ok(r#"{"operationId":"op-9"}"#),
+        ));
+        assert!(!resolve_preview_obligation(
+            &mut state,
+            "get_editor_edit_result",
+            r#"{"operationId":"op-9"}"#,
+            &tool_ok(r#"{"operationId":"op-9","outcome":"running"}"#),
+        ));
+        assert!(state.has_pending_preview_obligation());
+
+        assert!(!resolve_preview_obligation(
+            &mut state,
+            "get_editor_edit_result",
+            r#"{"operationId":"op-9"}"#,
+            &tool_ok(r#"{"operationId":"op-9","outcome":"cancelled_rolled_back"}"#),
+        ));
+        assert!(!state.has_pending_preview_obligation());
+    }
+
+    #[test]
+    fn partial_success_only_consumes_matching_preview() {
+        let mut state = AgentTurnState::new(Vec::new(), AgentTurnMode::Default);
+        remember_preview_if_any(
+            &mut state,
+            "preview_parameter_batch",
+            &tool_ok(r#"{"previewId":"preview-a"}"#),
+        );
+        remember_preview_if_any(
+            &mut state,
+            "preview_parameter_batch",
+            &tool_ok(r#"{"previewId":"preview-b"}"#),
+        );
+        assert!(!resolve_preview_obligation(
+            &mut state,
+            "execute_parameter_batch",
+            r#"{"previewId":"preview-a"}"#,
+            &tool_ok(r#"{"operationId":"op-a"}"#),
+        ));
+        assert!(!resolve_preview_obligation(
+            &mut state,
+            "get_parameter_batch_result",
+            r#"{"operationId":"op-a"}"#,
+            &tool_ok(r#"{"operationId":"op-a","outcome":"committed"}"#),
+        ));
+        assert!(!state.awaiting_preview_ids.contains("preview-a"));
+        assert!(state.awaiting_preview_ids.contains("preview-b"));
+        assert!(state.has_pending_preview_obligation());
+    }
+
+    #[test]
+    fn failed_async_result_keeps_gate_until_fresh_preview() {
+        let mut state = AgentTurnState::new(Vec::new(), AgentTurnMode::Default);
+        remember_preview_if_any(
+            &mut state,
+            "preview_parameter_batch",
+            &tool_ok(r#"{"previewId":"preview-a"}"#),
+        );
+        assert!(!resolve_preview_obligation(
+            &mut state,
+            "execute_parameter_batch",
+            r#"{"previewId":"preview-a"}"#,
+            &tool_ok(r#"{"operationId":"op-1"}"#),
+        ));
+        assert!(resolve_preview_obligation(
+            &mut state,
+            "get_parameter_batch_result",
+            r#"{"operationId":"op-1"}"#,
+            &tool_ok(r#"{"operationId":"op-1","outcome":"failed"}"#),
+        ));
+        assert!(state.preview_failed);
+        assert!(state.has_pending_preview_obligation());
+
+        remember_preview_if_any(
+            &mut state,
+            "preview_parameter_batch",
+            &tool_ok(r#"{"previewId":"preview-b"}"#),
+        );
+        assert!(!state.preview_failed);
+        assert!(state.awaiting_preview_ids.contains("preview-b"));
+    }
+
+    #[test]
+    fn auto_approve_mode_does_not_force_required_tool_choice() {
+        let mut state = AgentTurnState::new(Vec::new(), AgentTurnMode::AutoApprove);
+        remember_preview_if_any(
+            &mut state,
+            "preview_parameter_batch",
+            &tool_ok(r#"{"previewId":"preview-a"}"#),
+        );
+        assert_eq!(
+            tool_choice_for_turn(AgentTurnMode::AutoApprove, &state),
+            ToolChoiceMode::Auto
+        );
+        assert!(state.has_pending_preview_obligation());
     }
 }
