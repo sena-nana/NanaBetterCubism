@@ -2,6 +2,7 @@ import Brain from "@lucide/vue/dist/esm/icons/brain.mjs";
 import Info from "@lucide/vue/dist/esm/icons/info.mjs";
 import Palette from "@lucide/vue/dist/esm/icons/palette.mjs";
 import Server from "@lucide/vue/dist/esm/icons/server.mjs";
+import Waypoints from "@lucide/vue/dist/esm/icons/waypoints.mjs";
 import appConfigJson from "../app.config.json";
 import {
   LiliaAboutSection,
@@ -39,12 +40,14 @@ export const settingsModel = createSettingsModel({
     { key: "appearance", label: "外观", icon: Palette },
     { key: "model-config", label: "模型配置", icon: Brain },
     { key: "editor", label: "Editor", icon: Server },
+    { key: "mcp", label: "MCP", icon: Waypoints },
     { key: "about", label: "关于", icon: Info },
   ],
   sections: {
     appearance: LiliaAppearanceSection,
     "model-config": () => import("./features/agent/settings/LlmSettingsSection.vue"),
     editor: () => import("./features/agent/settings/EditorSettingsSection.vue"),
+    mcp: () => import("./features/agent/settings/McpSettingsSection.vue"),
     about: LiliaAboutSection,
   },
 });

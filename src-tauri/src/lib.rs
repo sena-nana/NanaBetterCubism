@@ -1,5 +1,6 @@
 mod agent;
 mod domain;
+mod mcp;
 mod protocol;
 mod service;
 
@@ -12,6 +13,9 @@ use agent::{
     agent_send_message, agent_set_conversation_pinned, llm_get_config, llm_list_models,
     llm_set_config, llm_test_connection, llm_test_model, memory_list, memory_set_enabled,
     AgentRuntime, AgentStore,
+};
+use mcp::{
+    mcp_get_status, mcp_rotate_token, mcp_set_config, mcp_start, mcp_stop, McpServerHandle,
 };
 use service::{
     cancel_parameter_batch, connect_editor, disconnect_editor, execute_parameter_batch,
@@ -53,7 +57,16 @@ pub fn run() {
                 .images
                 .clear_stale_drafts()
                 .map_err(|e| Box::<dyn std::error::Error>::from(e.message))?;
+            let mcp = Arc::new(
+                McpServerHandle::new(dir.clone())
+                    .map_err(|e| Box::<dyn std::error::Error>::from(e.message))?,
+            );
             app.manage(runtime);
+            app.manage(mcp.clone());
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                mcp.restore_if_enabled(&app_handle).await;
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -69,6 +82,11 @@ pub fn run() {
             llm_list_models,
             llm_test_connection,
             llm_test_model,
+            mcp_get_status,
+            mcp_set_config,
+            mcp_start,
+            mcp_stop,
+            mcp_rotate_token,
             agent_list_conversations,
             agent_create_conversation,
             agent_set_conversation_pinned,

@@ -77,7 +77,7 @@ describe("Agent 壳层路由", () => {
     expect(await screen.findByText("Agent 保存的跨项目经验会显示在这里。")).toBeTruthy();
   });
 
-  it("设置页恢复外观、模型配置、Editor 与关于，并默认显示外观", async () => {
+  it("设置页恢复外观、模型配置、Editor、MCP 与关于，并默认显示外观", async () => {
     await renderAt("/settings");
 
     expect(document.querySelector('[data-agent-id="settings.sidebar"]')).toBeTruthy();
@@ -87,6 +87,7 @@ describe("Agent 壳层路由", () => {
       "appearance",
       "model-config",
       "editor",
+      "mcp",
       "about",
     ]);
     expect(await screen.findByRole("heading", { level: 2, name: "外观" })).toBeTruthy();
