@@ -153,6 +153,11 @@ pub(crate) fn is_tool(name: &str) -> bool {
     name == "list_editor_notifications" || spec(name).is_some()
 }
 
+pub(crate) fn is_preview_tool(name: &str) -> bool {
+    name == "preview_parameter_batch"
+        || spec(name).is_some_and(|spec| spec.mode == ToolMode::Preview)
+}
+
 pub(crate) async fn call_tool(
     service: &EditorService,
     name: &str,
