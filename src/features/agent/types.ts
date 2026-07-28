@@ -283,3 +283,21 @@ export interface AgentImageCapabilityEvent {
   unsupported: boolean;
   reason?: string | null;
 }
+
+export type McpRunState = "stopped" | "starting" | "running" | "failed";
+
+export interface McpStatus {
+  state: McpRunState;
+  enabled: boolean;
+  port: number;
+  allowWrites: boolean;
+  url: string | null;
+  token: string;
+  message: string;
+}
+
+export interface McpConfigInput {
+  enabled?: boolean | null;
+  port?: number | null;
+  allowWrites?: boolean | null;
+}

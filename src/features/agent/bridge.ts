@@ -32,6 +32,8 @@ import type {
   ImagePrepareInput,
   ImagePrepareResult,
   PsdPrepareResult,
+  McpConfigInput,
+  McpStatus,
 } from "./types";
 
 export { normalizeCommandError };
@@ -294,6 +296,54 @@ export async function listenImageCapability(
   return listen<AgentImageCapabilityEvent>("agent://image-capability", (e) =>
     handler(e.payload),
   );
+}
+
+export async function getMcpStatus(): Promise<McpStatus> {
+  if (!isTauriRuntime()) {
+    return {
+      state: "stopped",
+      enabled: false,
+      port: 3920,
+      allowWrites: true,
+      url: null,
+      token: "",
+      message: "请在桌面应用中管理 MCP。",
+    };
+  }
+  return invoke<McpStatus>("mcp_get_status");
+}
+
+export async function setMcpConfig(input: McpConfigInput): Promise<McpStatus> {
+  if (!isTauriRuntime()) {
+    throw domainError("desktop_required", "请在桌面应用中配置 MCP。");
+  }
+  return invoke<McpStatus>("mcp_set_config", { input });
+}
+
+export async function startMcp(): Promise<McpStatus> {
+  if (!isTauriRuntime()) {
+    throw domainError("desktop_required", "请在桌面应用中启动 MCP。");
+  }
+  return invoke<McpStatus>("mcp_start");
+}
+
+export async function stopMcp(): Promise<McpStatus> {
+  if (!isTauriRuntime()) {
+    throw domainError("desktop_required", "请在桌面应用中停止 MCP。");
+  }
+  return invoke<McpStatus>("mcp_stop");
+}
+
+export async function rotateMcpToken(): Promise<McpStatus> {
+  if (!isTauriRuntime()) {
+    throw domainError("desktop_required", "请在桌面应用中轮换 MCP Token。");
+  }
+  return invoke<McpStatus>("mcp_rotate_token");
+}
+
+export async function listenMcpState(handler: (payload: McpStatus) => void) {
+  if (!isTauriRuntime()) return noopUnlisten;
+  return listen<McpStatus>("mcp://state", (e) => handler(e.payload));
 }
 
 const noopUnlisten: UnlistenFn = () => {};
