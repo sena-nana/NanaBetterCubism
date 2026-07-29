@@ -171,6 +171,12 @@ impl ServiceState {
         self.previews.clear();
     }
 
+    fn discard_preview(&mut self, preview_id: &str) -> bool {
+        let batch_discarded = self.previews.remove(preview_id).is_some();
+        let editor_discarded = self.editor_edit_previews.remove(preview_id).is_some();
+        batch_discarded || editor_discarded
+    }
+
     fn apply_editor_edit_outcome(&mut self, outcome: &EditorEditOutcome) {
         match outcome {
             EditorEditOutcome::Committed => self.clear_batch_previews(),
@@ -214,6 +220,10 @@ impl Default for EditorService {
 }
 
 impl EditorService {
+    pub(crate) async fn discard_preview(&self, preview_id: &str) -> bool {
+        self.inner.lock().await.discard_preview(preview_id)
+    }
+
     pub(crate) fn operation_coordinator(&self) -> OperationCoordinator {
         self.operation_coordinator.clone()
     }
@@ -1508,6 +1518,19 @@ mod tests {
         clear_session_data(&mut state);
 
         assert!(!state.previews.contains("batch"));
+        assert!(!state.editor_edit_previews.contains("official"));
+    }
+
+    #[test]
+    fn discard_preview_removes_only_the_matching_preview_type_and_is_idempotent() {
+        let mut state = state_with_pending_previews();
+
+        assert!(state.discard_preview("batch"));
+        assert!(!state.previews.contains("batch"));
+        assert!(state.editor_edit_previews.contains("official"));
+        assert!(!state.discard_preview("batch"));
+
+        assert!(state.discard_preview("official"));
         assert!(!state.editor_edit_previews.contains("official"));
     }
 

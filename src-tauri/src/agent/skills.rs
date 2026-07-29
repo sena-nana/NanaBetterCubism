@@ -67,6 +67,7 @@ const PARAMETER_EDITING_TOOLS: &[&str] = &[
     "execute_editor_edit",
     "get_editor_edit_result",
     "cancel_editor_edit",
+    "discard_editor_preview",
 ];
 
 const OBJECT_EDITING_TOOLS: &[&str] = &[
@@ -85,6 +86,7 @@ const OBJECT_EDITING_TOOLS: &[&str] = &[
     "execute_editor_edit",
     "get_editor_edit_result",
     "cancel_editor_edit",
+    "discard_editor_preview",
 ];
 
 const MEMORY_RECALL_TOOLS: &[&str] = &["recall_memory"];
