@@ -1,7 +1,7 @@
 use super::{
     schema::{
-        boolean, choice, effect, limited_string, normalize_arguments, number, parameter_filters,
-        parameter_values, query, string, strings, ToolSpec, LOG_TYPES,
+        boolean, choice, effect, identifier, identifiers, limited_string, normalize_arguments,
+        number, parameter_filters, parameter_values, query, string, ToolSpec, LOG_TYPES,
     },
     CommandError, CurrentModelingDocument, EditorService,
 };
@@ -71,7 +71,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "GetParameterValues",
             "读取当前模型的参数值；不包含动画信息。",
             true,
-            vec![strings("ids", "Ids", false)],
+            vec![identifiers("ids", "Ids", false)],
         ),
         effect(
             "set_parameter_values",
@@ -211,7 +211,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "GetParameterKeys",
             "读取对象关联参数的关键点值。",
             true,
-            vec![string("objectId", "ObjectId", true)],
+            vec![identifier("objectId", "ObjectId", true)],
         ),
         query(
             "get_objects_by_parameter_key",
@@ -220,7 +220,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "读取与指定参数关键点关联的对象。",
             true,
             vec![
-                string("parameterId", "ParameterId", true),
+                identifier("parameterId", "ParameterId", true),
                 number("keyValue", "KeyValue", true, None, None),
             ],
         ),
@@ -255,7 +255,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "读取 Part、ArtMesh、Glue 或 Deformer 属性。id 必须使用结构化读取结果中的精确值，不能使用显示名称 name 或猜测名称映射。",
             true,
             vec![
-                string("id", "Id", true),
+                identifier("id", "Id", true),
                 parameter_filters("parameters", "Parameters", false),
             ],
         ),

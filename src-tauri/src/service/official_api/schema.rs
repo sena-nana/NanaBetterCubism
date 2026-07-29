@@ -1,5 +1,5 @@
 use super::CommandError;
-use crate::domain::MAX_BATCH_SIZE;
+use crate::domain::{validate_identifier, CUBISM_ID_MAX_LEN, CUBISM_ID_PATTERN, MAX_BATCH_SIZE};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
 
@@ -18,10 +18,11 @@ pub(crate) enum ToolAccess {
 #[derive(Clone, Copy)]
 enum FieldKind {
     String { max_len: Option<usize> },
+    Identifier,
     Number { min: Option<f64>, max: Option<f64> },
     Integer { min: i64, max: i64 },
     Boolean,
-    StringArray,
+    IdentifierArray,
     ParameterValues,
     ParameterFilters,
     Color,
@@ -98,6 +99,10 @@ pub(super) fn string(input: &'static str, editor: &'static str, required: bool) 
     FieldSpec::new(input, editor, required, FieldKind::String { max_len: None })
 }
 
+pub(super) fn identifier(input: &'static str, editor: &'static str, required: bool) -> FieldSpec {
+    FieldSpec::new(input, editor, required, FieldKind::Identifier)
+}
+
 pub(super) fn limited_string(
     input: &'static str,
     editor: &'static str,
@@ -138,8 +143,8 @@ pub(super) fn boolean(input: &'static str, editor: &'static str, required: bool)
     FieldSpec::new(input, editor, required, FieldKind::Boolean)
 }
 
-pub(super) fn strings(input: &'static str, editor: &'static str, required: bool) -> FieldSpec {
-    FieldSpec::new(input, editor, required, FieldKind::StringArray)
+pub(super) fn identifiers(input: &'static str, editor: &'static str, required: bool) -> FieldSpec {
+    FieldSpec::new(input, editor, required, FieldKind::IdentifierArray)
 }
 
 pub(super) fn parameter_values(
@@ -236,13 +241,22 @@ pub(super) fn preview(
 
 pub(super) fn common_object_edit_fields(is_exact_match_key: &'static str) -> Vec<FieldSpec> {
     vec![
-        string("id", "Id", true),
+        identifier("id", "Id", true),
         parameter_filters("parameters", "Parameters", false),
         boolean("isExactMatch", is_exact_match_key, false),
-        string("newId", "NewId", false),
+        identifier("newId", "NewId", false),
         string("name", "Name", false),
-        string("parentId", "ParentId", false),
+        identifier("parentId", "ParentId", false),
     ]
+}
+
+fn identifier_schema() -> Value {
+    json!({
+        "type": "string",
+        "minLength": 1,
+        "maxLength": CUBISM_ID_MAX_LEN,
+        "pattern": CUBISM_ID_PATTERN
+    })
 }
 
 pub(super) fn field_schema(field: &FieldSpec) -> Value {
@@ -254,6 +268,7 @@ pub(super) fn field_schema(field: &FieldSpec) -> Value {
             }
             schema
         }
+        FieldKind::Identifier => identifier_schema(),
         FieldKind::Number { min, max } => {
             let mut schema = json!({"type": "number"});
             if let Some(min) = min {
@@ -268,15 +283,15 @@ pub(super) fn field_schema(field: &FieldSpec) -> Value {
             json!({"type": "integer", "minimum": min, "maximum": max})
         }
         FieldKind::Boolean => json!({"type": "boolean"}),
-        FieldKind::StringArray => {
-            json!({"type": "array", "items": {"type": "string", "minLength": 1}})
+        FieldKind::IdentifierArray => {
+            json!({"type": "array", "items": identifier_schema()})
         }
         FieldKind::ParameterValues => json!({
             "type": "array",
             "items": {
                 "type": "object",
                 "properties": {
-                    "id": {"type": "string", "minLength": 1},
+                    "id": identifier_schema(),
                     "value": {"type": "number"}
                 },
                 "required": ["id", "value"],
@@ -288,7 +303,7 @@ pub(super) fn field_schema(field: &FieldSpec) -> Value {
             "items": {
                 "type": "object",
                 "properties": {
-                    "id": {"type": "string", "minLength": 1},
+                    "id": identifier_schema(),
                     "value": {"type": "number"}
                 },
                 "anyOf": [{"required": ["id"]}, {"required": ["value"]}],
@@ -325,6 +340,11 @@ fn validate_value(field: &FieldSpec, value: &Value) -> Result<Value, CommandErro
             }
             Ok(json!(value))
         }
+        FieldKind::Identifier => {
+            let value = value.as_str().ok_or_else(invalid)?;
+            validate_cubism_identifier(field, value, None)?;
+            Ok(json!(value))
+        }
         FieldKind::Number { min, max } => {
             let value = value
                 .as_f64()
@@ -343,14 +363,12 @@ fn validate_value(field: &FieldSpec, value: &Value) -> Result<Value, CommandErro
             Ok(json!(value))
         }
         FieldKind::Boolean => value.as_bool().map(Value::Bool).ok_or_else(invalid),
-        FieldKind::StringArray => {
+        FieldKind::IdentifierArray => {
             let values = value.as_array().ok_or_else(invalid)?;
             let mut normalized = Vec::with_capacity(values.len());
-            for value in values {
-                let value = value
-                    .as_str()
-                    .filter(|value| !value.is_empty())
-                    .ok_or_else(invalid)?;
+            for (index, value) in values.iter().enumerate() {
+                let value = value.as_str().ok_or_else(invalid)?;
+                validate_cubism_identifier(field, value, Some(index))?;
                 normalized.push(json!(value));
             }
             Ok(Value::Array(normalized))
@@ -358,7 +376,7 @@ fn validate_value(field: &FieldSpec, value: &Value) -> Result<Value, CommandErro
         FieldKind::ParameterValues => {
             let values = value.as_array().ok_or_else(invalid)?;
             let mut normalized = Vec::with_capacity(values.len());
-            for value in values {
+            for (index, value) in values.iter().enumerate() {
                 let object = value.as_object().ok_or_else(invalid)?;
                 if object.keys().any(|key| key != "id" && key != "value") {
                     return Err(invalid());
@@ -368,6 +386,7 @@ fn validate_value(field: &FieldSpec, value: &Value) -> Result<Value, CommandErro
                     .and_then(Value::as_str)
                     .filter(|value| !value.is_empty())
                     .ok_or_else(invalid)?;
+                validate_cubism_identifier(field, id, Some(index))?;
                 let number = object
                     .get("value")
                     .and_then(Value::as_f64)
@@ -380,7 +399,7 @@ fn validate_value(field: &FieldSpec, value: &Value) -> Result<Value, CommandErro
         FieldKind::ParameterFilters => {
             let values = value.as_array().ok_or_else(invalid)?;
             let mut normalized = Vec::with_capacity(values.len());
-            for value in values {
+            for (index, value) in values.iter().enumerate() {
                 let object = value.as_object().ok_or_else(invalid)?;
                 if object.is_empty() || object.keys().any(|key| key != "id" && key != "value") {
                     return Err(invalid());
@@ -391,6 +410,7 @@ fn validate_value(field: &FieldSpec, value: &Value) -> Result<Value, CommandErro
                         .as_str()
                         .filter(|value| !value.is_empty())
                         .ok_or_else(invalid)?;
+                    validate_cubism_identifier(field, id, Some(index))?;
                     item.insert("Id".into(), json!(id));
                 }
                 if let Some(number) = object.get("value") {
@@ -421,6 +441,23 @@ fn validate_value(field: &FieldSpec, value: &Value) -> Result<Value, CommandErro
             Ok(json!(value))
         }
     }
+}
+
+fn validate_cubism_identifier(
+    field: &FieldSpec,
+    value: &str,
+    index: Option<usize>,
+) -> Result<(), CommandError> {
+    validate_identifier(value).map_err(|message| {
+        let location = index.map_or_else(
+            || format!("参数 {}", field.input),
+            |index| format!("参数 {} 的第 {} 项", field.input, index + 1),
+        );
+        CommandError::new(
+            "invalid_arguments",
+            format!("{location}不是合法 Cubism ID：{message}"),
+        )
+    })
 }
 
 pub(super) fn normalize_arguments(

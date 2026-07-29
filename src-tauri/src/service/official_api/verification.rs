@@ -3,6 +3,15 @@ use serde_json::{json, Map, Value};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
+const DEFORMER_CREATE_ONLY_FIELDS: &[&str] = &["ModelUID", "TargetObjectIds", "Mode"];
+const WARP_CREATE_ONLY_FIELDS: &[&str] = &[
+    "ModelUID",
+    "TargetObjectIds",
+    "Mode",
+    "ConsiderChildKeyforms",
+    "SnapCenter",
+];
+
 #[derive(Debug)]
 pub(super) struct PreconditionError {
     pub(super) invalid_target: bool,
@@ -778,8 +787,13 @@ pub(super) fn verify_postcondition(
         "AddRotationDeformer" | "AddWarpDeformer" => {
             let id = data.get("Id")?.as_str()?;
             let actual = snapshot.get("Data")?.as_object()?;
+            let ignored = if method == "AddWarpDeformer" {
+                WARP_CREATE_ONLY_FIELDS
+            } else {
+                DEFORMER_CREATE_ONLY_FIELDS
+            };
             let base = actual.get("Id").and_then(Value::as_str) == Some(id)
-                && verify_fields(data, actual, &["ModelUID", "TargetObjectIds", "Mode"]);
+                && verify_fields(data, actual, ignored);
             if !base {
                 return Some(false);
             }
@@ -1297,6 +1311,30 @@ mod tests {
             "Mode": "AsParent",
             "WarpDivH": 2,
             "WarpDivV": 2,
+        }));
+        assert_eq!(
+            verify_postcondition("AddWarpDeformer", &data, &snapshot, None),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn add_warp_deformer_still_checks_observable_fields() {
+        let snapshot = hierarchy_snapshot(
+            json!({ "Id": "Rotator", "Name": "旋转", "WarpDivH": 2, "WarpDivV": 2 }),
+            json!([hierarchy_node(
+                "Rotator",
+                "WarpDeformer",
+                vec![hierarchy_node("ArtMesh1", "ArtMesh", vec![])]
+            )]),
+        );
+        let data = deformer_data(json!({
+            "TargetObjectIds": ["ArtMesh1"],
+            "Mode": "AsParent",
+            "WarpDivH": 3,
+            "WarpDivV": 2,
+            "ConsiderChildKeyforms": false,
+            "SnapCenter": false,
         }));
         assert_eq!(
             verify_postcondition("AddWarpDeformer", &data, &snapshot, None),

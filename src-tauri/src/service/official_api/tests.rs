@@ -264,6 +264,83 @@ fn schemas_use_documented_ranges_and_reject_raw_uids() {
 }
 
 #[test]
+fn schemas_expose_cubism_identifier_constraints() {
+    let tools = tool_definitions();
+    let pattern = "^[A-Za-z_][A-Za-z0-9_]{0,62}$";
+    let warp = tools
+        .iter()
+        .find(|tool| tool["function"]["name"] == "preview_add_warp_deformer")
+        .unwrap();
+    let operation = &warp["function"]["parameters"]["properties"]["operations"]["items"];
+    for schema in [
+        &operation["properties"]["id"],
+        &operation["properties"]["targetObjectIds"]["items"],
+    ] {
+        assert_eq!(schema["pattern"], pattern);
+        assert_eq!(schema["maxLength"], 63);
+    }
+
+    let get_object = tools
+        .iter()
+        .find(|tool| tool["function"]["name"] == "get_object")
+        .unwrap();
+    let nested_id = &get_object["function"]["parameters"]["properties"]["parameters"]["items"]
+        ["properties"]["id"];
+    assert_eq!(nested_id["pattern"], pattern);
+    assert_eq!(nested_id["maxLength"], 63);
+}
+
+#[test]
+fn normalization_rejects_invalid_cubism_ids_but_keeps_unicode_names() {
+    let warp = spec("preview_add_warp_deformer").unwrap();
+    for id in ["Warp_尾巴", "1Warp", "Warp-Tail"] {
+        let error = schema::normalize_operations(
+            warp,
+            json!({"operations": [{"id": id, "name": "中文名称"}]}),
+            "private-model",
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "invalid_arguments");
+    }
+    let too_long = "A".repeat(64);
+    let error = schema::normalize_operations(
+        warp,
+        json!({"operations": [{"id": too_long}]}),
+        "private-model",
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "invalid_arguments");
+
+    let error = schema::normalize_operations(
+        warp,
+        json!({"operations": [{
+            "id": "Warp_Tail",
+            "targetObjectIds": ["图形网格"]
+        }]}),
+        "private-model",
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "invalid_arguments");
+
+    let error = schema::normalize_arguments(
+        spec("get_object").unwrap(),
+        json!({"id": "ArtMesh", "parameters": [{"id": "参数"}]}),
+        Some("private-model"),
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "invalid_arguments");
+
+    let normalized = schema::normalize_operations(
+        warp,
+        json!({"operations": [{"id": "Warp_Tail", "name": "尾巴"}]}),
+        "private-model",
+    )
+    .unwrap();
+    assert_eq!(normalized[0].1["Id"], "Warp_Tail");
+    assert_eq!(normalized[0].1["Name"], "尾巴");
+}
+
+#[test]
 fn every_preview_schema_requires_a_bounded_operations_array() {
     let tools = tool_definitions();
     let previews = tool_specs()
@@ -371,9 +448,8 @@ fn root_deformer_parent_must_be_omitted() {
             json!({"operations": [{"id": "DeformerA", "parentId": "%Root"}]}),
             "private-model",
         )
-        .unwrap();
-        let error = edit::validate_constraints(spec.method, &virtual_root[0].1).unwrap_err();
-        assert_eq!(error.code, "invalid_arguments");
+        .unwrap_err();
+        assert_eq!(virtual_root.code, "invalid_arguments");
     }
 }
 
@@ -832,7 +908,9 @@ async fn warp_batch_with_explicit_ids_previews_and_verifies_hierarchy() {
         "TargetObjectIds": ["ArtMeshA"],
         "Mode": "AsParent",
         "WarpDivH": 2,
-        "WarpDivV": 2
+        "WarpDivV": 2,
+        "ConsiderChildKeyforms": false,
+        "SnapCenter": false
     });
     let second = json!({
         "ModelUID": "private-model",
@@ -841,7 +919,9 @@ async fn warp_batch_with_explicit_ids_previews_and_verifies_hierarchy() {
         "TargetObjectIds": ["ArtMeshB"],
         "Mode": "AsParent",
         "WarpDivH": 2,
-        "WarpDivV": 2
+        "WarpDivV": 2,
+        "ConsiderChildKeyforms": false,
+        "SnapCenter": false
     });
     let port = sequence_server(vec![
         (
@@ -903,11 +983,13 @@ async fn warp_batch_with_explicit_ids_previews_and_verifies_hierarchy() {
         json!({"operations": [
             {
                 "id": "DeformerA", "name": "A", "targetObjectIds": ["ArtMeshA"],
-                "mode": "AsParent", "warpDivH": 2, "warpDivV": 2
+                "mode": "AsParent", "warpDivH": 2, "warpDivV": 2,
+                "considerChildKeyforms": false, "snapCenter": false
             },
             {
                 "id": "DeformerB", "name": "B", "targetObjectIds": ["ArtMeshB"],
-                "mode": "AsParent", "warpDivH": 2, "warpDivV": 2
+                "mode": "AsParent", "warpDivH": 2, "warpDivV": 2,
+                "considerChildKeyforms": false, "snapCenter": false
             }
         ]}),
     )
