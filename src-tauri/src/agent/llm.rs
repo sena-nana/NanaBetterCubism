@@ -81,42 +81,73 @@ fn resolve_endpoint(config: &LlmConfigInternal) -> Result<(String, String, Strin
 }
 
 fn request_body(
+    base_url: &str,
     model: &str,
     messages: &[Value],
     tools: &[Value],
     tool_choice: ToolChoiceMode,
-    disable_thinking: bool,
     stream: bool,
-) -> Value {
-    if tools.is_empty() {
+) -> Result<Value, AgentError> {
+    let deepseek_v4 = is_official_deepseek_v4(base_url, model);
+    let messages = if deepseek_v4 {
+        normalize_deepseek_history(messages)?
+    } else {
+        messages.to_vec()
+    };
+    let body = if tools.is_empty() {
         json!({ "model": model, "messages": messages, "stream": stream })
     } else {
         let mut body = json!({
             "model": model,
             "messages": messages,
             "tools": tools,
-            "tool_choice": tool_choice,
             "parallel_tool_calls": false,
             "stream": stream,
         });
-        if disable_thinking {
-            body["thinking"] = json!({ "type": "disabled" });
+        if deepseek_v4 {
+            body["thinking"] = json!({ "type": "enabled" });
+        } else {
+            body["tool_choice"] = json!(tool_choice);
         }
         body
-    }
+    };
+    Ok(body)
 }
 
-fn requires_non_thinking_tool_choice(
-    base_url: &str,
-    model: &str,
-    tool_choice: ToolChoiceMode,
-) -> bool {
-    tool_choice == ToolChoiceMode::Required
-        && matches!(model, "deepseek-v4-pro" | "deepseek-v4-flash")
+fn is_official_deepseek_v4(base_url: &str, model: &str) -> bool {
+    matches!(model, "deepseek-v4-pro" | "deepseek-v4-flash")
         && reqwest::Url::parse(base_url)
             .ok()
             .and_then(|url| url.host_str().map(str::to_owned))
             .is_some_and(|host| host.eq_ignore_ascii_case("api.deepseek.com"))
+}
+
+fn normalize_deepseek_history(messages: &[Value]) -> Result<Vec<Value>, AgentError> {
+    let mut normalized = messages.to_vec();
+    for message in &mut normalized {
+        let is_tool_call = message.get("role").and_then(Value::as_str) == Some("assistant")
+            && message
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .is_some_and(|calls| !calls.is_empty());
+        if !is_tool_call {
+            continue;
+        }
+        if message
+            .get("reasoning_content")
+            .and_then(Value::as_str)
+            .is_none()
+        {
+            return Err(AgentError::new(
+                "llm_reasoning_history_incomplete",
+                "DeepSeek 思考模式的工具调用历史缺少 reasoning_content，已停止发送无效请求。",
+            ));
+        }
+        if message.get("content").is_none_or(Value::is_null) {
+            message["content"] = Value::String(String::new());
+        }
+    }
+    Ok(normalized)
 }
 
 fn first_message(parsed: ChatCompletionResponse) -> Result<ChatMessagePayload, AgentError> {
@@ -176,13 +207,13 @@ pub async fn chat_completions(
         .post(format!("{base}/chat/completions"))
         .bearer_auth(api_key)
         .json(&request_body(
+            &base,
             &model,
             messages,
             tools,
             ToolChoiceMode::Auto,
             false,
-            false,
-        ))
+        )?)
         .send()
         .await?;
     if !response.status().is_success() {
@@ -204,19 +235,18 @@ where
     F: FnMut(ChatStreamDelta),
 {
     let (base, api_key, model) = resolve_endpoint(config)?;
-    let disable_thinking = requires_non_thinking_tool_choice(&base, &model, tool_choice);
     let client = reqwest::Client::new();
     let response = client
         .post(format!("{base}/chat/completions"))
         .bearer_auth(&api_key)
         .json(&request_body(
+            &base,
             &model,
             messages,
             tools,
             tool_choice,
-            disable_thinking,
             true,
-        ))
+        )?)
         .send()
         .await?;
 
@@ -520,21 +550,23 @@ mod tests {
     #[test]
     fn tool_requests_apply_choice_and_explicitly_disable_parallel_calls() {
         let auto = request_body(
+            "https://example.com/v1",
             "model",
             &[json!({"role": "user", "content": "hello"})],
             &[json!({"type": "function", "function": {"name": "tool"}})],
             ToolChoiceMode::Auto,
-            false,
             true,
-        );
+        )
+        .unwrap();
         let required = request_body(
+            "https://example.com/v1",
             "model",
             &[json!({"role": "user", "content": "hello"})],
             &[json!({"type": "function", "function": {"name": "tool"}})],
             ToolChoiceMode::Required,
-            false,
             true,
-        );
+        )
+        .unwrap();
 
         assert_eq!(auto["parallel_tool_calls"], Value::Bool(false));
         assert_eq!(auto["tool_choice"], Value::String("auto".into()));
@@ -544,46 +576,103 @@ mod tests {
     }
 
     #[test]
-    fn official_deepseek_v4_disables_thinking_for_required_tool_choice() {
-        assert!(requires_non_thinking_tool_choice(
-            "https://api.deepseek.com/v1",
-            "deepseek-v4-pro",
-            ToolChoiceMode::Required,
-        ));
-        assert!(requires_non_thinking_tool_choice(
-            "https://api.deepseek.com",
-            "deepseek-v4-flash",
-            ToolChoiceMode::Required,
-        ));
-        for (base_url, model, choice) in [
-            (
-                "https://api.deepseek.com/v1",
-                "deepseek-v4-pro",
-                ToolChoiceMode::Auto,
-            ),
-            (
-                "https://example.com/v1",
-                "deepseek-v4-pro",
-                ToolChoiceMode::Required,
-            ),
-            (
-                "https://api.deepseek.com/v1",
-                "other-model",
-                ToolChoiceMode::Required,
-            ),
-        ] {
-            assert!(!requires_non_thinking_tool_choice(base_url, model, choice));
-        }
-
+    fn official_deepseek_v4_uses_thinking_without_tool_choice() {
         let body = request_body(
+            "https://api.deepseek.com/v1",
             "deepseek-v4-pro",
             &[json!({"role":"user","content":"approve"})],
             &[json!({"type":"function","function":{"name":"ask_user"}})],
             ToolChoiceMode::Required,
             true,
+        )
+        .unwrap();
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["parallel_tool_calls"], false);
+        assert!(body.get("tool_choice").is_none());
+        assert!(is_official_deepseek_v4(
+            "https://api.deepseek.com",
+            "deepseek-v4-flash"
+        ));
+        assert!(!is_official_deepseek_v4(
+            "https://example.com/v1",
+            "deepseek-v4-pro"
+        ));
+        assert!(!is_official_deepseek_v4(
+            "https://api.deepseek.com/v1",
+            "other-model"
+        ));
+    }
+
+    #[test]
+    fn deepseek_tool_history_replays_reasoning_content_and_non_null_content() {
+        let messages = vec![
+            json!({"role":"user","content":"检查编辑器"}),
+            json!({
+                "role":"assistant",
+                "content":null,
+                "reasoning_content":"需要读取编辑器状态。",
+                "tool_calls":[{
+                    "id":"snapshot-1",
+                    "type":"function",
+                    "function":{"name":"get_editor_snapshot","arguments":"{}"}
+                }]
+            }),
+            json!({"role":"tool","tool_call_id":"snapshot-1","content":"{}"}),
+        ];
+
+        let body = request_body(
+            "https://api.deepseek.com/v1",
+            "deepseek-v4-pro",
+            &messages,
+            &[json!({"type":"function","function":{"name":"get_editor_snapshot"}})],
+            ToolChoiceMode::Auto,
             true,
+        )
+        .unwrap();
+
+        assert_eq!(body["messages"][1]["content"], "");
+        assert_eq!(
+            body["messages"][1]["reasoning_content"],
+            "需要读取编辑器状态。"
         );
-        assert_eq!(body["thinking"]["type"], "disabled");
+        assert_eq!(
+            body["messages"][1]["tool_calls"][0]["function"]["name"],
+            "get_editor_snapshot"
+        );
+    }
+
+    #[test]
+    fn deepseek_rejects_tool_history_without_reasoning_content() {
+        let messages = vec![
+            json!({"role":"assistant","content":"","tool_calls":[{
+                "id":"snapshot-1",
+                "type":"function",
+                "function":{"name":"get_editor_snapshot","arguments":"{}"}
+            }]}),
+            json!({"role":"tool","tool_call_id":"snapshot-1","content":"{}"}),
+        ];
+
+        let tools = [json!({"type":"function","function":{"name":"get_editor_snapshot"}})];
+        let error = request_body(
+            "https://api.deepseek.com/v1",
+            "deepseek-v4-pro",
+            &messages,
+            &tools,
+            ToolChoiceMode::Auto,
+            true,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code, "llm_reasoning_history_incomplete");
+        assert!(request_body(
+            "https://example.com/v1",
+            "deepseek-v4-pro",
+            &messages,
+            &tools,
+            ToolChoiceMode::Auto,
+            true,
+        )
+        .is_ok());
     }
 
     #[derive(Clone)]
