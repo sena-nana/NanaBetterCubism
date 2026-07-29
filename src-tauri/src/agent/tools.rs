@@ -87,6 +87,19 @@ fn all_domain_tool_definitions() -> Vec<RegisteredTool> {
                 "required": ["operationId"]
             }),
         ),
+        mutating_tool(
+            "discard_editor_preview",
+            "放弃 Editor 编辑预览",
+            "丢弃尚未执行的 Editor 编辑预览。此操作不会取消已经开始的事务；运行中事务必须使用取消工具并查询真实终态。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "previewId": { "type": "string", "minLength": 1 }
+                },
+                "required": ["previewId"],
+                "additionalProperties": false
+            }),
+        ),
         read_tool(
             "get_parameter_batch_result",
             "查询参数修改结果",
@@ -884,6 +897,22 @@ async fn execute_tool_inner(
                 .await
                 .map_err(map_command_error)?;
             Ok(tool_result(serde_json::to_string_pretty(&preview)?))
+        }
+        "discard_editor_preview" => {
+            let preview_id = args
+                .get("previewId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| AgentError::new("invalid_arguments", "缺少 previewId"))?;
+            let discarded = editor.discard_preview(preview_id).await;
+            Ok(tool_result(
+                json!({
+                    "previewId": preview_id,
+                    "discarded": discarded,
+                })
+                .to_string(),
+            ))
         }
         "execute_parameter_batch" => {
             let preview_id = args

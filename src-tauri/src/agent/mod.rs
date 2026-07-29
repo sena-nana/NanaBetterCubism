@@ -133,7 +133,6 @@ pub struct AgentTurnState {
     pub computer_permission_denied: bool,
     pub awaiting_preview_ids: BTreeSet<String>,
     pub in_flight_operation_ids: BTreeSet<String>,
-    pub preview_failed: bool,
 }
 
 impl AgentTurnState {
@@ -145,14 +144,11 @@ impl AgentTurnState {
             computer_permission_denied: false,
             awaiting_preview_ids: BTreeSet::new(),
             in_flight_operation_ids: BTreeSet::new(),
-            preview_failed: false,
         }
     }
 
     pub fn has_pending_preview_obligation(&self) -> bool {
-        self.preview_failed
-            || !self.awaiting_preview_ids.is_empty()
-            || !self.in_flight_operation_ids.is_empty()
+        !self.awaiting_preview_ids.is_empty() || !self.in_flight_operation_ids.is_empty()
     }
 }
 
