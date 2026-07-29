@@ -22,6 +22,11 @@ and the official [54alpha EditSample](https://github.com/Live2D-Garage/CubismExt
 | Transaction | `EditBegin({Silent?}) -> {Result}` starts an edit. `EditEnd({Cancel?}) -> {Result}` commits or, when cancellation is confirmed, restores the pre-edit state. |
 | Edit feedback | `EditSendLog({Message})`, `EditSendProgress({Value: 0..1})`, and `NotifyUndoCancel({Enabled}) -> {Accepted}` with event `{Result}`. |
 
+Cubism model-owned identifiers use 1 to 63 single-byte letters, digits, or
+underscores and must not begin with a digit. Human-readable `Name` fields may
+use localized text. NanaBetterCubism validates identifiers before sending an
+Editor request and does not rewrite invalid identifiers.
+
 ## Stable instructions
 
 The following methods are available through API 0.9.x to 1.0.1 and remain

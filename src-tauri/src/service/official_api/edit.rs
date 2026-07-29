@@ -1,9 +1,9 @@
 use super::{
     read::session,
     schema::{
-        boolean, choice, color, common_object_edit_fields, integer, normalize_operations, number,
-        preview, string, strings, ToolSpec, ALPHA_BLENDS, COLOR_BLENDS, DEFORMER_MODES,
-        LABEL_COLORS,
+        boolean, choice, color, common_object_edit_fields, identifier, identifiers, integer,
+        normalize_operations, number, preview, string, ToolSpec, ALPHA_BLENDS, COLOR_BLENDS,
+        DEFORMER_MODES, LABEL_COLORS,
     },
     transaction::expected_ordered_move_positions,
     verification::{edit_precondition, precondition_snapshot, shared_precondition_snapshot},
@@ -23,8 +23,8 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "预览给对象添加参数关键点。",
             false,
             vec![
-                string("objectId", "ObjectId", true),
-                string("parameterId", "ParameterId", true),
+                identifier("objectId", "ObjectId", true),
+                identifier("parameterId", "ParameterId", true),
                 number("keyValue", "KeyValue", true, None, None),
             ],
         ),
@@ -35,8 +35,8 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "预览删除参数关键点。",
             true,
             vec![
-                string("objectId", "ObjectId", false),
-                string("parameterId", "ParameterId", false),
+                identifier("objectId", "ObjectId", false),
+                identifier("parameterId", "ParameterId", false),
                 boolean("strict", "Strict", false),
                 number("keyValue", "KeyValue", false, None, None),
             ],
@@ -48,8 +48,8 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "预览移动参数关键点。",
             true,
             vec![
-                string("objectId", "ObjectId", false),
-                string("parameterId", "ParameterId", false),
+                identifier("objectId", "ObjectId", false),
+                identifier("parameterId", "ParameterId", false),
                 number("fromValue", "FromValue", true, None, None),
                 number("toValue", "ToValue", true, None, None),
                 boolean("strict", "Strict", false),
@@ -64,8 +64,8 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             false,
             vec![
                 string("name", "Name", false),
-                string("id", "Id", false),
-                string("groupId", "GroupId", false),
+                identifier("id", "Id", false),
+                identifier("groupId", "GroupId", false),
                 number("min", "Min", false, None, None),
                 number("default", "Default", false, None, None),
                 number("max", "Max", false, None, None),
@@ -78,7 +78,10 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "AddParameterGroup",
             "预览添加参数组。",
             false,
-            vec![string("name", "Name", false), string("id", "Id", false)],
+            vec![
+                string("name", "Name", false),
+                identifier("id", "Id", false),
+            ],
         ),
         preview(
             "preview_edit_parameter",
@@ -87,8 +90,8 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "预览编辑参数定义。",
             false,
             vec![
-                string("id", "Id", true),
-                string("newId", "NewId", false),
+                identifier("id", "Id", true),
+                identifier("newId", "NewId", false),
                 string("name", "Name", false),
                 number("min", "Min", false, None, None),
                 number("default", "Default", false, None, None),
@@ -103,8 +106,8 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "预览编辑参数组。",
             false,
             vec![
-                string("id", "Id", true),
-                string("newId", "NewId", false),
+                identifier("id", "Id", true),
+                identifier("newId", "NewId", false),
                 string("name", "Name", false),
                 choice("labelColorType", "LabelColorType", false, LABEL_COLORS),
                 color("labelCustomColor", "LabelCustomColor", false),
@@ -116,7 +119,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "DeleteParameter",
             "预览删除参数。",
             true,
-            vec![string("id", "Id", true)],
+            vec![identifier("id", "Id", true)],
         ),
         preview(
             "preview_delete_parameter_group",
@@ -124,7 +127,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "DeleteParameterGroup",
             "预览删除参数组。",
             true,
-            vec![string("id", "Id", true)],
+            vec![identifier("id", "Id", true)],
         ),
         preview(
             "preview_move_parameter",
@@ -133,8 +136,8 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "预览移动参数到参数组及指定位置。用于把已存在的参数迁入或迁出参数组。",
             true,
             vec![
-                string("id", "Id", true),
-                string("groupId", "GroupId", true),
+                identifier("id", "Id", true),
+                identifier("groupId", "GroupId", true),
                 integer("insertIndex", "InsertIndex", false, 0, i32::MAX as i64),
             ],
         ),
@@ -145,7 +148,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "预览移动参数组顺序。",
             true,
             vec![
-                string("id", "Id", true),
+                identifier("id", "Id", true),
                 integer("insertIndex", "InsertIndex", true, 0, i32::MAX as i64),
             ],
         ),
@@ -155,7 +158,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "AddSelectedObjects",
             "预览把对象加入当前选择。",
             false,
-            vec![strings("ids", "Ids", false)],
+            vec![identifiers("ids", "Ids", false)],
         ),
         preview(
             "preview_clear_selected_objects",
@@ -171,7 +174,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "DeleteObject",
             "预览从 Part 面板删除对象。",
             true,
-            vec![string("id", "Id", true)],
+            vec![identifier("id", "Id", true)],
         ),
         preview(
             "preview_move_object_on_parts_palette",
@@ -180,9 +183,9 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "预览移动 Part 面板中的对象。",
             true,
             vec![
-                string("id", "Id", true),
-                string("parentId", "ParentId", false),
-                string("insertId", "InsertId", false),
+                identifier("id", "Id", true),
+                identifier("parentId", "ParentId", false),
+                identifier("insertId", "InsertId", false),
                 integer("insertIndex", "InsertIndex", false, 0, i32::MAX as i64),
             ],
         ),
@@ -194,9 +197,9 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             false,
             vec![
                 string("name", "Name", false),
-                string("id", "Id", true),
+                identifier("id", "Id", true),
                 number("drawOrder", "DrawOrder", false, Some(0.0), Some(1000.0)),
-                strings("ids", "Ids", false),
+                identifiers("ids", "Ids", false),
                 boolean("isNested", "IsNested", false),
             ],
         ),
@@ -206,7 +209,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
         boolean("isGrouped", "IsGrouped", false),
         boolean("isGuidImage", "IsGuidImage", false),
         boolean("isOffscreen", "IsOffscreen", false),
-        strings("clippingIds", "ClippingIds", false),
+        identifiers("clippingIds", "ClippingIds", false),
         boolean("isReverseMask", "IsReverseMask", false),
         number("drawOrder", "DrawOrder", false, Some(0.0), Some(1000.0)),
         number("opacity", "Opacity", false, Some(0.0), Some(100.0)),
@@ -228,8 +231,8 @@ pub(super) fn specs() -> Vec<ToolSpec> {
 
     let mut edit_art_mesh = common_object_edit_fields("IsExactMatch");
     edit_art_mesh.extend([
-        string("parentDeformerId", "ParentDeformerId", false),
-        strings("clippingIds", "ClippingIds", false),
+        identifier("parentDeformerId", "ParentDeformerId", false),
+        identifiers("clippingIds", "ClippingIds", false),
         boolean("isReverseMask", "IsReverseMask", false),
         number("drawOrder", "DrawOrder", false, Some(0.0), Some(1000.0)),
         number("opacity", "Opacity", false, Some(0.0), Some(100.0)),
@@ -267,9 +270,9 @@ pub(super) fn specs() -> Vec<ToolSpec> {
 
     let add_deformer = vec![
         string("name", "Name", false),
-        string("id", "Id", true),
-        string("parentId", "ParentId", false),
-        strings("targetObjectIds", "TargetObjectIds", false),
+        identifier("id", "Id", true),
+        identifier("parentId", "ParentId", false),
+        identifiers("targetObjectIds", "TargetObjectIds", false),
         choice("mode", "Mode", false, DEFORMER_MODES),
     ];
     specs.push(preview(
@@ -300,7 +303,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
 
     let mut edit_rotation = common_object_edit_fields("isExactMatch");
     edit_rotation.extend([
-        string("parentDeformerId", "ParentDeformerId", false),
+        identifier("parentDeformerId", "ParentDeformerId", false),
         number("angle", "Angle", false, None, None),
         number("baseAngle", "BaseAngle", false, None, None),
         number("scale", "Scale", false, None, None),
@@ -321,7 +324,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
 
     let mut edit_warp = common_object_edit_fields("isExactMatch");
     edit_warp.extend([
-        string("parentDeformerId", "ParentDeformerId", false),
+        identifier("parentDeformerId", "ParentDeformerId", false),
         number("opacity", "Opacity", false, Some(0.0), Some(100.0)),
         color("multiplyColor", "MultiplyColor", false),
         color("screenColor", "ScreenColor", false),

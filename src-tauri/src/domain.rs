@@ -689,8 +689,11 @@ pub fn expand_template(
         .replace("{suffix}", &config.suffix))
 }
 
+pub const CUBISM_ID_MAX_LEN: usize = 63;
+pub const CUBISM_ID_PATTERN: &str = "^[A-Za-z_][A-Za-z0-9_]{0,62}$";
+
 pub fn validate_identifier(id: &str) -> Result<(), String> {
-    if id.is_empty() || id.len() > 63 {
+    if id.is_empty() || id.len() > CUBISM_ID_MAX_LEN {
         return Err("ID 长度必须在 1 到 63 个单字节字符之间。".into());
     }
     if id.as_bytes()[0].is_ascii_digit() {
