@@ -1072,17 +1072,11 @@ fn resolve_preview_obligation(
                 return false;
             }
             match json_str(content, "outcome").as_deref() {
-                Some(
-                    "committed"
-                    | "cancelled_rolled_back"
-                    | "failed"
-                    | "failed_rolled_back"
-                    | "unknown",
-                ) => {
+                Some("committed" | "cancelled_rolled_back" | "failed" | "failed_rolled_back") => {
                     state.in_flight_operation_ids.remove(&operation_id);
                     false
                 }
-                Some("running") => false,
+                Some("running" | "unknown") => false,
                 Some(_) | None => true,
             }
         }
@@ -1592,13 +1586,12 @@ mod tests {
     }
 
     #[test]
-    fn every_real_terminal_outcome_clears_the_running_obligation() {
+    fn confirmed_terminal_outcomes_clear_the_running_obligation() {
         for outcome in [
             "committed",
             "cancelled_rolled_back",
             "failed",
             "failed_rolled_back",
-            "unknown",
         ] {
             let mut state = AgentTurnState::new(Vec::new(), AgentTurnMode::Default);
             state.in_flight_operation_ids.insert("op-1".into());
@@ -1615,6 +1608,24 @@ mod tests {
                 "{outcome} must be reportable as a terminal result"
             );
         }
+    }
+
+    #[test]
+    fn unknown_outcome_keeps_the_running_obligation() {
+        let mut state = AgentTurnState::new(Vec::new(), AgentTurnMode::Default);
+        state.in_flight_operation_ids.insert("op-1".into());
+
+        assert!(!resolve_preview_obligation(
+            &mut state,
+            "get_editor_edit_result",
+            r#"{"operationId":"op-1"}"#,
+            &tool_ok(r#"{"operationId":"op-1","outcome":"unknown"}"#),
+        ));
+        assert!(state.has_pending_preview_obligation());
+        assert_eq!(
+            tool_choice_for_turn(AgentTurnMode::Default, &state),
+            ToolChoiceMode::Required
+        );
     }
 
     #[test]
