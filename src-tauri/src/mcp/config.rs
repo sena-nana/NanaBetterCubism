@@ -1,6 +1,6 @@
 use crate::agent::AgentError;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use uuid::Uuid;
 
 pub(crate) const DEFAULT_MCP_PORT: u16 = 3920;
@@ -40,6 +40,7 @@ pub struct McpConfigInput {
 pub enum McpRunState {
     Stopped,
     Starting,
+    Stopping,
     Running,
     Failed,
 }

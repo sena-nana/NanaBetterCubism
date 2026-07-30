@@ -72,7 +72,7 @@ impl ServerHandler for CubismMcpHandler {
 
 pub(crate) struct HttpServerTask {
     pub cancellation: CancellationToken,
-    pub join: tokio::task::JoinHandle<()>,
+    pub join: tokio::task::JoinHandle<Result<(), String>>,
 }
 
 pub(crate) async fn bind_and_serve(
@@ -116,12 +116,31 @@ pub(crate) async fn bind_and_serve(
     let join = tokio::spawn({
         let cancellation = cancellation.clone();
         async move {
-            let _ = axum::serve(listener, router)
+            axum::serve(listener, router)
                 .with_graceful_shutdown(async move { cancellation.cancelled_owned().await })
-                .await;
+                .await
+                .map_err(|error| format!("MCP Server 运行失败：{error}"))
         }
     });
 
+    Ok(HttpServerTask { cancellation, join })
+}
+
+#[cfg(test)]
+pub(crate) async fn bind_test_server(port: u16) -> Result<HttpServerTask, String> {
+    let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port)))
+        .await
+        .map_err(|error| error.to_string())?;
+    let cancellation = CancellationToken::new();
+    let join = tokio::spawn({
+        let cancellation = cancellation.clone();
+        async move {
+            axum::serve(listener, Router::new())
+                .with_graceful_shutdown(async move { cancellation.cancelled_owned().await })
+                .await
+                .map_err(|error| error.to_string())
+        }
+    });
     Ok(HttpServerTask { cancellation, join })
 }
 

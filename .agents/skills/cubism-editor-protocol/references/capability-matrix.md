@@ -22,6 +22,11 @@ and the official [54alpha EditSample](https://github.com/Live2D-Garage/CubismExt
 | Transaction | `EditBegin({Silent?}) -> {Result}` starts an edit. `EditEnd({Cancel?}) -> {Result}` commits or, when cancellation is confirmed, restores the pre-edit state. |
 | Edit feedback | `EditSendLog({Message})`, `EditSendProgress({Value: 0..1})`, and `NotifyUndoCancel({Enabled}) -> {Accepted}` with event `{Result}`. |
 
+NanaBetterCubism reports `failed` only when the transaction did not begin and
+`failed_rolled_back` only after `EditEnd({Cancel: true})` confirms recovery.
+`unknown` means commit or rollback could not be confirmed; it is not a terminal
+success or recovery state and does not release the active operation obligation.
+
 Cubism model-owned identifiers use 1 to 63 single-byte letters, digits, or
 underscores and must not begin with a digit. Human-readable `Name` fields may
 use localized text. NanaBetterCubism validates identifiers before sending an

@@ -160,12 +160,11 @@ pub(crate) async fn call_mcp_tool(
         "detach_psd" => {
             let psd_id = required_string(&args, "psdId")?;
             let mut documents = context.psd_documents.lock().unwrap();
-            let before = documents.len();
-            documents.retain(|document| document.id != psd_id);
-            if documents.len() == before {
+            if !documents.iter().any(|document| document.id == psd_id) {
                 return Err(AgentError::new("psd_unavailable", "未找到该 PSD。"));
             }
             context.psd.discard(&psd_id, MCP_PSD_SESSION)?;
+            documents.retain(|document| document.id != psd_id);
             Ok(CallToolResult::success(vec![ContentBlock::text(
                 "已移除 PSD。",
             )]))

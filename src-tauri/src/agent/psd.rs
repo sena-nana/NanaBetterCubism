@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 pub const MAX_PSD_BYTES: u64 = 100 * 1024 * 1024;
 pub const MAX_PSD_DOCUMENTS_PER_CONVERSATION: usize = 8;
+const MAX_PSD_LAYER_CACHE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_PSD_LAYER_CACHE_FILES: usize = 4096;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -129,11 +131,44 @@ impl PsdService {
     }
 
     fn conversation_dir(&self, conversation_id: &str) -> Result<PathBuf, AgentError> {
+        validate_storage_id(conversation_id)?;
         Ok(self.data_dir()?.join("chat-psd").join(conversation_id))
     }
 
     fn cache_dir(&self) -> Result<PathBuf, AgentError> {
         Ok(self.data_dir()?.join("cache").join("psd-layers"))
+    }
+
+    fn cache_document_dir(
+        &self,
+        conversation_id: &str,
+        psd_id: &str,
+    ) -> Result<PathBuf, AgentError> {
+        validate_storage_id(conversation_id)?;
+        validate_storage_id(psd_id)?;
+        Ok(self.cache_dir()?.join(conversation_id).join(psd_id))
+    }
+
+    fn ensure_managed_dir(&self, relative: &[&str]) -> Result<PathBuf, AgentError> {
+        let mut path = self.data_dir()?.to_path_buf();
+        for segment in relative {
+            validate_storage_id(segment)?;
+            path.push(segment);
+            match std::fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                    return Err(AgentError::new(
+                        "psd_unsafe_path",
+                        "PSD 存储路径不安全，已拒绝访问。",
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::create_dir(&path).map_err(psd_io_error)?;
+                }
+                Err(error) => return Err(psd_io_error(error)),
+            }
+        }
+        Ok(path)
     }
 
     pub fn load(
@@ -157,8 +192,7 @@ impl PsdService {
             .map_err(|_| AgentError::new("psd_unreadable", "无法读取该 PSD 文件。"))?;
         let structure = parse_psd(&bytes)?;
         let psd_id = new_id();
-        let directory = self.conversation_dir(conversation_id)?;
-        std::fs::create_dir_all(&directory).map_err(psd_io_error)?;
+        let directory = self.ensure_managed_dir(&["chat-psd", conversation_id])?;
         let stored_path = directory.join(format!("{psd_id}.psd"));
         std::fs::write(&stored_path, &bytes).map_err(psd_io_error)?;
         let name = source
@@ -194,14 +228,20 @@ impl PsdService {
         layer_id: &str,
     ) -> Result<String, AgentError> {
         let path = self.resolve_path(psd_id, conversation_id)?;
+        let index: usize = layer_id
+            .parse()
+            .map_err(|_| AgentError::new("invalid_arguments", "layerId 无效。"))?;
+        let out = self
+            .cache_document_dir(conversation_id, psd_id)?
+            .join(format!("{index}.png"));
+        if managed_regular_file_exists(&out)? {
+            return Ok(out.to_string_lossy().into_owned());
+        }
         let bytes = std::fs::read(&path).map_err(|_| {
             AgentError::new("psd_unavailable", "PSD 文件已失效，请重新添加。")
         })?;
         let layers = rawpsd::parse_layer_records(&bytes)
             .map_err(|_| AgentError::new("psd_invalid_data", "无法解析该 PSD 文件。"))?;
-        let index: usize = layer_id
-            .parse()
-            .map_err(|_| AgentError::new("invalid_arguments", "layerId 无效。"))?;
         let layer = layers
             .get(index)
             .ok_or_else(|| AgentError::new("invalid_arguments", "未找到该图层。"))?;
@@ -224,18 +264,17 @@ impl PsdService {
             },
         };
         let png = encode_rgba_png(&rgba, width, height)?;
-        let cache = self.cache_dir()?;
-        std::fs::create_dir_all(&cache).map_err(psd_io_error)?;
-        let out = cache.join(format!("{}-{}-{}.png", psd_id, layer_id, new_id()));
-        std::fs::write(&out, &png).map_err(psd_io_error)?;
-        Ok(out.to_string_lossy().into_owned())
+        self.store_layer_cache(conversation_id, psd_id, index, &png)
     }
 
     pub fn discard(&self, psd_id: &str, conversation_id: &str) -> Result<(), AgentError> {
-        if let Some(path) = self.stored_path(psd_id, conversation_id) {
-            if path.exists() {
-                std::fs::remove_file(path).map_err(psd_io_error)?;
-            }
+        let path = self.stored_path(psd_id, conversation_id)?;
+        let cache = self.cache_document_dir(conversation_id, psd_id)?;
+        remove_managed_path(&cache)?;
+        remove_legacy_layer_cache(&self.cache_dir()?, &[psd_id.to_string()])?;
+        remove_managed_path(&path)?;
+        if let Some(parent) = path.parent() {
+            remove_empty_dir(parent)?;
         }
         Ok(())
     }
@@ -245,26 +284,224 @@ impl PsdService {
             return Ok(());
         }
         let dir = self.conversation_dir(conversation_id)?;
-        if dir.exists() {
-            std::fs::remove_dir_all(dir).map_err(psd_io_error)?;
-        }
-        Ok(())
+        let psd_ids = stored_psd_ids(&dir)?;
+        let cache_root = self.cache_dir()?;
+        let mut first_error = None;
+        remember_cleanup_error(
+            &mut first_error,
+            remove_managed_path(&cache_root.join(conversation_id)),
+        );
+        remember_cleanup_error(
+            &mut first_error,
+            remove_legacy_layer_cache(&cache_root, &psd_ids),
+        );
+        remember_cleanup_error(&mut first_error, remove_managed_path(&dir));
+        first_error.map_or(Ok(()), Err)
     }
 
-    fn stored_path(&self, psd_id: &str, conversation_id: &str) -> Option<PathBuf> {
-        let dir = self.conversation_dir(conversation_id).ok()?;
-        Some(dir.join(format!("{psd_id}.psd")))
+    fn store_layer_cache(
+        &self,
+        conversation_id: &str,
+        psd_id: &str,
+        layer_index: usize,
+        png: &[u8],
+    ) -> Result<String, AgentError> {
+        let directory =
+            self.ensure_managed_dir(&["cache", "psd-layers", conversation_id, psd_id])?;
+        let out = directory.join(format!("{layer_index}.png"));
+        if managed_regular_file_exists(&out)? {
+            return Ok(out.to_string_lossy().into_owned());
+        }
+        let cache_root = self.cache_dir()?;
+        let (bytes, files) = managed_usage(&cache_root)?;
+        let next_bytes = bytes.saturating_add(png.len() as u64);
+        let next_files = files.saturating_add(1);
+        if next_bytes > MAX_PSD_LAYER_CACHE_BYTES || next_files > MAX_PSD_LAYER_CACHE_FILES {
+            return Err(AgentError::new(
+                "psd_cache_limit",
+                "PSD 图层缓存空间已满，请移除不再使用的 PSD。",
+            ));
+        }
+        let temporary = directory.join(format!(".{layer_index}-{}.tmp", new_id()));
+        std::fs::write(&temporary, png).map_err(psd_io_error)?;
+        match managed_regular_file_exists(&out) {
+            Ok(true) => {
+                let _ = std::fs::remove_file(&temporary);
+            }
+            Ok(false) => {
+                if let Err(error) = std::fs::rename(&temporary, &out) {
+                    let _ = std::fs::remove_file(&temporary);
+                    if !managed_regular_file_exists(&out)? {
+                        return Err(psd_io_error(error));
+                    }
+                }
+            }
+            Err(error) => {
+                let _ = std::fs::remove_file(&temporary);
+                return Err(error);
+            }
+        }
+        Ok(out.to_string_lossy().into_owned())
+    }
+
+    fn stored_path(&self, psd_id: &str, conversation_id: &str) -> Result<PathBuf, AgentError> {
+        validate_storage_id(psd_id)?;
+        Ok(self
+            .conversation_dir(conversation_id)?
+            .join(format!("{psd_id}.psd")))
     }
 
     fn resolve_path(&self, psd_id: &str, conversation_id: &str) -> Result<PathBuf, AgentError> {
-        let path = self
-            .stored_path(psd_id, conversation_id)
-            .ok_or_else(|| AgentError::new("psd_store_unavailable", "PSD 存储尚未初始化。"))?;
-        if !path.is_file() {
-            return Err(AgentError::new("psd_unavailable", "PSD 文件已失效，请重新添加。"));
+        let path = self.stored_path(psd_id, conversation_id)?;
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Ok(path),
+            Ok(_) => Err(AgentError::new(
+                "psd_unsafe_path",
+                "PSD 存储路径不安全，已拒绝访问。",
+            )),
+            Err(_) => Err(AgentError::new(
+                "psd_unavailable",
+                "PSD 文件已失效，请重新添加。",
+            )),
         }
-        Ok(path)
     }
+}
+
+fn validate_storage_id(value: &str) -> Result<(), AgentError> {
+    if value.is_empty()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(AgentError::new(
+            "invalid_arguments",
+            "PSD 存储标识无效。",
+        ));
+    }
+    Ok(())
+}
+
+fn managed_regular_file_exists(path: &Path) -> Result<bool, AgentError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Ok(true),
+        Ok(_) => Err(AgentError::new(
+            "psd_unsafe_path",
+            "PSD 图层缓存路径不安全，已拒绝访问。",
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(psd_io_error(error)),
+    }
+}
+
+fn remove_managed_path(path: &Path) -> Result<(), AgentError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            std::fs::remove_dir_all(path).map_err(psd_io_error)
+        }
+        Ok(_) => std::fs::remove_file(path).map_err(psd_io_error),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(psd_io_error(error)),
+    }
+}
+
+fn remove_empty_dir(path: &Path) -> Result<(), AgentError> {
+    match std::fs::read_dir(path) {
+        Ok(mut entries) => {
+            if entries.next().is_none() {
+                std::fs::remove_dir(path).map_err(psd_io_error)
+            } else {
+                Ok(())
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(psd_io_error(error)),
+    }
+}
+
+fn stored_psd_ids(directory: &Path) -> Result<Vec<String>, AgentError> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(psd_io_error(error)),
+    };
+    let mut ids = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(psd_io_error)?;
+        let metadata = std::fs::symlink_metadata(entry.path()).map_err(psd_io_error)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        let Some(id) = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .filter(|id| validate_storage_id(id).is_ok())
+        else {
+            continue;
+        };
+        if path.extension().and_then(|value| value.to_str()) == Some("psd") {
+            ids.push(id.to_string());
+        }
+    }
+    Ok(ids)
+}
+
+fn remove_legacy_layer_cache(cache_root: &Path, psd_ids: &[String]) -> Result<(), AgentError> {
+    if psd_ids.is_empty() {
+        return Ok(());
+    }
+    let entries = match std::fs::read_dir(cache_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(psd_io_error(error)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(psd_io_error)?;
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path).map_err(psd_io_error)?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if name.ends_with(".png")
+            && psd_ids
+                .iter()
+                .any(|psd_id| name.starts_with(&format!("{psd_id}-")))
+        {
+            std::fs::remove_file(path).map_err(psd_io_error)?;
+        }
+    }
+    Ok(())
+}
+
+fn remember_cleanup_error(first_error: &mut Option<AgentError>, result: Result<(), AgentError>) {
+    if let Err(error) = result {
+        first_error.get_or_insert(error);
+    }
+}
+
+fn managed_usage(path: &Path) -> Result<(u64, usize), AgentError> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
+        Err(error) => return Err(psd_io_error(error)),
+    };
+    if metadata.file_type().is_symlink() {
+        return Ok((0, 0));
+    }
+    if metadata.is_file() {
+        return Ok((metadata.len(), 1));
+    }
+    let mut usage = (0u64, 0usize);
+    for entry in std::fs::read_dir(path).map_err(psd_io_error)? {
+        let child = entry.map_err(psd_io_error)?.path();
+        let child_usage = managed_usage(&child)?;
+        usage.0 = usage.0.saturating_add(child_usage.0);
+        usage.1 = usage.1.saturating_add(child_usage.1);
+    }
+    Ok(usage)
 }
 
 fn parse_psd(bytes: &[u8]) -> Result<PsdStructure, AgentError> {
@@ -600,5 +837,95 @@ mod tests {
         assert!(!json.contains("</Layer group>"));
         assert!(!json.contains("group_end"));
     }
-}
 
+    #[test]
+    fn layer_cache_is_reused_and_removed_with_its_owner() {
+        let data_dir = std::env::temp_dir().join(format!("nbc-psd-cache-{}", new_id()));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let source = data_dir.join("source.psd");
+        std::fs::write(&source, nested_group_psd_fixture()).unwrap();
+        let service = PsdService::new(Some(data_dir.clone()));
+
+        let (chat_document, _) = service.load("chat", &source.to_string_lossy()).unwrap();
+        let (mcp_document, _) = service.load("mcp", &source.to_string_lossy()).unwrap();
+        let first = service
+            .store_layer_cache("mcp", &mcp_document.id, 2, b"first")
+            .unwrap();
+        let repeated = service
+            .store_layer_cache("mcp", &mcp_document.id, 2, b"replacement")
+            .unwrap();
+        let chat_cache = service
+            .store_layer_cache("chat", &chat_document.id, 2, b"chat")
+            .unwrap();
+        let legacy_cache = service
+            .cache_dir()
+            .unwrap()
+            .join(format!("{}-2-legacy.png", mcp_document.id));
+        std::fs::write(&legacy_cache, b"legacy").unwrap();
+
+        assert_eq!(first, repeated);
+        assert_eq!(std::fs::read(&first).unwrap(), b"first");
+        assert_eq!(managed_usage(&service.cache_dir().unwrap()).unwrap().1, 3);
+
+        service.discard(&mcp_document.id, "mcp").unwrap();
+        assert!(!Path::new(&mcp_document.path).exists());
+        assert!(!Path::new(&first).exists());
+        assert!(!legacy_cache.exists());
+        assert!(Path::new(&chat_document.path).is_file());
+        assert!(Path::new(&chat_cache).is_file());
+
+        service.delete_conversation_psds("chat").unwrap();
+        assert!(!Path::new(&chat_document.path).exists());
+        assert!(!Path::new(&chat_cache).exists());
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn layer_cache_budget_rejects_unbounded_growth() {
+        let data_dir = std::env::temp_dir().join(format!("nbc-psd-budget-{}", new_id()));
+        let cache_root = data_dir.join("cache/psd-layers");
+        std::fs::create_dir_all(&cache_root).unwrap();
+        let oversized = std::fs::File::create(cache_root.join("existing.png")).unwrap();
+        oversized.set_len(MAX_PSD_LAYER_CACHE_BYTES).unwrap();
+        let service = PsdService::new(Some(data_dir.clone()));
+
+        let error = service
+            .store_layer_cache("chat", "document", 0, b"new")
+            .unwrap_err();
+        assert_eq!(error.code, "psd_cache_limit");
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn managed_psd_paths_reject_parent_and_symlink_escape() {
+        let data_dir = std::env::temp_dir().join(format!("nbc-psd-paths-{}", new_id()));
+        std::fs::create_dir_all(data_dir.join("chat-psd")).unwrap();
+        let service = PsdService::new(Some(data_dir.clone()));
+
+        assert_eq!(
+            service
+                .delete_conversation_psds("../outside")
+                .unwrap_err()
+                .code,
+            "invalid_arguments"
+        );
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(std::env::temp_dir(), data_dir.join("chat-psd").join("mcp"))
+                .unwrap();
+            let source = data_dir.join("source.psd");
+            std::fs::write(&source, nested_group_psd_fixture()).unwrap();
+            assert_eq!(
+                service
+                    .load("mcp", &source.to_string_lossy())
+                    .unwrap_err()
+                    .code,
+                "psd_unsafe_path"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+}

@@ -21,7 +21,13 @@ const showToken = ref(false);
 const loading = ref(true);
 const operation = ref<Operation | null>(null);
 const feedback = ref<Feedback | null>(null);
-const operationBusy = computed(() => loading.value || operation.value !== null);
+const operationBusy = computed(
+  () =>
+    loading.value ||
+    operation.value !== null ||
+    status.value?.state === "starting" ||
+    status.value?.state === "stopping",
+);
 
 let unlisten: (() => void) | null = null;
 
@@ -63,6 +69,8 @@ const stateLabel = computed(() => {
       return "运行中";
     case "starting":
       return "启动中";
+    case "stopping":
+      return "停止中";
     case "failed":
       return "失败";
     default:

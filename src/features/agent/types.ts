@@ -284,7 +284,7 @@ export interface AgentImageCapabilityEvent {
   reason?: string | null;
 }
 
-export type McpRunState = "stopped" | "starting" | "running" | "failed";
+export type McpRunState = "stopped" | "starting" | "stopping" | "running" | "failed";
 
 export interface McpStatus {
   state: McpRunState;
