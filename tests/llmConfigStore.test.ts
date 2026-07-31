@@ -11,6 +11,7 @@ const bridge = vi.hoisted(() => ({
 vi.mock("../src/features/agent/bridge", () => bridge);
 
 const completeConfig = {
+  apiMode: "chat_completions" as const,
   baseUrl: "https://api.example.test/v1",
   model: "example-model",
   hasApiKey: true,
@@ -72,6 +73,7 @@ describe("共享模型连接状态", () => {
 
   it("API 已配置但未选模型时保持待选择且不发起自动检查", async () => {
     bridge.getLlmConfig.mockResolvedValue({
+      apiMode: "chat_completions",
       baseUrl: "https://api.example.test/v1",
       model: null,
       hasApiKey: true,
@@ -163,7 +165,7 @@ describe("共享模型连接状态", () => {
 
     const initializing = store.initialize();
     await vi.waitFor(() => expect(store.state.connectionStatus).toBe("checking"));
-    store.applyConfig({ ...completeConfig, model: "next-model" });
+    store.applyConfig({ ...completeConfig, apiMode: "responses" });
     resolveCheck(successfulCheck);
     await initializing;
 

@@ -22,6 +22,7 @@ vi.mock("../src/features/agent/bridge", () => ({
 }));
 
 const endpointConfig = {
+  apiMode: "chat_completions" as const,
   baseUrl: "https://api.example.test/v1",
   model: null,
   hasApiKey: true,
@@ -158,6 +159,36 @@ describe("模型配置", () => {
     );
 
     expect(screen.queryByRole("combobox", { name: "模型" })).toBeNull();
+  });
+
+  it("切换 API 类型后清除模型并保存新类型", async () => {
+    bridge.setLlmConfig
+      .mockResolvedValueOnce(endpointConfig)
+      .mockResolvedValueOnce({
+        ...endpointConfig,
+        apiMode: "responses",
+      });
+    const { store } = await renderSettings();
+    await fireEvent.click(screen.getByRole("button", { name: "测试 API 连接" }));
+    await screen.findByRole("combobox", { name: "模型" });
+
+    await fireEvent.update(
+      screen.getByRole("combobox", { name: "API 类型" }),
+      "responses",
+    );
+
+    expect(screen.queryByRole("combobox", { name: "模型" })).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(bridge.setLlmConfig).toHaveBeenCalledTimes(2));
+    expect(bridge.setLlmConfig.mock.calls[1]?.[0]).toMatchObject({
+      apiMode: "responses",
+      model: null,
+    });
+    expect(store.state.config).toMatchObject({
+      apiMode: "responses",
+      model: null,
+    });
+    expect(store.state.connectionStatus).toBe("model_required");
   });
 
   it("保存完整配置后立即将共享状态标记为过期", async () => {

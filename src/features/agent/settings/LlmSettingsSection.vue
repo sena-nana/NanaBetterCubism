@@ -3,11 +3,12 @@ import { Button, Card, Input, Select } from "../../../ui";
 import { computed, onMounted, ref } from "vue";
 import { normalizeCommandError, setLlmConfig } from "../bridge";
 import { useLlmConfigStore } from "../llmConfigStore";
-import type { LlmConfigView, LlmTestResult } from "../types";
+import type { LlmApiMode, LlmConfigView, LlmTestResult } from "../types";
 
 type Operation = "save" | "api-test" | "model-test" | "clear";
 type Feedback = { text: string; tone: "ok" | "err" };
 
+const apiMode = ref<LlmApiMode>("chat_completions");
 const baseUrl = ref("");
 const apiKey = ref("");
 const selectedModel = ref("");
@@ -21,6 +22,10 @@ const testResult = ref<LlmTestResult | null>(null);
 const availableModels = ref<string[]>([]);
 const llmConfig = useLlmConfigStore();
 const operationBusy = computed(() => loading.value || operation.value !== null);
+const apiModeOptions = [
+  { label: "Chat Completions", value: "chat_completions" },
+  { label: "Responses", value: "responses" },
+];
 const modelOptions = computed(() =>
   availableModels.value.map((id) => ({ label: id, value: id })),
 );
@@ -36,12 +41,20 @@ onMounted(async () => {
 });
 
 function applyForm(config: LlmConfigView) {
+  apiMode.value = config.apiMode;
   baseUrl.value = config.baseUrl ?? "";
   selectedModel.value = config.model ?? "";
   contextWindow.value = config.contextWindow ? String(config.contextWindow) : "";
   maxInputTokens.value = config.maxInputTokens ? String(config.maxInputTokens) : "";
   hasApiKey.value = config.hasApiKey;
   apiKey.value = "";
+}
+
+function selectApiMode(value: string | number) {
+  apiMode.value = String(value) as LlmApiMode;
+  selectedModel.value = "";
+  resetResult();
+  llmConfig.invalidateConnection();
 }
 
 function updateEndpoint(field: "baseUrl" | "apiKey", value: string) {
@@ -68,10 +81,11 @@ function parsePositiveInt(value: string): number | null {
 async function persistConfig(options: { clearApiKey?: boolean; model?: string | null } = {}) {
   const clearApiKey = options.clearApiKey ?? false;
   const next = await setLlmConfig({
+    apiMode: apiMode.value,
     baseUrl: baseUrl.value.trim() || null,
     apiKey: clearApiKey ? null : apiKey.value.trim() || null,
     model: options.model === undefined
-      ? llmConfig.state.config.model
+      ? selectedModel.value.trim() || null
       : options.model?.trim() || null,
     clearApiKey,
     contextWindow: parsePositiveInt(contextWindow.value),
@@ -161,6 +175,18 @@ async function testSelectedModel() {
       <p class="card-description">配置 OpenAI 兼容 API。密钥仅保存在本机凭据库，不会回显。</p>
 
       <template v-if="!loading">
+        <label class="settings-field">
+          <span><strong>API 类型</strong><small>选择服务端实际支持的模型接口。</small></span>
+          <Select
+            :model-value="apiMode"
+            :options="apiModeOptions"
+            :disabled="operationBusy"
+            aria-label="API 类型"
+            agent-id="settings.llm.api-mode"
+            @update:model-value="selectApiMode"
+          />
+        </label>
+
         <label class="settings-field">
           <span><strong>Base URL</strong><small>例如 https://api.openai.com/v1 或本地兼容代理。</small></span>
           <Input

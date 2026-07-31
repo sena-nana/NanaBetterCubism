@@ -7,6 +7,8 @@ use crate::agent::psd::{ChatPsdDocument, PsdStructure};
 use crate::agent::runtime::{
     continue_after_computer_permission, continue_after_question, run_turn,
 };
+#[cfg(test)]
+use crate::agent::store::LlmApiMode;
 use crate::agent::store::{
     AgentStore, ChatMessage, ConversationPlan, ConversationSummary, LlmConfigInput,
     LlmConfigInternal, LlmConfigView, MemoryViewRecord, ProjectRecord,
@@ -88,6 +90,7 @@ fn persist_tested_model(
         return Ok(None);
     }
     let mut view = store.set_llm_config(LlmConfigInput {
+        api_mode: config.api_mode,
         base_url: config.base_url.clone(),
         api_key: None,
         model: config.model.clone(),
@@ -733,6 +736,7 @@ mod tests {
         store.open(":memory:".into()).unwrap();
         store
             .set_llm_config(LlmConfigInput {
+                api_mode: LlmApiMode::ChatCompletions,
                 base_url: Some("https://example.test/v1".into()),
                 api_key: None,
                 model: Some("saved-model".into()),
@@ -742,6 +746,7 @@ mod tests {
             })
             .unwrap();
         let candidate = LlmConfigInternal {
+            api_mode: LlmApiMode::ChatCompletions,
             base_url: Some("https://example.test/v1".into()),
             api_key: None,
             model: Some("candidate-model".into()),
@@ -763,6 +768,7 @@ mod tests {
         let store = AgentStore::default();
         store.open(":memory:".into()).unwrap();
         let candidate = LlmConfigInternal {
+            api_mode: LlmApiMode::Responses,
             base_url: Some("https://example.test/v1".into()),
             api_key: None,
             model: Some("candidate-model".into()),
@@ -785,6 +791,7 @@ mod tests {
     #[test]
     fn llm_config_view_serializes_image_input_supported_camel_case() {
         let view = LlmConfigView {
+            api_mode: LlmApiMode::Responses,
             base_url: Some("https://example.com".into()),
             model: Some("mock".into()),
             has_api_key: true,

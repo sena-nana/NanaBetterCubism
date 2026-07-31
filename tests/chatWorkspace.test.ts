@@ -47,7 +47,12 @@ const bridge = vi.hoisted(() => ({
   cancelTurn: vi.fn(async () => ({ state: "idle" as const })),
   decideComputerPermission: vi.fn(async () => undefined),
   decidePlan: vi.fn(async () => "execution_started" as const),
-  getLlmConfig: vi.fn(async () => ({ baseUrl: null, model: "test-model", hasApiKey: true })),
+  getLlmConfig: vi.fn(async () => ({
+    apiMode: "chat_completions" as const,
+    baseUrl: null,
+    model: "test-model",
+    hasApiKey: true,
+  })),
   getMessages: vi.fn(),
   getComputerPermission: vi.fn(async () => "not_granted" as const),
   getPendingUserAction: vi.fn(async () => null),
@@ -111,6 +116,7 @@ const bridge = vi.hoisted(() => ({
 vi.mock("../src/features/agent/bridge", () => bridge);
 
 const completeLlmConfig = {
+  apiMode: "chat_completions" as const,
   baseUrl: "https://api.example.test/v1",
   model: "test-model",
   hasApiKey: true,

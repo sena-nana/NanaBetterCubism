@@ -26,6 +26,7 @@ interface LlmConfigState {
 }
 
 const defaultConfig: LlmConfigView = {
+  apiMode: "chat_completions",
   baseUrl: null,
   model: null,
   hasApiKey: false,

@@ -106,6 +106,8 @@ pub struct MemoryViewRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmConfigView {
+    #[serde(default)]
+    pub api_mode: LlmApiMode,
     pub base_url: Option<String>,
     pub model: Option<String>,
     pub has_api_key: bool,
@@ -120,6 +122,8 @@ pub struct LlmConfigView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmConfigInput {
+    #[serde(default)]
+    pub api_mode: LlmApiMode,
     pub base_url: Option<String>,
     pub api_key: Option<String>,
     pub model: Option<String>,
@@ -134,6 +138,8 @@ pub struct LlmConfigInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmConfigInternal {
+    #[serde(default)]
+    pub api_mode: LlmApiMode,
     pub base_url: Option<String>,
     pub model: Option<String>,
     pub api_key: Option<String>,
@@ -141,6 +147,31 @@ pub struct LlmConfigInternal {
     pub context_window: Option<u32>,
     #[serde(default)]
     pub max_input_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmApiMode {
+    #[default]
+    ChatCompletions,
+    Responses,
+}
+
+impl LlmApiMode {
+    fn as_storage_value(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "chat_completions",
+            Self::Responses => "responses",
+        }
+    }
+
+    fn from_storage_value(value: &str) -> Result<Self, AgentError> {
+        match value {
+            "chat_completions" => Ok(Self::ChatCompletions),
+            "responses" => Ok(Self::Responses),
+            _ => Err(AgentError::new("store_error", "模型 API 类型配置无效。")),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -231,6 +262,7 @@ impl AgentStore {
             );
             CREATE TABLE IF NOT EXISTS llm_config (
               id INTEGER PRIMARY KEY CHECK (id = 1),
+              api_mode TEXT NOT NULL DEFAULT 'chat_completions',
               base_url TEXT,
               model TEXT
             );
@@ -259,6 +291,12 @@ impl AgentStore {
             "messages",
             "attachments_json",
             "TEXT NOT NULL DEFAULT '[]'",
+        )?;
+        ensure_column(
+            &conn,
+            "llm_config",
+            "api_mode",
+            "TEXT NOT NULL DEFAULT 'chat_completions'",
         )?;
         ensure_column(&conn, "llm_config", "context_window", "INTEGER")?;
         ensure_column(&conn, "llm_config", "max_input_tokens", "INTEGER")?;
@@ -1278,24 +1316,33 @@ impl AgentStore {
     }
 
     pub fn get_llm_config(&self) -> Result<LlmConfigInternal, AgentError> {
-        let (base_url, model, context_window, max_input_tokens) = self.with_conn(|conn| {
+        let (api_mode, base_url, model, context_window, max_input_tokens) =
+            self.with_conn(|conn| {
             let row = conn
                 .query_row(
-                    "SELECT base_url, model, context_window, max_input_tokens FROM llm_config WHERE id = 1",
+                    "SELECT api_mode, base_url, model, context_window, max_input_tokens FROM llm_config WHERE id = 1",
                     [],
                     |row| {
                         Ok((
-                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, String>(0)?,
                             row.get::<_, Option<String>>(1)?,
-                            row.get::<_, Option<i64>>(2)?,
+                            row.get::<_, Option<String>>(2)?,
                             row.get::<_, Option<i64>>(3)?,
+                            row.get::<_, Option<i64>>(4)?,
                         ))
                     },
                 )
                 .optional()?;
-            Ok(row.unwrap_or((None, None, None, None)))
+            Ok(row.unwrap_or((
+                "chat_completions".into(),
+                None,
+                None,
+                None,
+                None,
+            )))
         })?;
         Ok(LlmConfigInternal {
+            api_mode: LlmApiMode::from_storage_value(&api_mode)?,
             base_url,
             model,
             api_key: load_api_key(),
@@ -1307,6 +1354,7 @@ impl AgentStore {
     pub fn get_llm_config_view(&self) -> Result<LlmConfigView, AgentError> {
         let config = self.get_llm_config()?;
         Ok(LlmConfigView {
+            api_mode: config.api_mode,
             base_url: config.base_url,
             model: config.model,
             has_api_key: config
@@ -1326,15 +1374,22 @@ impl AgentStore {
         self.with_conn(|conn| {
             conn.execute(
                 r#"
-                INSERT INTO llm_config (id, base_url, model, context_window, max_input_tokens)
-                VALUES (1, ?1, ?2, ?3, ?4)
+                INSERT INTO llm_config (id, api_mode, base_url, model, context_window, max_input_tokens)
+                VALUES (1, ?1, ?2, ?3, ?4, ?5)
                 ON CONFLICT(id) DO UPDATE SET
+                  api_mode = excluded.api_mode,
                   base_url = excluded.base_url,
                   model = excluded.model,
                   context_window = excluded.context_window,
                   max_input_tokens = excluded.max_input_tokens
                 "#,
-                params![input.base_url, input.model, context_window, max_input_tokens],
+                params![
+                    input.api_mode.as_storage_value(),
+                    input.base_url,
+                    input.model,
+                    context_window,
+                    max_input_tokens
+                ],
             )?;
             Ok(())
         })?;
@@ -2629,11 +2684,13 @@ mod tests {
         let store = AgentStore::default();
         store.open(":memory:".into()).unwrap();
         let initial = store.get_llm_config_view().unwrap();
+        assert_eq!(initial.api_mode, LlmApiMode::ChatCompletions);
         assert!(initial.context_window.is_none());
         assert!(initial.max_input_tokens.is_none());
 
         let view = store
             .set_llm_config(LlmConfigInput {
+                api_mode: LlmApiMode::Responses,
                 base_url: Some("https://example.com/v1".into()),
                 api_key: None,
                 model: Some("mock".into()),
@@ -2642,16 +2699,19 @@ mod tests {
                 max_input_tokens: Some(100000),
             })
             .unwrap();
+        assert_eq!(view.api_mode, LlmApiMode::Responses);
         assert_eq!(view.context_window, Some(128000));
         assert_eq!(view.max_input_tokens, Some(100000));
 
         let internal = store.get_llm_config().unwrap();
+        assert_eq!(internal.api_mode, LlmApiMode::Responses);
         assert_eq!(internal.context_window, Some(128000));
         assert_eq!(internal.max_input_tokens, Some(100000));
 
         // 清空字段后持久化并重新读取
         let cleared = store
             .set_llm_config(LlmConfigInput {
+                api_mode: LlmApiMode::ChatCompletions,
                 base_url: Some("https://example.com/v1".into()),
                 api_key: None,
                 model: Some("mock".into()),
@@ -2660,6 +2720,7 @@ mod tests {
                 max_input_tokens: None,
             })
             .unwrap();
+        assert_eq!(cleared.api_mode, LlmApiMode::ChatCompletions);
         assert!(cleared.context_window.is_none());
         assert!(cleared.max_input_tokens.is_none());
         let internal_after = store.get_llm_config().unwrap();
@@ -2668,8 +2729,41 @@ mod tests {
     }
 
     #[test]
+    fn legacy_llm_config_migrates_to_chat_completions() {
+        let dir = std::env::temp_dir().join(format!("nbc-llm-config-migration-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("agent.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE llm_config (
+                  id INTEGER PRIMARY KEY CHECK (id = 1),
+                  base_url TEXT,
+                  model TEXT
+                );
+                INSERT INTO llm_config (id, base_url, model)
+                VALUES (1, 'https://example.test/v1', 'legacy-model');
+                "#,
+            )
+            .unwrap();
+        }
+
+        let store = AgentStore::default();
+        store.open(path.clone()).unwrap();
+        let config = store.get_llm_config().unwrap();
+
+        assert_eq!(config.api_mode, LlmApiMode::ChatCompletions);
+        assert_eq!(config.base_url.as_deref(), Some("https://example.test/v1"));
+        assert_eq!(config.model.as_deref(), Some("legacy-model"));
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn llm_config_view_serializes_budget_fields_camel_case() {
         let view = LlmConfigView {
+            api_mode: LlmApiMode::Responses,
             base_url: None,
             model: None,
             has_api_key: false,
@@ -2682,5 +2776,24 @@ mod tests {
         assert_eq!(value["maxInputTokens"], 50000);
         assert!(value.get("context_window").is_none());
         assert!(value.get("max_input_tokens").is_none());
+    }
+
+    #[test]
+    fn llm_config_rejects_unknown_api_mode() {
+        let store = AgentStore::default();
+        store.open(":memory:".into()).unwrap();
+        store
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO llm_config (id, api_mode) VALUES (1, 'unknown')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let error = store.get_llm_config().unwrap_err();
+
+        assert_eq!(error.code, "store_error");
     }
 }
