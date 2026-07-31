@@ -1,4 +1,4 @@
-use crate::agent::llm::{chat_completions, content_to_text};
+use crate::agent::llm::{complete, content_to_text};
 use crate::agent::{emit_conversations_changed, AgentRuntime};
 use serde_json::json;
 use std::sync::Arc;
@@ -17,7 +17,7 @@ pub async fn generate_conversation_title(
         return;
     };
     let input: String = user_text.chars().take(200).collect();
-    let Ok(message) = chat_completions(
+    let Ok(message) = complete(
         &config,
         &[
             json!({ "role": "system", "content": TITLE_PROMPT }),

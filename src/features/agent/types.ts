@@ -149,7 +149,10 @@ export interface MemoryRecord {
   revision: number;
 }
 
+export type LlmApiMode = "chat_completions" | "responses";
+
 export interface LlmConfigView {
+  apiMode: LlmApiMode;
   baseUrl: string | null;
   model: string | null;
   hasApiKey: boolean;
@@ -159,6 +162,7 @@ export interface LlmConfigView {
 }
 
 export interface LlmConfigInput {
+  apiMode: LlmApiMode;
   baseUrl: string | null;
   apiKey: string | null;
   model: string | null;

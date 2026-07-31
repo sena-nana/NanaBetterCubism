@@ -1,7 +1,7 @@
 use crate::agent::computer_control::ComputerOperationStatus;
 use crate::agent::llm::{
-    chat_completions_stream, content_to_text, image_file_to_data_url, ChatStreamDelta,
-    ToolCallPayload, ToolChoiceMode,
+    complete_stream, content_to_text, image_file_to_data_url, ChatStreamDelta, ToolCallPayload,
+    ToolChoiceMode,
 };
 use crate::agent::plan::{PendingPlanApproval, PlanApprovalAction};
 use crate::agent::psd::PsdAttachmentManifest;
@@ -328,8 +328,12 @@ async fn run_turn_inner(
         let mut ask_draft_streamed = false;
         let mut last_ask_draft = None;
         let assistant = {
-            match chat_completions_stream(&config, &state.messages, &tools, tool_choice, |delta| {
-                match delta {
+            match complete_stream(
+                &config,
+                &state.messages,
+                &tools,
+                tool_choice,
+                |delta| match delta {
                     ChatStreamDelta::Text(text) => {
                         if buffer_preview_text {
                             return;
@@ -355,8 +359,8 @@ async fn run_turn_inner(
                         last_ask_draft = Some(question);
                         ask_draft_streamed = true;
                     }
-                }
-            })
+                },
+            )
             .await
             {
                 Ok(message) => message,
@@ -929,6 +933,9 @@ fn assistant_tool_call_message(
     if let Some(reasoning_content) = &assistant.reasoning_content {
         message["reasoning_content"] = Value::String(reasoning_content.clone());
     }
+    if let Some(output) = &assistant.response_output {
+        message["__responses_output"] = Value::Array(output.clone());
+    }
     message
 }
 
@@ -1189,6 +1196,7 @@ mod tests {
             content: None,
             reasoning_content: Some("internal reasoning".into()),
             tool_calls: Some(calls.clone()),
+            response_output: None,
         };
         let messages =
             tool_batch_rejection_messages(&assistant, &calls, &tool_sequence_required_error());

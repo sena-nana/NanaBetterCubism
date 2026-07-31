@@ -1,4 +1,6 @@
-use crate::agent::llm::{chat_completions, content_to_text};
+use crate::agent::llm::{complete, content_to_text};
+#[cfg(test)]
+use crate::agent::store::LlmApiMode;
 use crate::agent::store::LlmConfigInternal;
 use crate::agent::AgentError;
 use serde_json::{json, Value};
@@ -467,7 +469,7 @@ fn llm_summarizer<'a>(
         let config = config.clone();
         let request = request.to_vec();
         Box::pin(async move {
-            let message = chat_completions(&config, &request, &[]).await?;
+            let message = complete(&config, &request, &[]).await?;
             Ok(content_to_text(&message.content))
         })
     }
@@ -656,6 +658,7 @@ mod tests {
     #[test]
     fn resolve_budget_defaults_to_256k_when_unconfigured() {
         let config = LlmConfigInternal {
+            api_mode: LlmApiMode::ChatCompletions,
             base_url: Some("http://unused/v1".into()),
             api_key: Some("test-key".into()),
             model: Some("mock-model".into()),
@@ -800,6 +803,7 @@ mod tests {
     #[tokio::test]
     async fn compact_under_budget_leaves_messages_untouched() {
         let config = LlmConfigInternal {
+            api_mode: LlmApiMode::ChatCompletions,
             base_url: Some("http://unused/v1".into()),
             api_key: Some("test-key".into()),
             model: Some("mock-model".into()),
@@ -821,6 +825,7 @@ mod tests {
     #[tokio::test]
     async fn compact_trims_tool_results_without_llm_when_sufficient() {
         let config = LlmConfigInternal {
+            api_mode: LlmApiMode::ChatCompletions,
             base_url: Some("http://unused/v1".into()),
             api_key: Some("test-key".into()),
             model: Some("mock-model".into()),
