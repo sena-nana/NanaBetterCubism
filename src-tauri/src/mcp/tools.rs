@@ -1,5 +1,9 @@
 use crate::agent::psd::{attachment_manifest, ChatPsdDocument, PsdService, MAX_PSD_DOCUMENTS_PER_CONVERSATION};
-use crate::agent::AgentError;
+use crate::agent::tools::{
+    all_tool_definitions, execute_tool, tool_name, ToolAccess as AgentToolAccess,
+    ToolExecutionContext, ToolOutcome,
+};
+use crate::agent::{AgentError, AgentRuntime, AgentTurnMode};
 use crate::service::official_api::{self, ToolAccess};
 use crate::service::{CommandError, EditorService};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
@@ -21,6 +25,10 @@ pub(crate) struct McpToolContext {
     pub psd: Arc<PsdService>,
     pub psd_documents: Arc<Mutex<Vec<ChatPsdDocument>>>,
     pub allow_writes: Arc<Mutex<bool>>,
+    pub agent_runtime: Option<Arc<AgentRuntime>>,
+    pub conversation_id: Option<String>,
+    pub turn_mode: Arc<Mutex<AgentTurnMode>>,
+    pub turn_cancel: Arc<Mutex<Arc<AtomicBool>>>,
 }
 
 #[derive(Clone)]
@@ -46,6 +54,115 @@ pub(crate) fn list_mcp_tools(allow_writes: bool) -> Vec<Tool> {
                 .with_annotations(annotations)
         })
         .collect()
+}
+
+pub(crate) fn list_internal_tools() -> Result<Vec<Tool>, AgentError> {
+    all_tool_definitions()?
+        .into_iter()
+        .filter(|definition| {
+            tool_name(definition).is_some_and(|name| {
+                !matches!(
+                    name,
+                    "ask_user"
+                        | "submit_plan"
+                        | "update_plan"
+                        | "read_skill"
+                        | "list_cubism_windows"
+                        | "request_computer_operation"
+                        | "capture_cubism_editor_window"
+                )
+            })
+        })
+        .map(|definition| {
+            let function = definition
+                .get("function")
+                .and_then(Value::as_object)
+                .ok_or_else(|| AgentError::new("invalid_tool_schema", "工具定义缺少 function。"))?;
+            let name = function
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| AgentError::new("invalid_tool_schema", "工具定义缺少名称。"))?;
+            let description = function
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let parameters = function
+                .get("parameters")
+                .cloned()
+                .unwrap_or_else(|| json!({"type": "object", "properties": {}}));
+            let access = crate::agent::tools::tool_access(name).unwrap_or(AgentToolAccess::ReadOnly);
+            let annotations = ToolAnnotations::new()
+                .read_only(access == AgentToolAccess::ReadOnly)
+                .destructive(access == AgentToolAccess::Mutating)
+                .idempotent(access == AgentToolAccess::ReadOnly)
+                .open_world(false);
+            Ok(
+                Tool::new(name.to_string(), description.to_string(), parameters_object(&parameters))
+                    .with_annotations(annotations),
+            )
+        })
+        .collect()
+}
+
+pub(crate) async fn call_internal_tool(
+    context: &McpToolContext,
+    name: &str,
+    arguments: Option<Map<String, Value>>,
+) -> Result<CallToolResult, AgentError> {
+    let runtime = context
+        .agent_runtime
+        .as_ref()
+        .ok_or_else(|| AgentError::new("internal_mcp_context", "内部 MCP 会话未绑定 Agent。"))?;
+    let conversation_id = context
+        .conversation_id
+        .as_deref()
+        .ok_or_else(|| AgentError::new("internal_mcp_context", "内部 MCP 会话缺少对话。"))?;
+    if !list_internal_tools()?
+        .iter()
+        .any(|tool| tool.name.as_ref() == name)
+    {
+        return Err(AgentError::new("unknown_tool", format!("未知工具：{name}")));
+    }
+    let mode = *context.turn_mode.lock().unwrap();
+    let cancel = context.turn_cancel.lock().unwrap().clone();
+    let arguments = Value::Object(arguments.unwrap_or_default()).to_string();
+    let outcome = execute_tool(
+        ToolExecutionContext {
+            app: &context.app,
+            runtime,
+            editor: &context.editor,
+            conversation_id,
+            tool_call_id: &crate::agent::new_id(),
+            cancel,
+            mode,
+            computer_permission_denied: true,
+        },
+        name,
+        &arguments,
+    )
+    .await?;
+    match outcome {
+        ToolOutcome::Result {
+            content,
+            image_path,
+        } => {
+            let mut blocks = vec![ContentBlock::text(content)];
+            if let Some(path) = image_path {
+                let bytes = std::fs::read(path)
+                    .map_err(|_| AgentError::new("image_unavailable", "无法读取工具图片结果。"))?;
+                blocks.push(ContentBlock::image(BASE64.encode(bytes), "image/png"));
+            }
+            Ok(CallToolResult::success(blocks))
+        }
+        ToolOutcome::AwaitUser { .. } => Err(AgentError::new(
+            "unexpected_user_action",
+            "内部 MCP 工具不能直接创建应用内提问。",
+        )),
+        ToolOutcome::PlanSubmitted(_) => Err(AgentError::new(
+            "unexpected_plan",
+            "内部 MCP 工具不能直接提交计划。",
+        )),
+    }
 }
 
 fn is_write_gated(name: &str, access: ToolAccess) -> bool {

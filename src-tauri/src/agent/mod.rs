@@ -4,7 +4,7 @@ mod compaction;
 pub(crate) mod images;
 mod llm;
 mod memory_markdown;
-mod memory_recall;
+pub(crate) mod memory_recall;
 mod plan;
 pub(crate) mod psd;
 mod runtime;

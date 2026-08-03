@@ -546,8 +546,7 @@ pub fn tool_definitions(
     Ok(tools)
 }
 
-#[cfg(test)]
-pub fn all_tool_definitions() -> Result<Vec<Value>, AgentError> {
+pub(crate) fn all_tool_definitions() -> Result<Vec<Value>, AgentError> {
     let domain_tools = all_domain_tool_definitions();
     let available = domain_tools
         .iter()
@@ -575,7 +574,7 @@ pub fn advertised_tool_names(tools: &[Value]) -> BTreeSet<&str> {
     tools.iter().filter_map(tool_name).collect()
 }
 
-fn tool_name(definition: &Value) -> Option<&str> {
+pub(crate) fn tool_name(definition: &Value) -> Option<&str> {
     definition
         .get("function")
         .and_then(|function| function.get("name"))
