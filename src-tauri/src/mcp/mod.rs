@@ -18,6 +18,63 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
 use tools::McpToolContext;
 
+pub(crate) struct InternalMcpServer {
+    pub url: String,
+    pub token: String,
+    pub tool_names: Vec<String>,
+    pub turn_mode: Arc<Mutex<crate::agent::AgentTurnMode>>,
+    pub turn_cancel: Arc<Mutex<Arc<std::sync::atomic::AtomicBool>>>,
+    cancellation: tokio_util::sync::CancellationToken,
+    join: tokio::task::JoinHandle<Result<(), String>>,
+}
+
+impl Drop for InternalMcpServer {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+        self.join.abort();
+    }
+}
+
+pub(crate) async fn start_internal_server(
+    app: AppHandle,
+    runtime: Arc<crate::agent::AgentRuntime>,
+    conversation_id: String,
+) -> Result<InternalMcpServer, AgentError> {
+    runtime.store.ensure_active_conversation(&conversation_id)?;
+    let token = crate::agent::new_id();
+    let turn_mode = Arc::new(Mutex::new(crate::agent::AgentTurnMode::Default));
+    let turn_cancel = Arc::new(Mutex::new(Arc::new(
+        std::sync::atomic::AtomicBool::new(false),
+    )));
+    let context = McpToolContext {
+        app: app.clone(),
+        editor: (*app.state::<EditorService>()).clone(),
+        psd: Arc::new(PsdService::new(runtime.store.data_dir())),
+        psd_documents: Arc::new(Mutex::new(Vec::new())),
+        allow_writes: Arc::new(Mutex::new(true)),
+        agent_runtime: Some(runtime),
+        conversation_id: Some(conversation_id),
+        turn_mode: turn_mode.clone(),
+        turn_cancel: turn_cancel.clone(),
+    };
+    let tool_names = tools::list_internal_tools()?
+        .into_iter()
+        .map(|tool| tool.name.to_string())
+        .collect();
+    let task = http::bind_and_serve(0, Arc::new(Mutex::new(token.clone())), context)
+        .await
+        .map_err(|message| AgentError::new("codex_mcp_bind_failed", message))?;
+    Ok(InternalMcpServer {
+        url: format!("http://127.0.0.1:{}/mcp", task.port),
+        token,
+        tool_names,
+        turn_mode,
+        turn_cancel,
+        cancellation: task.cancellation,
+        join: task.join,
+    })
+}
+
 struct RunningServer {
     generation: u64,
     port: u16,
@@ -184,10 +241,17 @@ impl McpServerHandle {
             psd: self.psd.clone(),
             psd_documents: self.psd_documents.clone(),
             allow_writes: self.allow_writes.clone(),
+            agent_runtime: None,
+            conversation_id: None,
+            turn_mode: Arc::new(Mutex::new(crate::agent::AgentTurnMode::Default)),
+            turn_cancel: Arc::new(Mutex::new(Arc::new(
+                std::sync::atomic::AtomicBool::new(false),
+            ))),
         };
         match http::bind_and_serve(port, self.token.clone(), context).await {
             Ok(task) => {
-                self.install_running_server(Some(app), state, generation, port, task);
+                let bound_port = task.port;
+                self.install_running_server(Some(app), state, generation, bound_port, task);
                 Ok(())
             }
             Err(message) => {

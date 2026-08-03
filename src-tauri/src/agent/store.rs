@@ -9,6 +9,34 @@ use std::sync::Mutex;
 const LLM_KEYRING_ACCOUNT: &str = "openai-compatible-api-key";
 const KEYRING_SERVICE: &str = "com.senanana.nanabettercubism";
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentBackend {
+    #[default]
+    Builtin,
+    LocalCodex,
+}
+
+impl AgentBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Builtin => "builtin",
+            Self::LocalCodex => "local_codex",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, AgentError> {
+        match value {
+            "builtin" => Ok(Self::Builtin),
+            "local_codex" => Ok(Self::LocalCodex),
+            _ => Err(AgentError::new(
+                "invalid_agent_backend",
+                format!("未知 Agent 后端：{value}"),
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationSummary {
@@ -18,6 +46,7 @@ pub struct ConversationSummary {
     pub project_name: Option<String>,
     pub updated_at: String,
     pub pinned: bool,
+    pub backend: AgentBackend,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,6 +203,20 @@ impl LlmApiMode {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentBackendConfigView {
+    pub default_backend: AgentBackend,
+    pub codex_executable: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentBackendConfigInput {
+    pub default_backend: AgentBackend,
+    pub codex_executable: Option<String>,
+}
+
 #[cfg(test)]
 struct MemoryUpsertInput {
     id: Option<String>,
@@ -216,6 +259,8 @@ impl AgentStore {
               project_id TEXT REFERENCES projects(id),
               pinned INTEGER NOT NULL DEFAULT 0,
               archived INTEGER NOT NULL DEFAULT 0,
+              backend TEXT NOT NULL DEFAULT 'builtin',
+              codex_thread_id TEXT,
               updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS messages (
@@ -264,7 +309,9 @@ impl AgentStore {
               id INTEGER PRIMARY KEY CHECK (id = 1),
               api_mode TEXT NOT NULL DEFAULT 'chat_completions',
               base_url TEXT,
-              model TEXT
+              model TEXT,
+              default_backend TEXT NOT NULL DEFAULT 'builtin',
+              codex_executable TEXT
             );
             CREATE TABLE IF NOT EXISTS tool_traces (
               id TEXT PRIMARY KEY,
@@ -300,6 +347,20 @@ impl AgentStore {
         )?;
         ensure_column(&conn, "llm_config", "context_window", "INTEGER")?;
         ensure_column(&conn, "llm_config", "max_input_tokens", "INTEGER")?;
+        ensure_column(
+            &conn,
+            "llm_config",
+            "default_backend",
+            "TEXT NOT NULL DEFAULT 'builtin'",
+        )?;
+        ensure_column(&conn, "llm_config", "codex_executable", "TEXT")?;
+        ensure_column(
+            &conn,
+            "conversations",
+            "backend",
+            "TEXT NOT NULL DEFAULT 'builtin'",
+        )?;
+        ensure_column(&conn, "conversations", "codex_thread_id", "TEXT")?;
         ensure_column(
             &conn,
             "conversations",
@@ -339,7 +400,7 @@ impl AgentStore {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 r#"
-                SELECT c.id, c.title, c.project_id, p.name, c.updated_at, c.pinned
+                SELECT c.id, c.title, c.project_id, p.name, c.updated_at, c.pinned, c.backend
                 FROM conversations c
                 LEFT JOIN projects p ON p.id = c.project_id
                 WHERE c.archived = 0
@@ -354,6 +415,8 @@ impl AgentStore {
                     project_name: row.get(3)?,
                     updated_at: row.get(4)?,
                     pinned: row.get::<_, i64>(5)? != 0,
+                    backend: AgentBackend::parse(&row.get::<_, String>(6)?)
+                        .unwrap_or_default(),
                 })
             })?;
             Ok(rows.filter_map(Result::ok).collect())
@@ -372,12 +435,22 @@ impl AgentStore {
             .unwrap_or_else(|| "新对话".into());
         self.with_conn(|conn| {
             let transaction = conn.unchecked_transaction()?;
+            let backend = transaction
+                .query_row(
+                    "SELECT default_backend FROM llm_config WHERE id = 1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .map(|value| AgentBackend::parse(&value))
+                .transpose()?
+                .unwrap_or_default();
             let project = document
                 .map(|(key, path)| resolve_document_project(&transaction, key, path, &now))
                 .transpose()?;
             transaction.execute(
-                "INSERT INTO conversations (id, title, project_id, pinned, archived, updated_at) VALUES (?1, ?2, ?3, 0, 0, ?4)",
-                params![id, title, project.as_ref().map(|item| item.0.as_str()), now],
+                "INSERT INTO conversations (id, title, project_id, pinned, archived, backend, updated_at) VALUES (?1, ?2, ?3, 0, 0, ?4, ?5)",
+                params![id, title, project.as_ref().map(|item| item.0.as_str()), backend.as_str(), now],
             )?;
             transaction.commit()?;
             Ok(ConversationSummary {
@@ -387,8 +460,58 @@ impl AgentStore {
                 project_name: project.map(|item| item.1),
                 updated_at: now,
                 pinned: false,
+                backend,
             })
         })
+    }
+
+    pub fn conversation_backend(
+        &self,
+        conversation_id: &str,
+    ) -> Result<AgentBackend, AgentError> {
+        self.with_conn(|conn| {
+            let backend = conn
+                .query_row(
+                    "SELECT backend FROM conversations WHERE id = ?1 AND archived = 0",
+                    params![conversation_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .ok_or_else(|| AgentError::new("not_found", "对话不存在。"))?;
+            AgentBackend::parse(&backend)
+        })
+    }
+
+    pub fn codex_thread_id(&self, conversation_id: &str) -> Result<Option<String>, AgentError> {
+        self.with_conn(|conn| {
+            conn.query_row(
+                "SELECT codex_thread_id FROM conversations WHERE id = ?1 AND archived = 0",
+                params![conversation_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| AgentError::new("not_found", "对话不存在。"))
+        })
+    }
+
+    pub fn set_codex_thread_id(
+        &self,
+        conversation_id: &str,
+        thread_id: &str,
+    ) -> Result<(), AgentError> {
+        let changed = self.with_conn(|conn| {
+            Ok(conn.execute(
+                "UPDATE conversations SET codex_thread_id = ?1 WHERE id = ?2 AND backend = 'local_codex' AND archived = 0",
+                params![thread_id, conversation_id],
+            )?)
+        })?;
+        if changed == 0 {
+            return Err(AgentError::new(
+                "backend_mismatch",
+                "该对话未绑定本地 Codex 后端。",
+            ));
+        }
+        Ok(())
     }
 
     pub fn touch_conversation(&self, conversation_id: &str) -> Result<(), AgentError> {
@@ -1399,6 +1522,81 @@ impl AgentStore {
             save_api_key(&api_key);
         }
         self.get_llm_config_view()
+    }
+
+    pub fn get_agent_backend_config(&self) -> Result<AgentBackendConfigView, AgentError> {
+        self.with_conn(|conn| {
+            let row = conn
+                .query_row(
+                    "SELECT default_backend, codex_executable FROM llm_config WHERE id = 1",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                )
+                .optional()?;
+            let (backend, executable) = row.unwrap_or_else(|| ("builtin".into(), None));
+            Ok(AgentBackendConfigView {
+                default_backend: AgentBackend::parse(&backend)?,
+                codex_executable: executable,
+            })
+        })
+    }
+
+    pub fn set_agent_backend_config(
+        &self,
+        input: AgentBackendConfigInput,
+    ) -> Result<AgentBackendConfigView, AgentError> {
+        let executable = input
+            .codex_executable
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        self.with_conn(|conn| {
+            conn.execute(
+                r#"
+                INSERT INTO llm_config (id, default_backend, codex_executable)
+                VALUES (1, ?1, ?2)
+                ON CONFLICT(id) DO UPDATE SET
+                  default_backend = excluded.default_backend,
+                  codex_executable = excluded.codex_executable
+                "#,
+                params![input.default_backend.as_str(), executable],
+            )?;
+            Ok(())
+        })?;
+        self.get_agent_backend_config()
+    }
+
+    pub fn append_external_message_once(
+        &self,
+        conversation_id: &str,
+        external_id: &str,
+        role: &str,
+        content: &str,
+        tool_name: Option<&str>,
+        tool_status: Option<&str>,
+    ) -> Result<bool, AgentError> {
+        let id = format!("codex:{external_id}");
+        let changed = self.with_conn(|conn| {
+            Ok(conn.execute(
+                r#"
+                INSERT OR IGNORE INTO messages (
+                  id, conversation_id, role, content, tool_name, tool_status, attachments_json, created_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, '[]', ?7)
+                "#,
+                params![
+                    id,
+                    conversation_id,
+                    role,
+                    content,
+                    tool_name,
+                    tool_status,
+                    Utc::now().to_rfc3339()
+                ],
+            )?)
+        })?;
+        if changed > 0 {
+            self.touch_conversation(conversation_id)?;
+        }
+        Ok(changed > 0)
     }
 
     pub fn db_path(&self) -> Option<PathBuf> {

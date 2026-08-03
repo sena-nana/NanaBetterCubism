@@ -1,5 +1,7 @@
 use super::config::bearer_matches;
-use super::tools::{call_mcp_tool, list_mcp_tools, McpToolContext};
+use super::tools::{
+    call_internal_tool, call_mcp_tool, list_internal_tools, list_mcp_tools, McpToolContext,
+};
 use axum::{
     body::Body,
     extract::Request,
@@ -47,8 +49,15 @@ impl ServerHandler for CubismMcpHandler {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let allow_writes = *self.context.allow_writes.lock().unwrap();
-        Ok(ListToolsResult::with_all_items(list_mcp_tools(allow_writes)))
+        let tools = if self.context.agent_runtime.is_some() {
+            list_internal_tools().map_err(|error| {
+                McpError::internal_error(error.message, None)
+            })?
+        } else {
+            let allow_writes = *self.context.allow_writes.lock().unwrap();
+            list_mcp_tools(allow_writes)
+        };
+        Ok(ListToolsResult::with_all_items(tools))
     }
 
     async fn call_tool(
@@ -56,7 +65,12 @@ impl ServerHandler for CubismMcpHandler {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
-        match call_mcp_tool(&self.context, &request.name, request.arguments).await {
+        let result = if self.context.agent_runtime.is_some() {
+            call_internal_tool(&self.context, &request.name, request.arguments).await
+        } else {
+            call_mcp_tool(&self.context, &request.name, request.arguments).await
+        };
+        match result {
             Ok(result) => Ok(result.into()),
             Err(error) => Ok(CallToolResult::error(vec![ContentBlock::text(
                 serde_json::json!({
@@ -71,6 +85,7 @@ impl ServerHandler for CubismMcpHandler {
 }
 
 pub(crate) struct HttpServerTask {
+    pub port: u16,
     pub cancellation: CancellationToken,
     pub join: tokio::task::JoinHandle<Result<(), String>>,
 }
@@ -83,6 +98,10 @@ pub(crate) async fn bind_and_serve(
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port)))
         .await
         .map_err(|error| format!("无法绑定 127.0.0.1:{port}：{error}"))?;
+    let bound_port = listener
+        .local_addr()
+        .map_err(|error| format!("无法读取 MCP 监听地址：{error}"))?
+        .port();
 
     let cancellation = CancellationToken::new();
     let config = StreamableHttpServerConfig::default()
@@ -90,11 +109,11 @@ pub(crate) async fn bind_and_serve(
         .with_json_response(true)
         .with_allowed_hosts([
             "127.0.0.1".to_string(),
-            format!("127.0.0.1:{port}"),
+            format!("127.0.0.1:{bound_port}"),
             "localhost".to_string(),
-            format!("localhost:{port}"),
+            format!("localhost:{bound_port}"),
             "[::1]".to_string(),
-            format!("[::1]:{port}"),
+            format!("[::1]:{bound_port}"),
         ]);
 
     let service: StreamableHttpService<CubismMcpHandler, LocalSessionManager> =
@@ -123,7 +142,11 @@ pub(crate) async fn bind_and_serve(
         }
     });
 
-    Ok(HttpServerTask { cancellation, join })
+    Ok(HttpServerTask {
+        port: bound_port,
+        cancellation,
+        join,
+    })
 }
 
 #[cfg(test)]
@@ -141,7 +164,11 @@ pub(crate) async fn bind_test_server(port: u16) -> Result<HttpServerTask, String
                 .map_err(|error| error.to_string())
         }
     });
-    Ok(HttpServerTask { cancellation, join })
+    Ok(HttpServerTask {
+        port,
+        cancellation,
+        join,
+    })
 }
 
 async fn require_bearer(

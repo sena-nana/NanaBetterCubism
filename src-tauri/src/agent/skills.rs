@@ -307,7 +307,6 @@ pub fn allowed_domain_tools(
     Ok(allowed)
 }
 
-#[cfg(test)]
 pub fn all_declared_domain_tools() -> Result<BTreeSet<&'static str>, AgentError> {
     let mut tools = CORE_DOMAIN_TOOLS.iter().copied().collect::<BTreeSet<_>>();
     for skill in all()? {
