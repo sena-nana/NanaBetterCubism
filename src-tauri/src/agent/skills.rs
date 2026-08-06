@@ -5,6 +5,7 @@ use std::sync::LazyLock;
 
 pub const READ_SKILL_TOOL_NAME: &str = "read_skill";
 pub const DEFAULT_OBJECT_EDITING_SKILL_NAME: &str = "object-editing";
+pub const PSD_INSPECTION_SKILL_NAME: &str = "psd-inspection";
 
 const CORE_DOMAIN_TOOLS: &[&str] = &[
     "get_editor_snapshot",
@@ -250,6 +251,14 @@ pub fn default_skill_prompt(mode: AgentTurnMode) -> Result<Option<String>, Agent
         "## 默认已激活 SKILL：{}\n\n{}",
         skill.name, skill.instructions
     )))
+}
+
+pub fn psd_inspection_prompt() -> Result<String, AgentError> {
+    let skill = get(PSD_INSPECTION_SKILL_NAME)?;
+    Ok(format!(
+        "## 默认已激活 SKILL：{}\n\n{}",
+        skill.name, skill.instructions
+    ))
 }
 
 fn object_editing_enabled_by_default(mode: AgentTurnMode) -> bool {
