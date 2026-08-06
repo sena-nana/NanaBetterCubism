@@ -4,6 +4,9 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
+use std::time::Duration;
+
+const LLM_400_MAX_RETRIES: u32 = 5;
 
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionResponse {
@@ -232,13 +235,35 @@ fn classify_request_failure(status: reqwest::StatusCode, text: String) -> AgentE
     }
 }
 
-async fn require_success(response: reqwest::Response) -> Result<reqwest::Response, AgentError> {
-    if response.status().is_success() {
-        return Ok(response);
+async fn post_json_with_400_retry(
+    url: &str,
+    api_key: &str,
+    body: &Value,
+) -> Result<reqwest::Response, AgentError> {
+    let client = reqwest::Client::new();
+    let mut attempt = 0u32;
+    loop {
+        let response = client
+            .post(url)
+            .bearer_auth(api_key)
+            .json(body)
+            .send()
+            .await?;
+        if response.status().is_success() {
+            return Ok(response);
+        }
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        if status.as_u16() == 400
+            && !detect_image_unsupported(&text)
+            && attempt < LLM_400_MAX_RETRIES
+        {
+            attempt += 1;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            continue;
+        }
+        return Err(classify_request_failure(status, text));
     }
-    let status = response.status();
-    let text = response.text().await.unwrap_or_default();
-    Err(classify_request_failure(status, text))
 }
 
 pub async fn complete(
@@ -258,23 +283,12 @@ pub async fn chat_completions(
     tools: &[Value],
 ) -> Result<ChatMessagePayload, AgentError> {
     let (base, api_key, model) = resolve_endpoint(config)?;
-    let client = reqwest::Client::new();
-    let response = require_success(
-        client
-        .post(format!("{base}/chat/completions"))
-        .bearer_auth(api_key)
-        .json(&request_body(
-            &base,
-            &model,
-            messages,
-            tools,
-            ToolChoiceMode::Auto,
-            false,
-        )?)
-        .send()
-            .await?,
+    let response = post_json_with_400_retry(
+        &format!("{base}/chat/completions"),
+        &api_key,
+        &request_body(&base, &model, messages, tools, ToolChoiceMode::Auto, false)?,
     )
-        .await?;
+    .await?;
     first_message(response.json().await?)
 }
 
@@ -289,23 +303,12 @@ where
     F: FnMut(ChatStreamDelta),
 {
     let (base, api_key, model) = resolve_endpoint(config)?;
-    let client = reqwest::Client::new();
-    let response = require_success(
-        client
-        .post(format!("{base}/chat/completions"))
-        .bearer_auth(&api_key)
-        .json(&request_body(
-            &base,
-            &model,
-            messages,
-            tools,
-            tool_choice,
-            true,
-        )?)
-        .send()
-            .await?,
+    let response = post_json_with_400_retry(
+        &format!("{base}/chat/completions"),
+        &api_key,
+        &request_body(&base, &model, messages, tools, tool_choice, true)?,
     )
-        .await?;
+    .await?;
 
     let content_type = response
         .headers()
@@ -624,19 +627,10 @@ async fn responses(
     tools: &[Value],
 ) -> Result<ChatMessagePayload, AgentError> {
     let (base, api_key, model) = resolve_endpoint(config)?;
-    let response = require_success(
-        reqwest::Client::new()
-            .post(format!("{base}/responses"))
-            .bearer_auth(api_key)
-            .json(&responses_request_body(
-                &model,
-                messages,
-                tools,
-                ToolChoiceMode::Auto,
-                false,
-            )?)
-            .send()
-            .await?,
+    let response = post_json_with_400_retry(
+        &format!("{base}/responses"),
+        &api_key,
+        &responses_request_body(&model, messages, tools, ToolChoiceMode::Auto, false)?,
     )
     .await?;
     response_to_message(response.json().await?)
@@ -728,19 +722,10 @@ where
     F: FnMut(ChatStreamDelta),
 {
     let (base, api_key, model) = resolve_endpoint(config)?;
-    let response = require_success(
-        reqwest::Client::new()
-            .post(format!("{base}/responses"))
-            .bearer_auth(api_key)
-            .json(&responses_request_body(
-                &model,
-                messages,
-                tools,
-                tool_choice,
-                true,
-            )?)
-            .send()
-            .await?,
+    let response = post_json_with_400_retry(
+        &format!("{base}/responses"),
+        &api_key,
+        &responses_request_body(&model, messages, tools, tool_choice, true)?,
     )
     .await?;
     let content_type = response
@@ -1896,5 +1881,70 @@ data: {"type":"response.completed","response":{"status":"completed","output":[{"
             .await
             .unwrap_err();
         assert_eq!(error.code, "llm_image_unsupported");
+    }
+
+    fn mock_chat_config(base_url: String) -> LlmConfigInternal {
+        LlmConfigInternal {
+            api_mode: LlmApiMode::ChatCompletions,
+            base_url: Some(base_url),
+            api_key: Some("test-key".into()),
+            model: Some("mock-model".into()),
+            context_window: None,
+            max_input_tokens: None,
+        }
+    }
+
+    fn json_http(status: u16, body: &str) -> MockHttpResponse {
+        MockHttpResponse {
+            status,
+            content_type: "application/json",
+            body: body.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_completions_retries_http_400() {
+        let hi = [json!({"role":"user","content":"hi"})];
+
+        let (base_url, requests) = spawn_mock_http_recording(vec![
+            json_http(400, r#"{"error":{"message":"temporary"}}"#),
+            json_http(200, r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#),
+        ])
+        .await;
+        let message = chat_completions(&mock_chat_config(base_url), &hi, &[])
+            .await
+            .unwrap();
+        assert_eq!(content_to_text(&message.content), "ok");
+        assert_eq!(requests.lock().await.len(), 2);
+
+        let replies = (0..6)
+            .map(|_| json_http(400, r#"{"error":{"message":"temporary"}}"#))
+            .collect();
+        let (base_url, requests) = spawn_mock_http_recording(replies).await;
+        let error = chat_completions(&mock_chat_config(base_url), &hi, &[])
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "llm_request_failed");
+        assert_eq!(requests.lock().await.len(), 6);
+
+        let (base_url, requests) =
+            spawn_mock_http_recording(vec![json_http(500, r#"{"error":{"message":"internal"}}"#)])
+                .await;
+        let error = chat_completions(&mock_chat_config(base_url), &hi, &[])
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "llm_request_failed");
+        assert_eq!(requests.lock().await.len(), 1);
+
+        let (base_url, requests) = spawn_mock_http_recording(vec![json_http(
+            400,
+            r#"{"error":{"message":"image_url is not supported by this model"}}"#,
+        )])
+        .await;
+        let error = chat_completions(&mock_chat_config(base_url), &hi, &[])
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "llm_image_unsupported");
+        assert_eq!(requests.lock().await.len(), 1);
     }
 }
