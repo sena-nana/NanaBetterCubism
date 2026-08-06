@@ -224,11 +224,42 @@ pub fn detect_image_unsupported(body: &str) -> bool {
         || (has_multimodal && (contains("not supported") || contains("unsupported")))
 }
 
+fn extract_api_error_detail(body: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(body).ok()?;
+    let message = value
+        .pointer("/error/message")
+        .or_else(|| value.get("message"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let truncated: String = message.chars().take(240).collect();
+    Some(if truncated.chars().count() < message.chars().count() {
+        truncated + "…"
+    } else {
+        truncated
+    })
+}
+
+fn is_permanent_llm_400(body: &str) -> bool {
+    detect_image_unsupported(body) || {
+        let lower = body.to_ascii_lowercase();
+        lower.contains("reasoning")
+            || lower.contains("invalid_request")
+            || lower.contains("context length")
+            || lower.contains("too many tokens")
+    }
+}
+
 fn classify_request_failure(status: reqwest::StatusCode, text: String) -> AgentError {
     if detect_image_unsupported(&text) {
         AgentError::new(
             "llm_image_unsupported",
             format!("当前模型不支持图片输入（{status}）。"),
+        )
+    } else if let Some(detail) = extract_api_error_detail(&text) {
+        AgentError::new(
+            "llm_request_failed",
+            format!("模型请求失败（{status}）：{detail}"),
         )
     } else {
         AgentError::new("llm_request_failed", format!("模型请求失败（{status}）。"))
@@ -255,7 +286,7 @@ async fn post_json_with_400_retry(
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
         if status.as_u16() == 400
-            && !detect_image_unsupported(&text)
+            && !is_permanent_llm_400(&text)
             && attempt < LLM_400_MAX_RETRIES
         {
             attempt += 1;
@@ -479,7 +510,91 @@ where
     }
 }
 
+fn is_deepseek_api_host(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .is_some_and(|host| host.eq_ignore_ascii_case("api.deepseek.com"))
+}
+
+fn reasoning_item_has_plaintext(item: &Value) -> bool {
+    match item.get("content") {
+        Some(Value::String(text)) => !text.trim().is_empty(),
+        Some(Value::Array(parts)) => parts.iter().any(|part| {
+            part.get("text")
+                .and_then(Value::as_str)
+                .is_some_and(|text| !text.trim().is_empty())
+        }),
+        _ => false,
+    }
+}
+
+fn responses_tool_history_missing_reasoning(messages: &[Value]) -> bool {
+    messages.iter().any(|message| {
+        let has_calls = message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .is_some_and(|calls| !calls.is_empty())
+            || message
+                .get("__responses_output")
+                .and_then(Value::as_array)
+                .is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
+                });
+        if !has_calls {
+            return false;
+        }
+        let has_reasoning = message
+            .get("reasoning_content")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty())
+            || message
+                .get("__responses_output")
+                .and_then(Value::as_array)
+                .is_some_and(|items| {
+                    items.iter().any(|item| {
+                        item.get("type").and_then(Value::as_str) == Some("reasoning")
+                            && reasoning_item_has_plaintext(item)
+                    })
+                });
+        !has_reasoning
+    })
+}
+
+fn fill_reasoning_plaintext(item: &mut Value, fallback: &str) {
+    if item.get("type").and_then(Value::as_str) != Some("reasoning") {
+        return;
+    }
+    let summary_text = item
+        .pointer("/summary/0/text")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string);
+    let has_plaintext = reasoning_item_has_plaintext(item);
+    if let Some(object) = item.as_object_mut() {
+        object.remove("encrypted_content");
+        object.remove("summary");
+        if !has_plaintext {
+            if let Some(text) = summary_text {
+                object.insert("content".into(), Value::String(text));
+            } else if !fallback.trim().is_empty() {
+                object.insert("content".into(), Value::String(fallback.trim().to_string()));
+            }
+        }
+    }
+}
+
+fn sanitize_responses_output_item(item: &Value) -> Value {
+    let mut cleaned = item.clone();
+    fill_reasoning_plaintext(&mut cleaned, "");
+    cleaned
+}
+
 fn responses_request_body(
+    base_url: &str,
     model: &str,
     messages: &[Value],
     tools: &[Value],
@@ -497,6 +612,15 @@ fn responses_request_body(
         body["tool_choice"] = serde_json::to_value(tool_choice)?;
         body["parallel_tool_calls"] = Value::Bool(false);
     }
+    if is_deepseek_api_host(base_url) && model.starts_with("deepseek-v4-") {
+        body["reasoning"] = json!({
+            "effort": if responses_tool_history_missing_reasoning(messages) {
+                "none"
+            } else {
+                "high"
+            }
+        });
+    }
     Ok(body)
 }
 
@@ -504,7 +628,10 @@ fn responses_input(messages: &[Value]) -> Result<Vec<Value>, AgentError> {
     let mut input = Vec::new();
     for message in messages {
         if let Some(items) = message.get("__responses_output").and_then(Value::as_array) {
-            input.extend(items.iter().cloned());
+            input.extend(items.iter().map(sanitize_responses_output_item).filter(|item| {
+                item.get("type").and_then(Value::as_str) != Some("reasoning")
+                    || reasoning_item_has_plaintext(item)
+            }));
             continue;
         }
 
@@ -527,6 +654,17 @@ fn responses_input(messages: &[Value]) -> Result<Vec<Value>, AgentError> {
         }
 
         if role == "assistant" {
+            if let Some(reasoning) = message
+                .get("reasoning_content")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+            {
+                input.push(json!({
+                    "type": "reasoning",
+                    "content": reasoning,
+                }));
+            }
             let text = message
                 .get("content")
                 .map(|content| content_to_text(&Some(content.clone())))
@@ -630,7 +768,7 @@ async fn responses(
     let response = post_json_with_400_retry(
         &format!("{base}/responses"),
         &api_key,
-        &responses_request_body(&model, messages, tools, ToolChoiceMode::Auto, false)?,
+        &responses_request_body(&base, &model, messages, tools, ToolChoiceMode::Auto, false)?,
     )
     .await?;
     response_to_message(response.json().await?)
@@ -725,7 +863,7 @@ where
     let response = post_json_with_400_retry(
         &format!("{base}/responses"),
         &api_key,
-        &responses_request_body(&model, messages, tools, tool_choice, true)?,
+        &responses_request_body(&base, &model, messages, tools, tool_choice, true)?,
     )
     .await?;
     let content_type = response
@@ -746,6 +884,7 @@ where
     let mut stream = response.bytes_stream();
     let mut buffer = Vec::new();
     let mut calls: BTreeMap<u64, StreamingToolCall> = BTreeMap::new();
+    let mut reasoning_text = String::new();
     let mut completed = None;
     while completed.is_none() {
         let Some(chunk) = stream.next().await else {
@@ -775,6 +914,18 @@ where
                     if let Some(piece) = payload.get("delta").and_then(Value::as_str) {
                         if !piece.is_empty() {
                             on_delta(ChatStreamDelta::Text(piece.to_string()));
+                        }
+                    }
+                }
+                "response.reasoning_text.delta" => {
+                    if let Some(piece) = payload.get("delta").and_then(Value::as_str) {
+                        reasoning_text.push_str(piece);
+                    }
+                }
+                "response.reasoning_text.done" => {
+                    if let Some(text) = payload.get("text").and_then(Value::as_str) {
+                        if !text.is_empty() {
+                            reasoning_text = text.to_string();
                         }
                     }
                 }
@@ -846,14 +997,19 @@ where
                             "模型未完成本次响应。",
                         ));
                     }
-                    let output = response
+                    let mut output = response
                         .get("output")
                         .and_then(Value::as_array)
                         .cloned()
                         .ok_or_else(|| {
                             AgentError::new("llm_response_invalid", "模型完成事件缺少输出。")
                         })?;
-                    completed = Some(response_output_to_message(output)?);
+                    ensure_responses_reasoning_plaintext(&mut output, &reasoning_text);
+                    let mut message = response_output_to_message(output)?;
+                    if message.reasoning_content.is_none() && !reasoning_text.is_empty() {
+                        message.reasoning_content = Some(reasoning_text.clone());
+                    }
+                    completed = Some(message);
                 }
                 "response.failed" | "response.incomplete" | "error" => {
                     return Err(AgentError::new(
@@ -866,6 +1022,12 @@ where
         }
     }
     completed.ok_or_else(|| AgentError::new("llm_stream_incomplete", "模型流在完成事件前结束。"))
+}
+
+fn ensure_responses_reasoning_plaintext(output: &mut [Value], fallback_text: &str) {
+    for item in output.iter_mut() {
+        fill_reasoning_plaintext(item, fallback_text);
+    }
 }
 
 fn take_sse_line(buffer: &mut Vec<u8>) -> Result<Option<String>, AgentError> {
@@ -1546,6 +1708,7 @@ data: [DONE]
     #[test]
     fn responses_body_maps_images_and_function_tools() {
         let body = responses_request_body(
+            "https://api.openai.com/v1",
             "mock-model",
             &[json!({
                 "role": "user",
@@ -1584,6 +1747,100 @@ data: [DONE]
         assert_eq!(body["tools"][0]["name"], "inspect");
         assert_eq!(body["tools"][0]["strict"], false);
         assert!(body["tools"][0].get("function").is_none());
+        assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn deepseek_responses_reasoning_roundtrip() {
+        let tools = [json!({
+            "type": "function",
+            "function": {
+                "name": "inspect",
+                "description": "Inspect",
+                "parameters": { "type": "object", "properties": {} }
+            }
+        })];
+        let missing = responses_request_body(
+            "https://api.deepseek.com/v1",
+            "deepseek-v4-flash",
+            &[
+                json!({"role":"user","content":"检查"}),
+                json!({
+                    "role":"assistant",
+                    "content":"",
+                    "tool_calls":[{
+                        "id":"call_1",
+                        "type":"function",
+                        "function":{"name":"inspect","arguments":"{}"}
+                    }]
+                }),
+                json!({"role":"tool","tool_call_id":"call_1","content":"{}"}),
+            ],
+            &tools,
+            ToolChoiceMode::Auto,
+            true,
+        )
+        .unwrap();
+        assert_eq!(missing["reasoning"]["effort"], "none");
+
+        let with_reasoning = responses_request_body(
+            "https://api.deepseek.com/v1",
+            "deepseek-v4-flash",
+            &[
+                json!({"role":"user","content":"检查"}),
+                json!({
+                    "role":"assistant",
+                    "content":"",
+                    "reasoning_content":"需要先读取状态。",
+                    "tool_calls":[{
+                        "id":"call_1",
+                        "type":"function",
+                        "function":{"name":"inspect","arguments":"{}"}
+                    }]
+                }),
+                json!({"role":"tool","tool_call_id":"call_1","content":"{}"}),
+            ],
+            &tools,
+            ToolChoiceMode::Auto,
+            true,
+        )
+        .unwrap();
+        assert_eq!(with_reasoning["reasoning"]["effort"], "high");
+        assert!(with_reasoning["input"].as_array().unwrap().iter().any(|item| {
+            item["type"] == "reasoning" && item["content"] == "需要先读取状态。"
+        }));
+
+        let input = responses_input(&[json!({
+            "role":"assistant",
+            "content":"",
+            "__responses_output":[
+                {
+                    "type":"reasoning",
+                    "id":"rs_1",
+                    "encrypted_content":"secret",
+                    "summary":[{"type":"summary_text","text":"先检查编辑器"}]
+                },
+                {
+                    "type":"function_call",
+                    "call_id":"call_1",
+                    "name":"inspect",
+                    "arguments":"{}"
+                }
+            ]
+        })])
+        .unwrap();
+        let reasoning = input.iter().find(|item| item["type"] == "reasoning").unwrap();
+        assert_eq!(reasoning["content"], "先检查编辑器");
+        assert!(reasoning.get("encrypted_content").is_none());
+
+        let error = classify_request_failure(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"The reasoning_content in the thinking mode must be passed back to the API."}}"#.into(),
+        );
+        assert!(error.message.contains("reasoning_content"));
+        assert!(is_permanent_llm_400(
+            r#"{"error":{"message":"The reasoning_content in the thinking mode must be passed back to the API."}}"#
+        ));
     }
 
     #[tokio::test]
@@ -1621,9 +1878,9 @@ data: [DONE]
 
     #[tokio::test]
     async fn responses_stream_replays_reasoning_call_and_tool_output_locally() {
-        let tool_sse = r#"data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"encrypted"}}
+        let tool_sse = r#"data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","content":"先检查","encrypted_content":"encrypted"}}
 
-data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"encrypted"}}
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","content":"先检查","encrypted_content":"encrypted"}}
 
 data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"inspect","arguments":""}}
 
@@ -1635,7 +1892,7 @@ data: {"type":"response.function_call_arguments.done","output_index":1,"argument
 
 data: {"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"inspect","arguments":"{\"target\":\"editor\"}"}}
 
-data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"reasoning","id":"rs_1","encrypted_content":"encrypted"},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"inspect","arguments":"{\"target\":\"editor\"}"}]}}
+data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"reasoning","id":"rs_1","content":"先检查","encrypted_content":"encrypted"},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"inspect","arguments":"{\"target\":\"editor\"}"}]}}
 
 "#;
         let final_sse = r#"data: {"type":"response.output_text.delta","delta":"检查完成"}
@@ -1731,9 +1988,12 @@ data: {"type":"response.completed","response":{"status":"completed","output":[{"
         let requests = requests.lock().await;
         let second = request_json(&requests[1]);
         let input = second["input"].as_array().unwrap();
-        assert!(input.iter().any(|item| {
-            item["type"] == "reasoning" && item["encrypted_content"] == "encrypted"
-        }));
+        let reasoning = input
+            .iter()
+            .find(|item| item["type"] == "reasoning")
+            .unwrap();
+        assert_eq!(reasoning["content"], "先检查");
+        assert!(reasoning.get("encrypted_content").is_none());
         assert!(input
             .iter()
             .any(|item| item["type"] == "function_call" && item["call_id"] == "call_1"));
