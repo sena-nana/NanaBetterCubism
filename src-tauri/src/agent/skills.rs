@@ -42,7 +42,8 @@ const MODEL_INSPECTION_TOOLS: &[&str] = &[
     "get_parameter_structure",
     "get_selected_objects",
     "get_part_structure",
-    "get_object",
+    "get_objects",
+    "get_all_objects",
     "get_deformer_structure",
 ];
 
@@ -343,6 +344,16 @@ mod tests {
             parse_read_arguments(r#"{"name":"editor-context","extra":true}"#),
             Err(error) if error.code == "invalid_arguments"
         ));
+    }
+
+    #[test]
+    fn model_inspection_advertises_batch_object_reads() {
+        let skill = get("model-inspection").unwrap();
+        assert!(skill.tools.contains(&"get_objects"));
+        assert!(skill.tools.contains(&"get_all_objects"));
+        assert!(!skill.tools.contains(&"get_object"));
+        assert!(skill.instructions.contains("get_objects"));
+        assert!(skill.instructions.contains("get_all_objects"));
     }
 
     #[test]

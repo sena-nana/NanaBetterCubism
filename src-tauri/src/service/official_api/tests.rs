@@ -165,7 +165,6 @@ fn catalog_covers_every_official_method_without_exposing_session_primitives() {
         "AddSelectedObjects",
         "ClearSelectedObjects",
         "GetPartStructure",
-        "GetObject",
         "DeleteObject",
         "MoveObjectOnPartsPalette",
         "AddPart",
@@ -195,7 +194,7 @@ fn catalog_covers_every_official_method_without_exposing_session_primitives() {
     .into_iter()
     .collect::<BTreeSet<_>>();
     assert!(exposed.is_disjoint(&internal));
-    assert_eq!(exposed.union(&internal).count(), 56);
+    assert_eq!(exposed.union(&internal).count(), 55);
 }
 
 #[test]
@@ -215,6 +214,199 @@ fn get_object_invalid_data_is_recoverable_without_reclassifying_other_reads() {
         },
     );
     assert_eq!(unrelated.code, "InvalidData");
+}
+
+#[test]
+fn batch_object_reads_register_and_reject_invalid_batches() {
+    let tools = tool_definitions();
+    let get_objects = tools
+        .iter()
+        .find(|tool| tool["function"]["name"] == "get_objects")
+        .unwrap();
+    assert_eq!(
+        get_objects["function"]["parameters"]["properties"]["ids"]["maxItems"],
+        crate::domain::MAX_BATCH_SIZE
+    );
+    assert!(is_tool("get_all_objects"));
+    assert_eq!(tool_access("get_objects"), Some(ToolAccess::ReadOnly));
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    assert_eq!(
+        runtime
+            .block_on(call_tool(
+                &EditorService::default(),
+                "get_objects",
+                json!({"ids": []})
+            ))
+            .unwrap_err()
+            .code,
+        "invalid_arguments"
+    );
+}
+
+#[test]
+fn collect_structure_ids_skips_virtual_root_and_dedupes_across_trees() {
+    let mut ids = BTreeSet::new();
+    read::collect_structure_ids(
+        &json!({
+            "Id": "PartRoot", "Type": "Part",
+            "Children": [
+                {"Id": "ArtMeshA", "Type": "ArtMesh", "Children": []},
+                {"Id": "ArtPathA", "Type": "ArtPath", "Children": []}
+            ]
+        }),
+        false,
+        None,
+        &mut ids,
+    )
+    .unwrap();
+    read::collect_structure_ids(
+        &json!({
+            "Id": "%Root",
+            "Children": [{
+                "Id": "WarpA", "Type": "WarpDeformer",
+                "Children": [{"Id": "ArtMeshA", "Type": "ArtMesh", "Children": []}]
+            }]
+        }),
+        true,
+        None,
+        &mut ids,
+    )
+    .unwrap();
+    assert_eq!(
+        ids,
+        BTreeSet::from([
+            "ArtMeshA".into(),
+            "PartRoot".into(),
+            "WarpA".into()
+        ])
+    );
+
+    let mut filtered = BTreeSet::new();
+    let types = BTreeSet::from(["ArtMesh".to_string()]);
+    read::collect_structure_ids(
+        &json!({
+            "Id": "PartRoot", "Type": "Part",
+            "Children": [
+                {"Id": "ArtMeshA", "Type": "ArtMesh", "Children": []},
+                {"Id": "WarpA", "Type": "WarpDeformer", "Children": []}
+            ]
+        }),
+        false,
+        Some(&types),
+        &mut filtered,
+    )
+    .unwrap();
+    assert_eq!(filtered, BTreeSet::from(["ArtMeshA".into()]));
+}
+
+async fn object_read_server() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        while let Some(Ok(message)) = socket.next().await {
+            let Message::Text(message) = message else {
+                continue;
+            };
+            let request: Value = serde_json::from_str(&message).unwrap();
+            let method = request["Method"].as_str().unwrap();
+            let (response_type, data) = match method {
+                "GetPartStructure" => (
+                    "Response",
+                    json!({
+                        "PartStructure": {
+                            "Id": "PartRoot", "Type": "Part",
+                            "Children": [
+                                {"Id": "ArtMeshA", "Type": "ArtMesh", "Children": []},
+                                {"Id": "ArtMeshB", "Type": "ArtMesh", "Children": []}
+                            ]
+                        }
+                    }),
+                ),
+                "GetDeformerStructure" => (
+                    "Response",
+                    json!({
+                        "DeformerStructure": [{
+                            "Id": "%Root",
+                            "Children": [{
+                                "Id": "WarpA", "Type": "WarpDeformer",
+                                "Children": [{"Id": "ArtMeshA", "Type": "ArtMesh", "Children": []}]
+                            }]
+                        }]
+                    }),
+                ),
+                "GetObject" => {
+                    let id = request["Data"]["Id"].as_str().unwrap();
+                    if id == "Missing" {
+                        ("Error", json!({ "ErrorType": "InvalidData" }))
+                    } else {
+                        (
+                            "Response",
+                            json!({
+                                "Result": true,
+                                "Type": "ArtMesh",
+                                "Data": { "DrawOrder": 100, "Opacity": 100 }
+                            }),
+                        )
+                    }
+                }
+                value => panic!("unexpected method {value}"),
+            };
+            socket
+                .send(Message::Text(
+                    json!({
+                        "Version": "1.1.0",
+                        "RequestId": request["RequestId"],
+                        "Type": response_type,
+                        "Method": method,
+                        "Data": data
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+        }
+    });
+    port
+}
+
+#[tokio::test]
+async fn get_objects_and_get_all_objects_batch_read_with_partial_failure() {
+    let port = object_read_server().await;
+    let service = connected_service(port).await;
+    let batch = call_tool(
+        &service,
+        "get_objects",
+        json!({"ids": ["ArtMeshA", "Missing", "ArtMeshB"]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(batch["objects"][0]["data"]["drawOrder"], 100);
+    assert_eq!(batch["objects"][1]["error"]["code"], "invalid_object_id");
+    assert_eq!(batch["objects"][2]["ok"], true);
+
+    let port = object_read_server().await;
+    let service = connected_service(port).await;
+    let all = call_tool(&service, "get_all_objects", json!({}))
+        .await
+        .unwrap();
+    assert_eq!(all["scannedObjectCount"], 4);
+    let ids = all["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        ids,
+        BTreeSet::from(["ArtMeshA", "ArtMeshB", "PartRoot", "WarpA"])
+    );
 }
 
 #[test]
@@ -280,14 +472,18 @@ fn schemas_expose_cubism_identifier_constraints() {
         assert_eq!(schema["maxLength"], 63);
     }
 
-    let get_object = tools
+    let get_objects = tools
         .iter()
-        .find(|tool| tool["function"]["name"] == "get_object")
+        .find(|tool| tool["function"]["name"] == "get_objects")
         .unwrap();
-    let nested_id = &get_object["function"]["parameters"]["properties"]["parameters"]["items"]
+    let nested_id = &get_objects["function"]["parameters"]["properties"]["parameters"]["items"]
         ["properties"]["id"];
     assert_eq!(nested_id["pattern"], pattern);
     assert_eq!(nested_id["maxLength"], 63);
+    assert_eq!(
+        get_objects["function"]["parameters"]["properties"]["ids"]["items"]["pattern"],
+        pattern
+    );
 }
 
 #[test]
@@ -322,12 +518,20 @@ fn normalization_rejects_invalid_cubism_ids_but_keeps_unicode_names() {
     .unwrap_err();
     assert_eq!(error.code, "invalid_arguments");
 
-    let error = schema::normalize_arguments(
-        spec("get_object").unwrap(),
-        json!({"id": "ArtMesh", "parameters": [{"id": "参数"}]}),
-        Some("private-model"),
-    )
-    .unwrap_err();
+    let error = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let service = EditorService::default();
+            call_tool(
+                &service,
+                "get_objects",
+                json!({"ids": ["ArtMesh"], "parameters": [{"id": "参数"}]}),
+            )
+            .await
+            .unwrap_err()
+        });
     assert_eq!(error.code, "invalid_arguments");
 
     let normalized = schema::normalize_operations(

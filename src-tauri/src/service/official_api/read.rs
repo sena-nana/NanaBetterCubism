@@ -1,15 +1,28 @@
 use super::{
     schema::{
-        boolean, choice, effect, identifier, identifiers, limited_string, normalize_arguments,
-        number, parameter_filters, parameter_values, query, string, ToolSpec, LOG_TYPES,
+        boolean, choice, effect, field_schema, identifier, identifiers, limited_string,
+        normalize_arguments, number, parameter_filters, parameter_values, query, string,
+        validate_value, ToolSpec, LOG_TYPES,
     },
     CommandError, CurrentModelingDocument, EditorService,
 };
+use crate::domain::{CUBISM_ID_MAX_LEN, CUBISM_ID_PATTERN, MAX_BATCH_SIZE};
 use crate::protocol::{RpcClient, RpcError};
+use futures_util::stream::{self, StreamExt};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use uuid::Uuid;
+
+const MAX_CONCURRENT_OBJECT_REQUESTS: usize = 8;
+const VIRTUAL_ROOT_ID: &str = "%Root";
+const GET_OBJECT_TYPES: &[&str] = &[
+    "ArtMesh",
+    "Part",
+    "WarpDeformer",
+    "RotationDeformer",
+    "Glue",
+];
 
 pub(crate) async fn current_modeling_document(
     service: &EditorService,
@@ -249,17 +262,6 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             vec![],
         ),
         query(
-            "get_object",
-            "读取对象属性",
-            "GetObject",
-            "读取 Part、ArtMesh、Glue 或 Deformer 属性。id 必须使用结构化读取结果中的精确值，不能使用显示名称 name 或猜测名称映射。",
-            true,
-            vec![
-                identifier("id", "Id", true),
-                parameter_filters("parameters", "Parameters", false),
-            ],
-        ),
-        query(
             "get_deformer_structure",
             "读取 Deformer 结构",
             "GetDeformerStructure",
@@ -353,6 +355,293 @@ pub(super) async fn list_notifications(
         })
         .collect::<Vec<_>>();
     Ok(json!({"notifications": notifications}))
+}
+
+pub(super) fn get_objects_parameters_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "ids": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": MAX_BATCH_SIZE,
+                "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": CUBISM_ID_MAX_LEN,
+                    "pattern": CUBISM_ID_PATTERN
+                }
+            },
+            "parameters": field_schema(&parameter_filters("parameters", "Parameters", false))
+        },
+        "required": ["ids"],
+        "additionalProperties": false
+    })
+}
+
+pub(super) fn get_all_objects_parameters_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "parameters": field_schema(&parameter_filters("parameters", "Parameters", false)),
+            "types": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string", "enum": GET_OBJECT_TYPES }
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+pub(super) async fn get_objects(
+    service: &EditorService,
+    args: Value,
+) -> Result<Value, CommandError> {
+    let (ids, parameters) = parse_get_objects_args(args)?;
+    let (rpc, model_uid) = session_with_model(service).await?;
+    Ok(json!({ "objects": fetch_objects(&rpc, &model_uid, ids, parameters).await? }))
+}
+
+pub(super) async fn get_all_objects(
+    service: &EditorService,
+    args: Value,
+) -> Result<Value, CommandError> {
+    let (parameters, type_filter) = parse_get_all_objects_args(args)?;
+    let (rpc, model_uid) = session_with_model(service).await?;
+    let (part_response, deformer_response) = tokio::try_join!(
+        rpc.request("GetPartStructure", json!({ "ModelUID": model_uid })),
+        rpc.request("GetDeformerStructure", json!({ "ModelUID": model_uid })),
+    )
+    .map_err(CommandError::from)?;
+
+    let mut ids = BTreeSet::new();
+    collect_structure_ids(
+        part_response.get("PartStructure").ok_or_else(|| {
+            CommandError::new("protocol_error", "GetPartStructure 缺少 PartStructure。")
+        })?,
+        false,
+        type_filter.as_ref(),
+        &mut ids,
+    )?;
+    match deformer_response.get("DeformerStructure") {
+        Some(Value::Array(roots)) => {
+            for root in roots {
+                collect_structure_ids(root, true, type_filter.as_ref(), &mut ids)?;
+            }
+        }
+        Some(root) => collect_structure_ids(root, true, type_filter.as_ref(), &mut ids)?,
+        None => {
+            return Err(CommandError::new(
+                "protocol_error",
+                "GetDeformerStructure 缺少 DeformerStructure。",
+            ))
+        }
+    }
+
+    let scanned_object_count = ids.len();
+    let objects = fetch_objects(&rpc, &model_uid, ids.into_iter().collect(), parameters).await?;
+    Ok(json!({ "objects": objects, "scannedObjectCount": scanned_object_count }))
+}
+
+async fn session_with_model(service: &EditorService) -> Result<(RpcClient, String), CommandError> {
+    let (rpc, mut model_uid, _) = session(service, false).await?;
+    if model_uid.is_none() {
+        let current = rpc
+            .request("GetCurrentModelUID", json!({}))
+            .await
+            .map_err(CommandError::from)?;
+        model_uid = Some(
+            current
+                .get("ModelUID")
+                .and_then(Value::as_str)
+                .ok_or_else(|| CommandError::new("protocol_error", "Editor 未返回当前模型。"))?
+                .to_string(),
+        );
+    }
+    Ok((
+        rpc,
+        model_uid.ok_or_else(|| CommandError::new("missing_model", "当前没有可用模型。"))?,
+    ))
+}
+
+fn parse_get_objects_args(args: Value) -> Result<(Vec<String>, Option<Value>), CommandError> {
+    let object = require_object_args(&args, &["ids", "parameters"])?;
+    let ids = validate_value(&identifiers("ids", "Ids", true), object.get("ids").ok_or_else(|| {
+        CommandError::new("invalid_arguments", "缺少 ids。")
+    })?)?
+    .as_array()
+    .into_iter()
+    .flatten()
+    .filter_map(Value::as_str)
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    if ids.is_empty() || ids.len() > MAX_BATCH_SIZE {
+        return Err(CommandError::new(
+            "invalid_arguments",
+            format!("ids 必须包含 1 到 {MAX_BATCH_SIZE} 项。"),
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    let ids = ids
+        .into_iter()
+        .filter(|id| seen.insert(id.clone()))
+        .collect();
+    Ok((ids, parse_optional_parameters(object.get("parameters"))?))
+}
+
+fn parse_get_all_objects_args(
+    args: Value,
+) -> Result<(Option<Value>, Option<BTreeSet<String>>), CommandError> {
+    let object = require_object_args(&args, &["parameters", "types"])?;
+    let type_filter = match object.get("types") {
+        None => None,
+        Some(Value::Array(values)) if !values.is_empty() => {
+            let mut filter = BTreeSet::new();
+            for item in values {
+                let type_name = item.as_str().ok_or_else(|| {
+                    CommandError::new("invalid_arguments", "types 必须是字符串数组。")
+                })?;
+                if !GET_OBJECT_TYPES.contains(&type_name) {
+                    return Err(CommandError::new(
+                        "invalid_arguments",
+                        format!("不支持的对象类型 {type_name}。"),
+                    ));
+                }
+                filter.insert(type_name.to_string());
+            }
+            Some(filter)
+        }
+        Some(_) => {
+            return Err(CommandError::new(
+                "invalid_arguments",
+                "types 必须是非空字符串数组。",
+            ))
+        }
+    };
+    Ok((parse_optional_parameters(object.get("parameters"))?, type_filter))
+}
+
+fn require_object_args<'a>(
+    args: &'a Value,
+    allowed: &[&str],
+) -> Result<&'a Map<String, Value>, CommandError> {
+    let object = args
+        .as_object()
+        .ok_or_else(|| CommandError::new("invalid_arguments", "参数必须是对象。"))?;
+    if let Some(unknown) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Err(CommandError::new(
+            "invalid_arguments",
+            format!("未知参数 {unknown}。"),
+        ));
+    }
+    Ok(object)
+}
+
+fn parse_optional_parameters(value: Option<&Value>) -> Result<Option<Value>, CommandError> {
+    value
+        .map(|value| validate_value(&parameter_filters("parameters", "Parameters", false), value))
+        .transpose()
+}
+
+pub(super) fn collect_structure_ids(
+    value: &Value,
+    allow_virtual_root: bool,
+    type_filter: Option<&BTreeSet<String>>,
+    ids: &mut BTreeSet<String>,
+) -> Result<(), CommandError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| CommandError::new("protocol_error", "对象结构条目不是对象。"))?;
+    let id = object
+        .get("Id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty());
+    let kind = object
+        .get("Type")
+        .and_then(Value::as_str)
+        .filter(|kind| !kind.is_empty());
+    let children = match object.get("Children") {
+        Some(Value::Array(children)) => children.as_slice(),
+        None | Some(Value::Null) => &[],
+        Some(_) => {
+            return Err(CommandError::new(
+                "protocol_error",
+                "对象结构的 Children 不是数组。",
+            ))
+        }
+    };
+
+    if allow_virtual_root && id == Some(VIRTUAL_ROOT_ID) {
+        return children.iter().try_for_each(|child| {
+            collect_structure_ids(child, allow_virtual_root, type_filter, ids)
+        });
+    }
+
+    if let (Some(id), Some(kind)) = (id, kind) {
+        if GET_OBJECT_TYPES.contains(&kind)
+            && type_filter.is_none_or(|filter| filter.contains(kind))
+        {
+            ids.insert(id.to_string());
+        }
+    }
+    children
+        .iter()
+        .try_for_each(|child| collect_structure_ids(child, allow_virtual_root, type_filter, ids))
+}
+
+async fn fetch_objects(
+    rpc: &RpcClient,
+    model_uid: &str,
+    ids: Vec<String>,
+    parameters: Option<Value>,
+) -> Result<Vec<Value>, CommandError> {
+    let mut responses: Vec<_> = stream::iter(ids.into_iter().enumerate())
+        .map(|(index, id)| {
+            let rpc = rpc.clone();
+            let model_uid = model_uid.to_string();
+            let parameters = parameters.clone();
+            async move {
+                let mut data = json!({ "ModelUID": model_uid, "Id": id });
+                if let Some(parameters) = parameters {
+                    data.as_object_mut()
+                        .unwrap()
+                        .insert("Parameters".into(), parameters);
+                }
+                (index, id, rpc.request("GetObject", data).await)
+            }
+        })
+        .buffer_unordered(MAX_CONCURRENT_OBJECT_REQUESTS)
+        .collect()
+        .await;
+    responses.sort_by_key(|(index, _, _)| *index);
+
+    let mut objects = Vec::with_capacity(responses.len());
+    for (_, id, result) in responses {
+        match result {
+            Ok(response) => {
+                let sanitized = sanitize_response(response);
+                objects.push(json!({
+                    "id": id,
+                    "ok": true,
+                    "type": sanitized.get("type").cloned().unwrap_or(Value::Null),
+                    "data": sanitized.get("data").cloned().unwrap_or(Value::Null),
+                }));
+            }
+            Err(error) if error.editor_kind() == Some("InvalidData") => {
+                objects.push(json!({
+                    "id": id,
+                    "ok": false,
+                    "error": {
+                        "code": "invalid_object_id",
+                        "message": "对象 ID 无效。请重新读取 Part 或 Deformer 结构，并使用结构结果中的精确 id；不要使用显示名称或猜测映射。"
+                    }
+                }));
+            }
+            Err(error) => return Err(CommandError::from(error)),
+        }
+    }
+    Ok(objects)
 }
 
 async fn documents_with_refs(

@@ -1544,6 +1544,17 @@ mod tests {
         .unwrap();
         assert!(!names(&object).contains("get_parameter_batch_result"));
 
+        let inspection = tool_definitions(
+            &BTreeSet::from(["model-inspection".into()]),
+            AgentTurnMode::Default,
+            true,
+        )
+        .unwrap();
+        let inspection_names = names(&inspection);
+        assert!(inspection_names.contains("get_objects"));
+        assert!(inspection_names.contains("get_all_objects"));
+        assert!(!inspection_names.contains("get_object"));
+
         let combined = tool_definitions(
             &BTreeSet::from(["parameter-editing".into(), "object-editing".into()]),
             AgentTurnMode::Default,
