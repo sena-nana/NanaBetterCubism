@@ -29,8 +29,11 @@ success or recovery state and does not release the active operation obligation.
 
 Cubism model-owned identifiers use 1 to 63 single-byte letters, digits, or
 underscores and must not begin with a digit. Human-readable `Name` fields may
-use localized text. NanaBetterCubism validates identifiers before sending an
-Editor request and does not rewrite invalid identifiers.
+use localized text. NanaBetterCubism validates new or replacement identifiers
+(`NewId`, create `Id`) against that rule before sending an Editor request and
+does not rewrite invalid identifiers. Existing model IDs may already begin with
+a digit; those values may be passed as source `Id` / object references so they
+can be repaired via an explicit `NewId`.
 
 ## Stable instructions
 

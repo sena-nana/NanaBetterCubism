@@ -1,12 +1,14 @@
 use super::{
     schema::{
-        boolean, choice, effect, field_schema, identifier, identifiers, limited_string,
-        normalize_arguments, number, parameter_filters, parameter_values, query, string,
-        validate_value, ToolSpec, LOG_TYPES,
+        boolean, choice, effect, existing_identifier, existing_identifiers, field_schema,
+        limited_string, normalize_arguments, number, parameter_filters,
+        parameter_values, query, string, validate_value, ToolSpec, LOG_TYPES,
     },
     CommandError, CurrentModelingDocument, EditorService,
 };
-use crate::domain::{CUBISM_ID_MAX_LEN, CUBISM_ID_PATTERN, MAX_BATCH_SIZE};
+use crate::domain::{
+    CUBISM_EXISTING_ID_PATTERN, CUBISM_ID_MAX_LEN, MAX_BATCH_SIZE,
+};
 use crate::protocol::{RpcClient, RpcError};
 use futures_util::stream::{self, StreamExt};
 use serde_json::{json, Map, Value};
@@ -84,7 +86,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "GetParameterValues",
             "读取当前模型的参数值；不包含动画信息。",
             true,
-            vec![identifiers("ids", "Ids", false)],
+            vec![existing_identifiers("ids", "Ids", false)],
         ),
         effect(
             "set_parameter_values",
@@ -224,7 +226,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "GetParameterKeys",
             "读取对象关联参数的关键点值。",
             true,
-            vec![identifier("objectId", "ObjectId", true)],
+            vec![existing_identifier("objectId", "ObjectId", true)],
         ),
         query(
             "get_objects_by_parameter_key",
@@ -233,7 +235,7 @@ pub(super) fn specs() -> Vec<ToolSpec> {
             "读取与指定参数关键点关联的对象。",
             true,
             vec![
-                identifier("parameterId", "ParameterId", true),
+                existing_identifier("parameterId", "ParameterId", true),
                 number("keyValue", "KeyValue", true, None, None),
             ],
         ),
@@ -369,7 +371,7 @@ pub(super) fn get_objects_parameters_schema() -> Value {
                     "type": "string",
                     "minLength": 1,
                     "maxLength": CUBISM_ID_MAX_LEN,
-                    "pattern": CUBISM_ID_PATTERN
+                    "pattern": CUBISM_EXISTING_ID_PATTERN
                 }
             },
             "parameters": field_schema(&parameter_filters("parameters", "Parameters", false))
@@ -467,7 +469,7 @@ async fn session_with_model(service: &EditorService) -> Result<(RpcClient, Strin
 
 fn parse_get_objects_args(args: Value) -> Result<(Vec<String>, Option<Value>), CommandError> {
     let object = require_object_args(&args, &["ids", "parameters"])?;
-    let ids = validate_value(&identifiers("ids", "Ids", true), object.get("ids").ok_or_else(|| {
+    let ids = validate_value(&existing_identifiers("ids", "Ids", true), object.get("ids").ok_or_else(|| {
         CommandError::new("invalid_arguments", "缺少 ids。")
     })?)?
     .as_array()
