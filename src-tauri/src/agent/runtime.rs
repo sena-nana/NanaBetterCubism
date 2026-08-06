@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 
-const PSD_CONTEXT_PREFIX: &str = "Current conversation PSD attachments. This is a compact, authoritative snapshot, not a full layer tree. Use the document id with PSD inspection tools. After loading psd-inspection, refresh with list_attached_psds before claiming that no PSD is attached or after user interaction. This local context does not imply Cubism Editor PSD operations. JSON:\n";
+const PSD_CONTEXT_PREFIX: &str = "Current conversation PSD attachments. This is a compact, authoritative snapshot, not a full layer tree. Use the document id with PSD inspection tools. Refresh with list_attached_psds before claiming that no PSD is attached, when the snapshot may have changed, or after user interaction. This local context does not imply Cubism Editor PSD operations. JSON:\n";
 const ASK_USER_TOOL_NAME: &str = "ask_user";
 const PREVIEW_UNRESOLVED_HINT: &str =
     "系统通知：仍有未处理的编辑预览。请执行或放弃待执行预览；对运行中事务继续查询终态或请求取消。禁止用普通文本跳过这些步骤。";
@@ -305,7 +305,8 @@ async fn run_turn_inner(
         }
         AgentTurnState::new(seeded, mode)
     };
-    refresh_conversation_psd_context(runtime, conversation_id, &mut state.messages)?;
+    let manifest = refresh_conversation_psd_context(runtime, conversation_id, &mut state.messages)?;
+    ensure_psd_inspection_for_attachments(&mut state, &manifest)?;
     let mut tool_sequence_corrections = 0_u8;
     let mut preview_obligation_corrections = 0_u8;
 
@@ -762,8 +763,39 @@ fn refresh_conversation_psd_context(
     runtime: &AgentRuntime,
     conversation_id: &str,
     messages: &mut Vec<Value>,
+) -> Result<PsdAttachmentManifest, AgentError> {
+    let manifest = runtime.psd_attachment_manifest(conversation_id)?;
+    replace_psd_context(messages, &manifest)?;
+    Ok(manifest)
+}
+
+fn ensure_psd_inspection_for_attachments(
+    state: &mut AgentTurnState,
+    manifest: &PsdAttachmentManifest,
 ) -> Result<(), AgentError> {
-    replace_psd_context(messages, &runtime.psd_attachment_manifest(conversation_id)?)
+    if manifest.count == 0
+        || !state
+            .active_skills
+            .insert(skills::PSD_INSPECTION_SKILL_NAME.to_string())
+    {
+        return Ok(());
+    }
+    if state.messages.iter().any(is_psd_inspection_prompt) {
+        return Ok(());
+    }
+    let insert_at = state
+        .messages
+        .iter()
+        .take_while(|message| message.get("role").and_then(Value::as_str) == Some("system"))
+        .count();
+    state.messages.insert(
+        insert_at,
+        json!({
+            "role": "system",
+            "content": skills::psd_inspection_prompt()?,
+        }),
+    );
+    Ok(())
 }
 
 fn replace_psd_context(
@@ -794,6 +826,19 @@ fn is_psd_context(message: &Value) -> bool {
             .get("content")
             .and_then(Value::as_str)
             .is_some_and(|content| content.starts_with(PSD_CONTEXT_PREFIX))
+}
+
+fn is_psd_inspection_prompt(message: &Value) -> bool {
+    message.get("role").and_then(Value::as_str) == Some("system")
+        && message
+            .get("content")
+            .and_then(Value::as_str)
+            .is_some_and(|content| {
+                content.starts_with(&format!(
+                    "## 默认已激活 SKILL：{}",
+                    skills::PSD_INSPECTION_SKILL_NAME
+                ))
+            })
 }
 
 fn message_content(message: &crate::agent::store::ChatMessage) -> Value {
@@ -1310,8 +1355,17 @@ mod tests {
             vec![json!({ "role": "system", "content": "base" })],
             AgentTurnMode::Default,
         );
-        refresh_conversation_psd_context(&runtime, &conversation.id, &mut state.messages).unwrap();
+        let empty = refresh_conversation_psd_context(
+            &runtime,
+            &conversation.id,
+            &mut state.messages,
+        )
+        .unwrap();
+        ensure_psd_inspection_for_attachments(&mut state, &empty).unwrap();
         assert_eq!(psd_context_payload(&state.messages)["count"], 0);
+        assert!(!state
+            .active_skills
+            .contains(skills::PSD_INSPECTION_SKILL_NAME));
 
         runtime
             .store
@@ -1341,13 +1395,37 @@ mod tests {
             state,
         }
         .resume(Value::String("attached".into()));
-        refresh_conversation_psd_context(&runtime, &conversation.id, &mut resumed.messages)
-            .unwrap();
+        let manifest =
+            refresh_conversation_psd_context(&runtime, &conversation.id, &mut resumed.messages)
+                .unwrap();
+        ensure_psd_inspection_for_attachments(&mut resumed, &manifest).unwrap();
 
         let payload = psd_context_payload(&resumed.messages);
         assert_eq!(payload["count"], 1);
         assert_eq!(payload["documents"][0]["id"], "new-psd");
         assert_eq!(payload["documents"][0]["available"], false);
+        assert!(resumed
+            .active_skills
+            .contains(skills::PSD_INSPECTION_SKILL_NAME));
+        assert_eq!(
+            resumed
+                .messages
+                .iter()
+                .filter(|message| is_psd_inspection_prompt(message))
+                .count(),
+            1
+        );
+        ensure_psd_inspection_for_attachments(&mut resumed, &manifest).unwrap();
+        assert_eq!(
+            resumed
+                .messages
+                .iter()
+                .filter(|message| is_psd_inspection_prompt(message))
+                .count(),
+            1
+        );
+        let tools = tool_definitions(&resumed.active_skills, resumed.mode, true).unwrap();
+        assert!(advertised_tool_names(&tools).contains("read_psd_structure"));
         assert_eq!(resumed.messages.last().unwrap()["tool_call_id"], "ask-call");
     }
 
