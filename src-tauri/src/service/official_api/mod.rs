@@ -37,6 +37,8 @@ fn spec(name: &str) -> Option<&'static ToolSpec> {
 pub(crate) fn tool_display_name(name: &str) -> Option<&'static str> {
     spec(name).map(|spec| spec.display_name).or(match name {
         "list_editor_notifications" => Some("读取 Editor 通知"),
+        "get_objects" => Some("批量读取对象属性"),
+        "get_all_objects" => Some("全量读取对象属性"),
         "execute_editor_edit" => Some("执行 Editor 修改"),
         "get_editor_edit_result" => Some("查询 Editor 修改结果"),
         "cancel_editor_edit" => Some("取消 Editor 修改"),
@@ -46,7 +48,10 @@ pub(crate) fn tool_display_name(name: &str) -> Option<&'static str> {
 
 pub(crate) fn tool_access(name: &str) -> Option<ToolAccess> {
     spec(name).map(|spec| spec.access).or(match name {
-        "list_editor_notifications" | "get_editor_edit_result" => Some(ToolAccess::ReadOnly),
+        "list_editor_notifications"
+        | "get_objects"
+        | "get_all_objects"
+        | "get_editor_edit_result" => Some(ToolAccess::ReadOnly),
         "execute_editor_edit" | "cancel_editor_edit" => Some(ToolAccess::Mutating),
         _ => None,
     })
@@ -116,6 +121,16 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
             }),
         ),
         function_tool(
+            "get_objects",
+            "按稳定 ID 批量读取 Part、ArtMesh、Glue 或 Deformer 属性（含 draw order、opacity 等）。ids 使用结构读取返回的精确值，1 到 200 项；不要逐个调用 get_object。",
+            read::get_objects_parameters_schema(),
+        ),
+        function_tool(
+            "get_all_objects",
+            "读取当前模型全部可 GetObject 的对象属性（含 draw order、opacity 等）。可选 types 过滤对象类型；可选 parameters 作为关键点过滤。",
+            read::get_all_objects_parameters_schema(),
+        ),
+        function_tool(
             "execute_editor_edit",
             "执行已确认的同类型批量编辑预览；整个预览只使用一次 Editor 事务，并返回 operationId。",
             json!({
@@ -150,7 +165,10 @@ pub(crate) fn tool_definitions() -> Vec<Value> {
 }
 
 pub(crate) fn is_tool(name: &str) -> bool {
-    name == "list_editor_notifications" || spec(name).is_some()
+    matches!(
+        name,
+        "list_editor_notifications" | "get_objects" | "get_all_objects"
+    ) || spec(name).is_some()
 }
 
 pub(crate) fn is_preview_tool(name: &str) -> bool {
@@ -163,8 +181,11 @@ pub(crate) async fn call_tool(
     name: &str,
     args: Value,
 ) -> Result<Value, CommandError> {
-    if name == "list_editor_notifications" {
-        return read::list_notifications(service, args).await;
+    match name {
+        "list_editor_notifications" => return read::list_notifications(service, args).await,
+        "get_objects" => return read::get_objects(service, args).await,
+        "get_all_objects" => return read::get_all_objects(service, args).await,
+        _ => {}
     }
     let spec = spec(name)
         .ok_or_else(|| CommandError::new("unknown_tool", format!("未知 Editor 工具：{name}")))?;

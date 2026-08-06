@@ -9,7 +9,7 @@ pub(super) enum ToolMode {
     Preview,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ToolAccess {
     ReadOnly,
     Mutating,
@@ -325,7 +325,7 @@ pub(super) fn function_tool(name: &str, description: &str, parameters: Value) ->
         }
     })
 }
-fn validate_value(field: &FieldSpec, value: &Value) -> Result<Value, CommandError> {
+pub(super) fn validate_value(field: &FieldSpec, value: &Value) -> Result<Value, CommandError> {
     let invalid = || {
         CommandError::new(
             "invalid_arguments",
