@@ -540,13 +540,11 @@ pub(super) async fn verification_snapshot(
             .await
         }
         "EditPart" | "EditArtMesh" | "EditGlue" | "EditRotationDeformer" | "EditWarpDeformer" => {
-            let id = data
-                .get("NewId")
-                .or_else(|| data.get("Id"))
-                .cloned()
-                .unwrap_or(Value::Null);
-            rpc.request("GetObject", json!({"ModelUID": model_uid, "Id": id}))
-                .await
+            rpc.request(
+                "GetObject",
+                json!({"ModelUID": model_uid, "Id": data["Id"]}),
+            )
+            .await
         }
         _ => Ok(Value::Null),
     }

@@ -458,19 +458,31 @@ fn schemas_use_documented_ranges_and_reject_raw_uids() {
 #[test]
 fn schemas_expose_cubism_identifier_constraints() {
     let tools = tool_definitions();
-    let pattern = "^[A-Za-z_][A-Za-z0-9_]{0,62}$";
+    let strict = "^[A-Za-z_][A-Za-z0-9_]{0,62}$";
+    let existing = "^[A-Za-z0-9_]{1,63}$";
     let warp = tools
         .iter()
         .find(|tool| tool["function"]["name"] == "preview_add_warp_deformer")
         .unwrap();
     let operation = &warp["function"]["parameters"]["properties"]["operations"]["items"];
-    for schema in [
-        &operation["properties"]["id"],
-        &operation["properties"]["targetObjectIds"]["items"],
-    ] {
-        assert_eq!(schema["pattern"], pattern);
-        assert_eq!(schema["maxLength"], 63);
-    }
+    assert_eq!(operation["properties"]["id"]["pattern"], strict);
+    assert_eq!(operation["properties"]["id"]["maxLength"], 63);
+    assert_eq!(
+        operation["properties"]["targetObjectIds"]["items"]["pattern"],
+        existing
+    );
+    assert_eq!(
+        operation["properties"]["targetObjectIds"]["items"]["maxLength"],
+        63
+    );
+
+    let art_mesh = tools
+        .iter()
+        .find(|tool| tool["function"]["name"] == "preview_edit_art_mesh")
+        .unwrap();
+    let art_op = &art_mesh["function"]["parameters"]["properties"]["operations"]["items"];
+    assert_eq!(art_op["properties"]["id"]["pattern"], existing);
+    assert_eq!(art_op["properties"]["newId"]["pattern"], strict);
 
     let get_objects = tools
         .iter()
@@ -478,11 +490,11 @@ fn schemas_expose_cubism_identifier_constraints() {
         .unwrap();
     let nested_id = &get_objects["function"]["parameters"]["properties"]["parameters"]["items"]
         ["properties"]["id"];
-    assert_eq!(nested_id["pattern"], pattern);
+    assert_eq!(nested_id["pattern"], existing);
     assert_eq!(nested_id["maxLength"], 63);
     assert_eq!(
         get_objects["function"]["parameters"]["properties"]["ids"]["items"]["pattern"],
-        pattern
+        existing
     );
 }
 
@@ -545,6 +557,47 @@ fn normalization_rejects_invalid_cubism_ids_but_keeps_unicode_names() {
 }
 
 #[test]
+fn art_mesh_edit_accepts_digit_leading_source_id_and_strict_new_id() {
+    let art_mesh = spec("preview_edit_art_mesh").unwrap();
+    let normalized = schema::normalize_operations(
+        art_mesh,
+        json!({"operations": [{"id": "52_line", "newId": "Part52_line"}]}),
+        "private-model",
+    )
+    .unwrap();
+    assert_eq!(normalized[0].1["Id"], "52_line");
+    assert_eq!(normalized[0].1["NewId"], "Part52_line");
+
+    let error = schema::normalize_operations(
+        art_mesh,
+        json!({"operations": [{"id": "52_line", "newId": "9bad"}]}),
+        "private-model",
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "invalid_arguments");
+    assert!(error.message.contains("newId"));
+
+    let add = spec("preview_add_part").unwrap();
+    let error = schema::normalize_operations(
+        add,
+        json!({"operations": [{"id": "52_line"}]}),
+        "private-model",
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "invalid_arguments");
+}
+
+#[test]
+fn get_objects_accepts_digit_leading_ids() {
+    let ids = schema::validate_value(
+        &schema::existing_identifiers("ids", "Ids", true),
+        &json!(["52_line", "ArtMeshA"]),
+    )
+    .unwrap();
+    assert_eq!(ids, json!(["52_line", "ArtMeshA"]));
+}
+
+#[test]
 fn every_preview_schema_requires_a_bounded_operations_array() {
     let tools = tool_definitions();
     let previews = tool_specs()
@@ -581,6 +634,28 @@ fn batch_arguments_reject_legacy_empty_and_oversized_inputs() {
         schema::normalize_operations(spec, json!({"operations": operations}), "private-model")
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn art_mesh_rename_preview_looks_up_source_id() {
+    let port = sequence_server(vec![(
+        "GetObject",
+        json!({"ModelUID": "private-model", "Id": "52_line"}),
+        json!({"Data": {"Id": "52_line", "Type": "ArtMesh", "Name": "line"}}),
+    )])
+    .await;
+    let service = connected_service(port).await;
+    let preview = call_tool(
+        &service,
+        "preview_edit_art_mesh",
+        json!({"operations": [{"id": "52_line", "newId": "Part52_line"}]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(preview["operation"], "EditArtMesh");
+    assert_eq!(preview["operationCount"], 1);
+    assert_eq!(preview["operations"][0]["id"], "52_line");
+    assert_eq!(preview["operations"][0]["newId"], "Part52_line");
 }
 
 #[test]

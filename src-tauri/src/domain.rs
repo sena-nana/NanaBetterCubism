@@ -691,13 +691,11 @@ pub fn expand_template(
 
 pub const CUBISM_ID_MAX_LEN: usize = 63;
 pub const CUBISM_ID_PATTERN: &str = "^[A-Za-z_][A-Za-z0-9_]{0,62}$";
+pub const CUBISM_EXISTING_ID_PATTERN: &str = "^[A-Za-z0-9_]{1,63}$";
 
-pub fn validate_identifier(id: &str) -> Result<(), String> {
+fn validate_identifier_charset(id: &str) -> Result<(), String> {
     if id.is_empty() || id.len() > CUBISM_ID_MAX_LEN {
         return Err("ID 长度必须在 1 到 63 个单字节字符之间。".into());
-    }
-    if id.as_bytes()[0].is_ascii_digit() {
-        return Err("ID 不能以数字开头。".into());
     }
     if !id
         .bytes()
@@ -706,6 +704,18 @@ pub fn validate_identifier(id: &str) -> Result<(), String> {
         return Err("ID 只能包含单字节字母、数字和下划线。".into());
     }
     Ok(())
+}
+
+pub fn validate_identifier(id: &str) -> Result<(), String> {
+    validate_identifier_charset(id)?;
+    if id.as_bytes()[0].is_ascii_digit() {
+        return Err("ID 不能以数字开头。".into());
+    }
+    Ok(())
+}
+
+pub fn validate_existing_identifier(id: &str) -> Result<(), String> {
+    validate_identifier_charset(id)
 }
 
 fn issue(
@@ -725,6 +735,17 @@ fn issue(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn existing_identifier_allows_digit_leading_ids() {
+        assert!(validate_existing_identifier("52_line").is_ok());
+        assert!(validate_existing_identifier("ArtMeshA").is_ok());
+        assert!(validate_existing_identifier("1Warp").is_ok());
+        assert!(validate_existing_identifier("Warp_尾巴").is_err());
+        assert!(validate_existing_identifier("").is_err());
+        assert!(validate_identifier("52_line").is_err());
+        assert!(validate_identifier("Part52_line").is_ok());
+    }
 
     fn input() -> ParameterBatchInput {
         ParameterBatchInput {
