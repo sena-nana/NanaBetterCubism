@@ -1,13 +1,9 @@
 use crate::agent::images::ChatImageAttachment;
 use crate::agent::plan::{PendingPlanApproval, PlanApprovalAction, PlanDocument};
-use crate::agent::store::{
-    AgentBackendConfigView, AgentStore, PendingQuestion, PlanStep,
-};
-use crate::agent::{
-    emit_conversations_changed, new_id, AgentError, AgentRuntime, AgentTurnMode,
-};
+use crate::agent::store::{AgentBackendConfigView, AgentStore, PendingQuestion, PlanStep};
+use crate::agent::{emit_conversations_changed, new_id, AgentError, AgentRuntime, AgentTurnMode};
 use crate::mcp::{start_internal_server, InternalMcpServer};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::ffi::OsString;
@@ -19,7 +15,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{mpsc, oneshot, watch, Mutex, RwLock};
 use tokio::time::{sleep, timeout};
 
 const MCP_SERVER_NAME: &str = "nanabettercubism";
@@ -63,6 +59,24 @@ pub struct CodexStatus {
 
 struct PendingCodexAnswer {
     sender: oneshot::Sender<String>,
+    conversation_id: String,
+    generation: u64,
+    turn_id: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PendingAnswerResult {
+    Answer(String),
+    Cancelled,
+    TransportClosed,
+    Expired,
+}
+
+#[derive(Default)]
+struct TurnRunState {
+    turn_id: Option<String>,
+    started: bool,
+    terminal: bool,
 }
 
 pub struct CodexManager {
@@ -70,6 +84,7 @@ pub struct CodexManager {
     sessions: Mutex<HashMap<String, Arc<CodexSession>>>,
     pending_answers: Mutex<HashMap<String, PendingCodexAnswer>>,
     status: RwLock<CodexStatus>,
+    next_generation: AtomicU64,
 }
 
 impl CodexManager {
@@ -82,6 +97,7 @@ impl CodexManager {
                 message: "尚未检测本地 Codex。".into(),
                 ..CodexStatus::default()
             }),
+            next_generation: AtomicU64::new(1),
         }
     }
 
@@ -158,7 +174,7 @@ impl CodexManager {
             }),
         );
         emit_conversations_changed(&app);
-        self.schedule_idle_cleanup(conversation_id).await;
+        self.schedule_idle_cleanup(conversation_id, runtime).await;
         result
     }
 
@@ -176,8 +192,52 @@ impl CodexManager {
         let session = self
             .session(app.clone(), runtime.clone(), conversation_id, &config)
             .await?;
-        *session.mcp.turn_mode.lock().unwrap() = mode;
-        *session.mcp.turn_cancel.lock().unwrap() = cancel.clone();
+        let mut state = TurnRunState::default();
+        let result = self
+            .run_session_turn(
+                app,
+                runtime.clone(),
+                conversation_id,
+                mode,
+                text,
+                attachments,
+                cancel,
+                &session,
+                &mut state,
+            )
+            .await;
+
+        if let Some(turn_id) = state.turn_id.as_deref() {
+            self.finish_session_turn(&runtime.store, conversation_id, &session, turn_id)
+                .await;
+        }
+        if let Err(error) = &result {
+            if (state.started && !state.terminal) || is_transport_failure(error) {
+                let invalidated_current = self
+                    .invalidate_session(&runtime.store, conversation_id, &session)
+                    .await;
+                if is_transport_failure(error) && invalidated_current {
+                    *self.status.write().await = status_from_error(error.clone());
+                }
+            }
+        }
+        result
+    }
+
+    async fn run_session_turn(
+        &self,
+        app: &AppHandle,
+        runtime: Arc<AgentRuntime>,
+        conversation_id: &str,
+        mode: AgentTurnMode,
+        text: String,
+        attachments: Vec<ChatImageAttachment>,
+        cancel: Arc<AtomicBool>,
+        session: &Arc<CodexSession>,
+        state: &mut TurnRunState,
+    ) -> Result<(), AgentError> {
+        *session.turn_mode.lock().unwrap() = mode;
+        *session.turn_cancel.lock().unwrap() = cancel.clone();
         *session.last_used.lock().await = Instant::now();
 
         if !attachments.is_empty() && !session.image_input_supported {
@@ -243,12 +303,14 @@ impl CodexManager {
         }
 
         let response = session.transport.request("turn/start", params).await?;
+        state.started = true;
         let turn_id = response
             .pointer("/turn/id")
             .and_then(Value::as_str)
             .ok_or_else(|| AgentError::new("codex_protocol_error", "turn/start 缺少 turn.id。"))?
             .to_string();
         *session.active_turn.lock().await = Some(turn_id.clone());
+        state.turn_id = Some(turn_id.clone());
 
         let mut plan_steps = Vec::<PlanStep>::new();
         let mut plan_text = String::new();
@@ -266,22 +328,18 @@ impl CodexManager {
                     .await;
             }
 
-            let event = {
-                let mut events = session.events.lock().await;
-                timeout(TURN_EVENT_POLL, events.recv()).await
-            };
-            let event = match event {
-                Err(_) => continue,
-                Ok(Some(event)) => event,
-                Ok(None) => {
-                    return Err(AgentError::new(
-                        "codex_transport_closed",
-                        session.transport.diagnostic_message(),
-                    ))
-                }
+            let Some(event) = session.poll_event(TURN_EVENT_POLL).await? else {
+                continue;
             };
 
             if event.get("id").is_some() && event.get("method").is_some() {
+                if !server_request_matches_turn(&event, &session.thread_id, &turn_id) {
+                    session
+                        .transport
+                        .respond_error(event["id"].clone(), -32001, "Codex 请求所属回合已失效。")
+                        .await?;
+                    continue;
+                }
                 if let Err(error) = self
                     .handle_server_request(
                         app,
@@ -289,6 +347,7 @@ impl CodexManager {
                         conversation_id,
                         mode,
                         &session,
+                        &turn_id,
                         &event,
                         &cancel,
                     )
@@ -309,11 +368,12 @@ impl CodexManager {
                 continue;
             }
 
-            let method = event.get("method").and_then(Value::as_str).unwrap_or_default();
+            let method = event
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             let params = event.get("params").cloned().unwrap_or(Value::Null);
-            if params.get("threadId").and_then(Value::as_str)
-                .is_some_and(|id| id != session.thread_id)
-            {
+            if !event_matches_turn(&params, &session.thread_id, &turn_id) {
                 continue;
             }
             match method {
@@ -329,7 +389,11 @@ impl CodexManager {
                     let item = &params["item"];
                     match item.get("type").and_then(Value::as_str).unwrap_or_default() {
                         "agentMessage" => {
-                            let id = item.get("id").and_then(Value::as_str).unwrap_or(&new_id()).to_string();
+                            let id = item
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .unwrap_or(&new_id())
+                                .to_string();
                             let text = item.get("text").and_then(Value::as_str).unwrap_or_default();
                             runtime.store.append_external_message_once(
                                 conversation_id,
@@ -348,7 +412,10 @@ impl CodexManager {
                                 .to_string();
                         }
                         "mcpToolCall" => {
-                            let server = item.get("server").and_then(Value::as_str).unwrap_or_default();
+                            let server = item
+                                .get("server")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default();
                             if server != MCP_SERVER_NAME {
                                 policy_violation = Some(AgentError::new(
                                     "codex_policy_violation",
@@ -400,7 +467,9 @@ impl CodexManager {
                             })
                         })
                         .collect();
-                    let plan = runtime.store.upsert_plan(conversation_id, plan_steps.clone())?;
+                    let plan = runtime
+                        .store
+                        .upsert_plan(conversation_id, plan_steps.clone())?;
                     let _ = app.emit(
                         "agent://plan",
                         json!({"conversationId": conversation_id, "plan": plan}),
@@ -423,7 +492,7 @@ impl CodexManager {
                 _ => {}
             }
         };
-        *session.active_turn.lock().await = None;
+        state.terminal = true;
 
         if let Some(error) = policy_violation {
             return Err(error);
@@ -435,7 +504,10 @@ impl CodexManager {
         match status {
             "completed" => {}
             "interrupted" => {
-                return Err(AgentError::new("codex_turn_cancelled", "本地 Codex 回合已取消。"))
+                return Err(AgentError::new(
+                    "codex_turn_cancelled",
+                    "本地 Codex 回合已取消。",
+                ))
             }
             _ => {
                 let message = completed
@@ -447,7 +519,13 @@ impl CodexManager {
         }
 
         if mode == AgentTurnMode::Plan {
-            self.publish_plan_approval(app, &runtime.store, conversation_id, plan_steps, plan_text)?;
+            self.publish_plan_approval(
+                app,
+                &runtime.store,
+                conversation_id,
+                plan_steps,
+                plan_text,
+            )?;
         }
         Ok(())
     }
@@ -459,6 +537,7 @@ impl CodexManager {
         conversation_id: &str,
         mode: AgentTurnMode,
         session: &Arc<CodexSession>,
+        turn_id: &str,
         request: &Value,
         cancel: &Arc<AtomicBool>,
     ) -> Result<(), AgentError> {
@@ -523,11 +602,18 @@ impl CodexManager {
             question: question_text,
             options,
         };
-        runtime.store.set_pending_question(&pending, "codex-request-user-input")?;
+        runtime
+            .store
+            .set_pending_question(&pending, "codex-request-user-input")?;
         let (answer_tx, answer_rx) = oneshot::channel();
         self.pending_answers.lock().await.insert(
             action_id.clone(),
-            PendingCodexAnswer { sender: answer_tx },
+            PendingCodexAnswer {
+                sender: answer_tx,
+                conversation_id: conversation_id.to_string(),
+                generation: session.generation,
+                turn_id: turn_id.to_string(),
+            },
         );
         let _ = app.emit(
             "agent://user-action",
@@ -537,28 +623,38 @@ impl CodexManager {
             }),
         );
 
-        let answer = loop {
-            if cancel.load(Ordering::SeqCst) {
-                self.pending_answers.lock().await.remove(&action_id);
-                let _ = runtime.store.take_pending_question(&action_id);
+        let wait_result = wait_for_answer(
+            answer_rx,
+            cancel,
+            session.transport.closed_receiver(),
+            TURN_EVENT_POLL,
+        )
+        .await;
+        self.pending_answers.lock().await.remove(&action_id);
+        let _ = runtime.store.take_pending_question(&action_id)?;
+
+        let answer = match wait_result {
+            PendingAnswerResult::Answer(answer) => answer,
+            PendingAnswerResult::Cancelled => {
                 session
                     .transport
                     .respond(request_id, json!({"answers": {}}))
                     .await?;
                 return Ok(());
             }
-            match timeout(TURN_EVENT_POLL, answer_rx).await {
-                Ok(Ok(answer)) => break answer,
-                Ok(Err(_)) => {
-                    return Err(AgentError::new(
-                        "codex_question_expired",
-                        "Codex 提问上下文已失效。",
-                    ))
-                }
-                Err(_) => continue,
+            PendingAnswerResult::TransportClosed => {
+                return Err(AgentError::new(
+                    "codex_transport_closed",
+                    session.transport.diagnostic_message(),
+                ));
+            }
+            PendingAnswerResult::Expired => {
+                return Err(AgentError::new(
+                    "codex_question_expired",
+                    "Codex 提问上下文已失效。",
+                ));
             }
         };
-        let _ = runtime.store.take_pending_question(&action_id)?;
         let answers = questions
             .iter()
             .filter_map(|question| question.get("id").and_then(Value::as_str))
@@ -648,10 +744,15 @@ impl CodexManager {
         conversation_id: &str,
         config: &AgentBackendConfigView,
     ) -> Result<Arc<CodexSession>, AgentError> {
-        let mut sessions = self.sessions.lock().await;
-        if let Some(session) = sessions.get(conversation_id) {
-            return Ok(session.clone());
+        let existing = self.sessions.lock().await.get(conversation_id).cloned();
+        if let Some(session) = existing {
+            if session.transport.is_healthy() {
+                return Ok(session);
+            }
+            self.invalidate_session(&runtime.store, conversation_id, &session)
+                .await;
         }
+        let generation = self.next_generation.fetch_add(1, Ordering::SeqCst);
         let session = Arc::new(
             CodexSession::start(
                 app,
@@ -659,6 +760,7 @@ impl CodexManager {
                 conversation_id,
                 config,
                 &self.data_dir,
+                generation,
             )
             .await?,
         );
@@ -670,11 +772,88 @@ impl CodexManager {
             plan_supported: session.plan_supported,
             message: format!("本地 Codex {} 已就绪。", session.version),
         };
-        sessions.insert(conversation_id.to_string(), session.clone());
+        self.sessions
+            .lock()
+            .await
+            .insert(conversation_id.to_string(), session.clone());
         Ok(session)
     }
 
-    async fn schedule_idle_cleanup(self: &Arc<Self>, conversation_id: String) {
+    async fn finish_session_turn(
+        &self,
+        store: &AgentStore,
+        conversation_id: &str,
+        session: &Arc<CodexSession>,
+        turn_id: &str,
+    ) {
+        let mut active_turn = session.active_turn.lock().await;
+        if active_turn.as_deref() == Some(turn_id) {
+            *active_turn = None;
+        }
+        drop(active_turn);
+        *session.last_used.lock().await = Instant::now();
+        self.clear_pending_answers(
+            store,
+            conversation_id,
+            Some(session.generation),
+            Some(turn_id),
+        )
+        .await;
+    }
+
+    async fn clear_pending_answers(
+        &self,
+        store: &AgentStore,
+        conversation_id: &str,
+        generation: Option<u64>,
+        turn_id: Option<&str>,
+    ) {
+        let mut action_ids = Vec::new();
+        let mut pending = self.pending_answers.lock().await;
+        pending.retain(|action_id, answer| {
+            let keep = answer.conversation_id != conversation_id
+                || generation.is_some_and(|value| answer.generation != value)
+                || turn_id.is_some_and(|value| answer.turn_id != value);
+            if !keep {
+                action_ids.push(action_id.clone());
+            }
+            keep
+        });
+        drop(pending);
+        for action_id in action_ids {
+            let _ = store.take_pending_question(&action_id);
+        }
+    }
+
+    async fn invalidate_session(
+        &self,
+        store: &AgentStore,
+        conversation_id: &str,
+        session: &Arc<CodexSession>,
+    ) -> bool {
+        session.transport.shutdown().await;
+        *session.active_turn.lock().await = None;
+        self.clear_pending_answers(store, conversation_id, Some(session.generation), None)
+            .await;
+        let mut sessions = self.sessions.lock().await;
+        let removed = if sessions
+            .get(conversation_id)
+            .is_some_and(|current| Arc::ptr_eq(current, session))
+        {
+            sessions.remove(conversation_id);
+            true
+        } else {
+            false
+        };
+        drop(sessions);
+        removed
+    }
+
+    async fn schedule_idle_cleanup(
+        self: &Arc<Self>,
+        conversation_id: String,
+        runtime: Arc<AgentRuntime>,
+    ) {
         let session = self.sessions.lock().await.get(&conversation_id).cloned();
         let Some(session) = session else {
             return;
@@ -690,12 +869,16 @@ impl CodexManager {
             {
                 return;
             }
-            let mut sessions = manager.sessions.lock().await;
-            if sessions
+            let is_current = manager
+                .sessions
+                .lock()
+                .await
                 .get(&conversation_id)
-                .is_some_and(|current| Arc::ptr_eq(current, &session))
-            {
-                sessions.remove(&conversation_id);
+                .is_some_and(|current| Arc::ptr_eq(current, &session));
+            if is_current {
+                manager
+                    .invalidate_session(&runtime.store, &conversation_id, &session)
+                    .await;
             }
         });
     }
@@ -707,17 +890,30 @@ impl CodexManager {
         conversation_id: &str,
     ) -> Result<bool, AgentError> {
         let Some(thread_id) = runtime.store.codex_thread_id(conversation_id)? else {
+            let session = self.sessions.lock().await.get(conversation_id).cloned();
+            if let Some(session) = session {
+                self.invalidate_session(&runtime.store, conversation_id, &session)
+                    .await;
+            }
+            self.clear_pending_answers(&runtime.store, conversation_id, None, None)
+                .await;
+            let _ = runtime.store.clear_pending_user_action(conversation_id);
             return Ok(false);
         };
         let config = runtime.store.get_agent_backend_config()?;
         let session = self
-            .session(app, runtime, conversation_id, &config)
+            .session(app, runtime.clone(), conversation_id, &config)
             .await?;
-        session
+        let result = session
             .transport
             .request("thread/archive", json!({"threadId": thread_id}))
-            .await?;
-        self.sessions.lock().await.remove(conversation_id);
+            .await;
+        self.invalidate_session(&runtime.store, conversation_id, &session)
+            .await;
+        self.clear_pending_answers(&runtime.store, conversation_id, None, None)
+            .await;
+        let _ = runtime.store.clear_pending_user_action(conversation_id);
+        result?;
         Ok(true)
     }
 }
@@ -725,7 +921,10 @@ impl CodexManager {
 struct CodexSession {
     transport: Arc<JsonRpcTransport>,
     events: Mutex<mpsc::UnboundedReceiver<Value>>,
-    mcp: InternalMcpServer,
+    _mcp: Option<InternalMcpServer>,
+    turn_mode: Arc<StdMutex<AgentTurnMode>>,
+    turn_cancel: Arc<StdMutex<Arc<AtomicBool>>>,
+    generation: u64,
     thread_id: String,
     model: String,
     version: String,
@@ -737,12 +936,52 @@ struct CodexSession {
 }
 
 impl CodexSession {
+    async fn poll_event(&self, poll_interval: Duration) -> Result<Option<Value>, AgentError> {
+        let event = {
+            let mut events = self.events.lock().await;
+            timeout(poll_interval, events.recv()).await
+        };
+        match event {
+            Err(_) => Ok(None),
+            Ok(Some(event)) => Ok(Some(event)),
+            Ok(None) => Err(AgentError::new(
+                "codex_transport_closed",
+                self.transport.diagnostic_message(),
+            )),
+        }
+    }
+
+    #[cfg(test)]
+    fn mock(generation: u64) -> (Arc<Self>, mpsc::UnboundedReceiver<Value>) {
+        let (transport, events, outbound) = JsonRpcTransport::mock();
+        (
+            Arc::new(Self {
+                transport,
+                events: Mutex::new(events),
+                _mcp: None,
+                turn_mode: Arc::new(StdMutex::new(AgentTurnMode::Default)),
+                turn_cancel: Arc::new(StdMutex::new(Arc::new(AtomicBool::new(false)))),
+                generation,
+                thread_id: format!("thread-{generation}"),
+                model: "mock-model".into(),
+                version: "mock-version".into(),
+                image_input_supported: true,
+                plan_supported: true,
+                cwd: "mock-cwd".into(),
+                active_turn: Mutex::new(None),
+                last_used: Mutex::new(Instant::now()),
+            }),
+            outbound,
+        )
+    }
+
     async fn start(
         app: AppHandle,
         runtime: Arc<AgentRuntime>,
         conversation_id: &str,
         config: &AgentBackendConfigView,
         data_dir: &Path,
+        generation: u64,
     ) -> Result<Self, AgentError> {
         let executable = resolve_codex_executable(config).await?;
         let version = codex_version(&executable).await?;
@@ -835,10 +1074,15 @@ impl CodexSession {
         }
 
         verify_mcp_inventory(&transport, &thread_id, &mcp.tool_names).await?;
+        let turn_mode = mcp.turn_mode.clone();
+        let turn_cancel = mcp.turn_cancel.clone();
         Ok(Self {
             transport,
             events: Mutex::new(events),
-            mcp,
+            _mcp: Some(mcp),
+            turn_mode,
+            turn_cancel,
+            generation,
             thread_id,
             model,
             version,
@@ -852,11 +1096,16 @@ impl CodexSession {
 }
 
 struct JsonRpcTransport {
-    writer: Mutex<ChildStdin>,
-    child: Mutex<Child>,
+    writer: Mutex<Option<ChildStdin>>,
+    child: Mutex<Option<Child>>,
     pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, AgentError>>>>>,
     next_id: AtomicU64,
     diagnostics: Arc<StdMutex<VecDeque<String>>>,
+    events: mpsc::UnboundedSender<Value>,
+    closed: watch::Sender<bool>,
+    healthy: AtomicBool,
+    #[cfg(test)]
+    mock_writer: Option<mpsc::UnboundedSender<Value>>,
 }
 
 impl JsonRpcTransport {
@@ -916,43 +1165,30 @@ impl JsonRpcTransport {
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let diagnostics = Arc::new(StdMutex::new(VecDeque::new()));
         let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let (closed, _) = watch::channel(false);
+        let transport = Arc::new(Self {
+            writer: Mutex::new(Some(stdin)),
+            child: Mutex::new(Some(child)),
+            pending,
+            next_id: AtomicU64::new(1),
+            diagnostics: diagnostics.clone(),
+            events: events_tx,
+            closed,
+            healthy: AtomicBool::new(true),
+            #[cfg(test)]
+            mock_writer: None,
+        });
 
-        let reader_pending = pending.clone();
+        let reader_transport = transport.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 let Ok(message) = serde_json::from_str::<Value>(&line) else {
                     continue;
                 };
-                if let Some(id) = message.get("id").and_then(Value::as_u64) {
-                    if message.get("method").is_none() {
-                        if let Some(sender) = reader_pending.lock().await.remove(&id) {
-                            let response = if let Some(error) = message.get("error") {
-                                Err(AgentError::new(
-                                    "codex_rpc_error",
-                                    error
-                                        .get("message")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or("Codex 请求失败。"),
-                                ))
-                            } else {
-                                Ok(message.get("result").cloned().unwrap_or(Value::Null))
-                            };
-                            let _ = sender.send(response);
-                        }
-                        continue;
-                    }
-                }
-                let _ = events_tx.send(message);
+                reader_transport.dispatch_incoming(message).await;
             }
-            let _ = events_tx.send(json!({"method": "transport/closed", "params": {}}));
-            let mut pending = reader_pending.lock().await;
-            for (_, sender) in pending.drain() {
-                let _ = sender.send(Err(AgentError::new(
-                    "codex_transport_closed",
-                    "本地 Codex 进程已退出。",
-                )));
-            }
+            reader_transport.close().await;
         });
 
         let diagnostics_writer = diagnostics.clone();
@@ -967,19 +1203,103 @@ impl JsonRpcTransport {
             }
         });
 
-        Ok((
+        Ok((transport, events_rx))
+    }
+
+    #[cfg(test)]
+    fn mock() -> (
+        Arc<Self>,
+        mpsc::UnboundedReceiver<Value>,
+        mpsc::UnboundedReceiver<Value>,
+    ) {
+        let (events, events_rx) = mpsc::unbounded_channel();
+        let (mock_writer, mock_rx) = mpsc::unbounded_channel();
+        let (closed, _) = watch::channel(false);
+        (
             Arc::new(Self {
-                writer: Mutex::new(stdin),
-                child: Mutex::new(child),
-                pending,
+                writer: Mutex::new(None),
+                child: Mutex::new(None),
+                pending: Arc::new(Mutex::new(HashMap::new())),
                 next_id: AtomicU64::new(1),
-                diagnostics,
+                diagnostics: Arc::new(StdMutex::new(VecDeque::new())),
+                events,
+                closed,
+                healthy: AtomicBool::new(true),
+                mock_writer: Some(mock_writer),
             }),
             events_rx,
-        ))
+            mock_rx,
+        )
+    }
+
+    async fn dispatch_incoming(&self, message: Value) {
+        if !self.is_healthy() {
+            return;
+        }
+        if let Some(id) = message.get("id").and_then(Value::as_u64) {
+            if message.get("method").is_none() {
+                if let Some(sender) = self.pending.lock().await.remove(&id) {
+                    let response = if let Some(error) = message.get("error") {
+                        Err(AgentError::new(
+                            "codex_rpc_error",
+                            error
+                                .get("message")
+                                .and_then(Value::as_str)
+                                .unwrap_or("Codex 请求失败。"),
+                        ))
+                    } else {
+                        Ok(message.get("result").cloned().unwrap_or(Value::Null))
+                    };
+                    let _ = sender.send(response);
+                }
+                return;
+            }
+        }
+        let _ = self.events.send(message);
+    }
+
+    fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::SeqCst)
+    }
+
+    fn closed_receiver(&self) -> watch::Receiver<bool> {
+        self.closed.subscribe()
+    }
+
+    fn invalidate(&self) {
+        if self.healthy.swap(false, Ordering::SeqCst) {
+            self.closed.send_replace(true);
+            let _ = self
+                .events
+                .send(json!({"method": "transport/closed", "params": {}}));
+        }
+    }
+
+    async fn close(&self) {
+        self.invalidate();
+        let mut pending = self.pending.lock().await;
+        for (_, sender) in pending.drain() {
+            let _ = sender.send(Err(AgentError::new(
+                "codex_transport_closed",
+                "本地 Codex 进程已退出。",
+            )));
+        }
+    }
+
+    async fn shutdown(&self) {
+        self.close().await;
+        if let Some(child) = self.child.lock().await.as_mut() {
+            let _ = child.start_kill();
+        }
     }
 
     async fn request(&self, method: &str, params: Value) -> Result<Value, AgentError> {
+        if !self.is_healthy() {
+            return Err(AgentError::new(
+                "codex_transport_closed",
+                self.diagnostic_message(),
+            ));
+        }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (sender, receiver) = oneshot::channel();
         self.pending.lock().await.insert(id, sender);
@@ -1007,27 +1327,38 @@ impl JsonRpcTransport {
     }
 
     async fn notify(&self, method: &str, params: Value) -> Result<(), AgentError> {
-        self.write(json!({"method": method, "params": params})).await
+        self.write(json!({"method": method, "params": params}))
+            .await
     }
 
     async fn respond(&self, id: Value, result: Value) -> Result<(), AgentError> {
         self.write(json!({"id": id, "result": result})).await
     }
 
-    async fn respond_error(
-        &self,
-        id: Value,
-        code: i64,
-        message: &str,
-    ) -> Result<(), AgentError> {
+    async fn respond_error(&self, id: Value, code: i64, message: &str) -> Result<(), AgentError> {
         self.write(json!({"id": id, "error": {"code": code, "message": message}}))
             .await
     }
 
     async fn write(&self, message: Value) -> Result<(), AgentError> {
+        if !self.is_healthy() {
+            return Err(AgentError::new(
+                "codex_transport_closed",
+                self.diagnostic_message(),
+            ));
+        }
+        #[cfg(test)]
+        if let Some(writer) = &self.mock_writer {
+            return writer.send(message).map_err(|_| {
+                AgentError::new("codex_transport_closed", "Mock Codex transport 已关闭。")
+            });
+        }
         let mut bytes = serde_json::to_vec(&message)?;
         bytes.push(b'\n');
         let mut writer = self.writer.lock().await;
+        let writer = writer
+            .as_mut()
+            .ok_or_else(|| AgentError::new("codex_transport_closed", self.diagnostic_message()))?;
         writer
             .write_all(&bytes)
             .await
@@ -1051,7 +1382,9 @@ impl JsonRpcTransport {
 impl Drop for JsonRpcTransport {
     fn drop(&mut self) {
         if let Ok(mut child) = self.child.try_lock() {
-            let _ = child.start_kill();
+            if let Some(child) = child.as_mut() {
+                let _ = child.start_kill();
+            }
         }
     }
 }
@@ -1095,10 +1428,7 @@ async fn ensure_account(transport: &JsonRpcTransport) -> Result<(), AgentError> 
 
 async fn read_default_model(transport: &JsonRpcTransport) -> Result<(String, bool), AgentError> {
     let models = transport
-        .request(
-            "model/list",
-            json!({"limit": 100, "includeHidden": false}),
-        )
+        .request("model/list", json!({"limit": 100, "includeHidden": false}))
         .await?;
     let data = models
         .get("data")
@@ -1184,9 +1514,7 @@ async fn probe_codex(config: &AgentBackendConfigView) -> Result<CodexStatus, Age
     })
 }
 
-async fn resolve_codex_executable(
-    config: &AgentBackendConfigView,
-) -> Result<OsString, AgentError> {
+async fn resolve_codex_executable(config: &AgentBackendConfigView) -> Result<OsString, AgentError> {
     if let Some(path) = config
         .codex_executable
         .as_deref()
@@ -1226,7 +1554,12 @@ async fn resolve_codex_executable(
         );
     }
     if let Some(profile) = std::env::var_os("USERPROFILE") {
-        candidates.push(PathBuf::from(profile).join(".local").join("bin").join("codex.exe"));
+        candidates.push(
+            PathBuf::from(profile)
+                .join(".local")
+                .join("bin")
+                .join("codex.exe"),
+        );
     }
     candidates
         .into_iter()
@@ -1282,6 +1615,62 @@ fn is_forbidden_item(item_type: &str) -> bool {
     )
 }
 
+fn server_request_matches_turn(request: &Value, thread_id: &str, turn_id: &str) -> bool {
+    request.pointer("/params/threadId").and_then(Value::as_str) == Some(thread_id)
+        && request.pointer("/params/turnId").and_then(Value::as_str) == Some(turn_id)
+}
+
+fn event_matches_turn(params: &Value, thread_id: &str, turn_id: &str) -> bool {
+    let thread_matches = params
+        .get("threadId")
+        .and_then(Value::as_str)
+        .is_none_or(|id| id == thread_id);
+    let event_turn_id = params
+        .get("turnId")
+        .and_then(Value::as_str)
+        .or_else(|| params.pointer("/turn/id").and_then(Value::as_str));
+    thread_matches && event_turn_id.is_none_or(|id| id == turn_id)
+}
+
+async fn wait_for_answer(
+    mut answer_rx: oneshot::Receiver<String>,
+    cancel: &AtomicBool,
+    mut transport_closed: watch::Receiver<bool>,
+    poll_interval: Duration,
+) -> PendingAnswerResult {
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return PendingAnswerResult::Cancelled;
+        }
+        if *transport_closed.borrow() {
+            return PendingAnswerResult::TransportClosed;
+        }
+
+        tokio::select! {
+            biased;
+            changed = transport_closed.changed() => {
+                if changed.is_err() || *transport_closed.borrow() {
+                    return PendingAnswerResult::TransportClosed;
+                }
+            }
+            answer = &mut answer_rx => {
+                return match answer {
+                    Ok(answer) => PendingAnswerResult::Answer(answer),
+                    Err(_) => PendingAnswerResult::Expired,
+                };
+            }
+            _ = sleep(poll_interval) => {}
+        }
+    }
+}
+
+fn is_transport_failure(error: &AgentError) -> bool {
+    matches!(
+        error.code.as_str(),
+        "codex_transport_closed" | "codex_transport_write" | "codex_request_timeout"
+    )
+}
+
 fn automatic_approval_answers(questions: &[Value]) -> Option<serde_json::Map<String, Value>> {
     let mut answers = serde_json::Map::new();
     for question in questions {
@@ -1334,6 +1723,17 @@ impl CommandWindowsHide for Command {
 mod tests {
     use super::*;
 
+    fn test_store() -> (AgentStore, String, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("nbc-codex-{}", new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = AgentStore::default();
+        store.open(dir.join("agent.db")).unwrap();
+        let conversation = store
+            .create_conversation(Some("Codex transport test".into()), None)
+            .unwrap();
+        (store, conversation.id, dir)
+    }
+
     #[test]
     fn auto_approval_accepts_only_explicit_allow_options() {
         let questions = vec![json!({
@@ -1373,6 +1773,37 @@ mod tests {
     }
 
     #[test]
+    fn stale_turn_requests_and_notifications_are_rejected() {
+        let current_request = json!({
+            "id": 1,
+            "method": "item/tool/requestUserInput",
+            "params": {"threadId": "thread", "turnId": "turn-2", "questions": []}
+        });
+        assert!(server_request_matches_turn(
+            &current_request,
+            "thread",
+            "turn-2"
+        ));
+        assert!(!server_request_matches_turn(
+            &json!({
+                "id": 2,
+                "method": "item/tool/requestUserInput",
+                "params": {"threadId": "thread", "turnId": "turn-1", "questions": []}
+            }),
+            "thread",
+            "turn-2"
+        ));
+        assert!(!event_matches_turn(
+            &json!({
+                "threadId": "thread",
+                "turn": {"id": "turn-1", "status": "completed"}
+            }),
+            "thread",
+            "turn-2"
+        ));
+    }
+
+    #[test]
     fn status_error_mapping_is_typed() {
         assert_eq!(
             status_from_error(AgentError::new("codex_auth_required", "login")).state,
@@ -1382,5 +1813,262 @@ mod tests {
             status_from_error(AgentError::new("codex_incompatible", "tools")).state,
             CodexStatusState::Incompatible
         );
+    }
+
+    #[tokio::test]
+    async fn request_user_input_answer_survives_multiple_poll_timeouts() {
+        let (answer_tx, answer_rx) = oneshot::channel();
+        let (_closed_tx, closed_rx) = watch::channel(false);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let waiter_cancel = cancel.clone();
+        let waiter = tokio::spawn(async move {
+            wait_for_answer(answer_rx, &waiter_cancel, closed_rx, TURN_EVENT_POLL).await
+        });
+
+        sleep(TURN_EVENT_POLL * 3).await;
+        answer_tx.send("继续".into()).unwrap();
+
+        assert_eq!(
+            timeout(Duration::from_secs(2), waiter)
+                .await
+                .unwrap()
+                .unwrap(),
+            PendingAnswerResult::Answer("继续".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn request_user_input_has_one_terminal_for_cancel_and_transport_close() {
+        let (answer_tx, answer_rx) = oneshot::channel::<String>();
+        let (closed_tx, closed_rx) = watch::channel(false);
+        let cancel = AtomicBool::new(true);
+        closed_tx.send_replace(true);
+
+        assert_eq!(
+            wait_for_answer(answer_rx, &cancel, closed_rx, TURN_EVENT_POLL).await,
+            PendingAnswerResult::Cancelled
+        );
+        assert!(answer_tx.send("迟到答案".into()).is_err());
+    }
+
+    #[tokio::test]
+    async fn mock_transport_completes_request_and_turn() {
+        let (session, mut outbound) = CodexSession::mock(7);
+        let transport = session.transport.clone();
+        let request = tokio::spawn(async move {
+            transport
+                .request("turn/start", json!({"threadId": "thread-7"}))
+                .await
+        });
+        let outbound_request = timeout(Duration::from_secs(2), outbound.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let request_id = outbound_request["id"].clone();
+        session
+            .transport
+            .dispatch_incoming(json!({
+                "id": request_id,
+                "result": {"turn": {"id": "turn-7"}}
+            }))
+            .await;
+        assert_eq!(request.await.unwrap().unwrap()["turn"]["id"], "turn-7");
+
+        session
+            .transport
+            .dispatch_incoming(json!({
+                "method": "turn/completed",
+                "params": {"turn": {"status": "completed"}}
+            }))
+            .await;
+        let event = session
+            .poll_event(Duration::from_secs(1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event["method"], "turn/completed");
+    }
+
+    #[tokio::test]
+    async fn mock_transport_close_expires_waiting_input_and_pending_request() {
+        let (session, mut outbound) = CodexSession::mock(11);
+        let (answer_tx, answer_rx) = oneshot::channel::<String>();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let waiter_cancel = cancel.clone();
+        let closed = session.transport.closed_receiver();
+        let answer_waiter = tokio::spawn(async move {
+            wait_for_answer(answer_rx, &waiter_cancel, closed, TURN_EVENT_POLL).await
+        });
+
+        let transport = session.transport.clone();
+        let request = tokio::spawn(async move { transport.request("turn/start", json!({})).await });
+        timeout(Duration::from_secs(2), outbound.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        session.transport.close().await;
+
+        assert_eq!(
+            answer_waiter.await.unwrap(),
+            PendingAnswerResult::TransportClosed
+        );
+        assert!(answer_tx.send("迟到答案".into()).is_err());
+        assert_eq!(
+            request.await.unwrap().unwrap_err().code,
+            "codex_transport_closed"
+        );
+        assert_eq!(
+            session
+                .poll_event(Duration::from_secs(1))
+                .await
+                .unwrap()
+                .unwrap()["method"],
+            "transport/closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn fault_cleanup_clears_turn_question_and_allows_retry_session() {
+        let (store, conversation_id, dir) = test_store();
+        let manager = CodexManager::new(Some(dir.clone()));
+        let (failed_session, _outbound) = CodexSession::mock(21);
+        *failed_session.active_turn.lock().await = Some("turn-21".into());
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert(conversation_id.clone(), failed_session.clone());
+
+        let action_id = "action-21".to_string();
+        store
+            .set_pending_question(
+                &PendingQuestion {
+                    action_id: action_id.clone(),
+                    conversation_id: conversation_id.clone(),
+                    question: "继续？".into(),
+                    options: vec!["继续".into()],
+                },
+                "codex-request-user-input",
+            )
+            .unwrap();
+        let (answer_tx, answer_rx) = oneshot::channel();
+        manager.pending_answers.lock().await.insert(
+            action_id,
+            PendingCodexAnswer {
+                sender: answer_tx,
+                conversation_id: conversation_id.clone(),
+                generation: 21,
+                turn_id: "turn-21".into(),
+            },
+        );
+
+        manager
+            .invalidate_session(&store, &conversation_id, &failed_session)
+            .await;
+        assert!(!failed_session.transport.is_healthy());
+        assert!(failed_session.active_turn.lock().await.is_none());
+        assert!(manager
+            .sessions
+            .lock()
+            .await
+            .get(&conversation_id)
+            .is_none());
+        assert!(manager.pending_answers.lock().await.is_empty());
+        assert!(store
+            .get_pending_question(&conversation_id)
+            .unwrap()
+            .is_none());
+        assert!(answer_rx.await.is_err());
+
+        let (retry_session, _outbound) = CodexSession::mock(22);
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert(conversation_id.clone(), retry_session.clone());
+        let current = manager
+            .sessions
+            .lock()
+            .await
+            .get(&conversation_id)
+            .cloned()
+            .unwrap();
+        assert_eq!(current.generation, 22);
+        assert!(current.transport.is_healthy());
+
+        drop(current);
+        drop(retry_session);
+        drop(failed_session);
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn turn_finalizer_clears_only_its_generation() {
+        let store = AgentStore::default();
+        let manager = CodexManager::new(None);
+        let (session, _outbound) = CodexSession::mock(40);
+        *session.active_turn.lock().await = Some("turn-40".into());
+        let (old_tx, old_rx) = oneshot::channel();
+        let (new_tx, new_rx) = oneshot::channel();
+        let mut pending = manager.pending_answers.lock().await;
+        pending.insert(
+            "old-action".into(),
+            PendingCodexAnswer {
+                sender: old_tx,
+                conversation_id: "conversation".into(),
+                generation: 40,
+                turn_id: "turn-40".into(),
+            },
+        );
+        pending.insert(
+            "new-action".into(),
+            PendingCodexAnswer {
+                sender: new_tx,
+                conversation_id: "conversation".into(),
+                generation: 41,
+                turn_id: "turn-41".into(),
+            },
+        );
+        drop(pending);
+
+        manager
+            .finish_session_turn(&store, "conversation", &session, "turn-40")
+            .await;
+
+        assert!(session.active_turn.lock().await.is_none());
+        assert!(old_rx.await.is_err());
+        assert!(manager
+            .answer_question("new-action", "新答案".into())
+            .await
+            .unwrap());
+        assert_eq!(new_rx.await.unwrap(), "新答案");
+    }
+
+    #[tokio::test]
+    async fn stale_session_event_is_isolated() {
+        let (old_session, _old_outbound) = CodexSession::mock(31);
+        let (new_session, _new_outbound) = CodexSession::mock(32);
+        old_session
+            .transport
+            .dispatch_incoming(json!({
+                "method": "item/agentMessage/delta",
+                "params": {"delta": "旧事件"}
+            }))
+            .await;
+        new_session
+            .transport
+            .dispatch_incoming(json!({
+                "method": "turn/completed",
+                "params": {"turn": {"status": "completed"}}
+            }))
+            .await;
+
+        let event = new_session
+            .poll_event(Duration::from_secs(1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event["method"], "turn/completed");
     }
 }
