@@ -6,7 +6,26 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 
-const LLM_400_MAX_RETRIES: u32 = 5;
+const LLM_MAX_RETRIES: u32 = 3;
+const LLM_RETRY_BASE_DELAY: Duration = Duration::from_millis(200);
+const LLM_RETRY_MAX_DELAY: Duration = Duration::from_secs(5);
+const LLM_RETRY_AFTER_MAX_DELAY: Duration = Duration::from_secs(60);
+const TRANSIENT_PROVIDER_400_IDENTIFIERS: &[&str] = &[
+    "api_connection_error",
+    "gateway_timeout",
+    "internal_server_error",
+    "overloaded_error",
+    "provider_unavailable",
+    "rate_limit_error",
+    "rate_limit_exceeded",
+    "server_error",
+    "service_unavailable",
+    "temporarily_unavailable",
+    "upstream_connect_error",
+    "upstream_connection_error",
+    "upstream_error",
+    "upstream_timeout",
+];
 
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionResponse {
@@ -240,14 +259,68 @@ fn extract_api_error_detail(body: &str) -> Option<String> {
     })
 }
 
-fn is_permanent_llm_400(body: &str) -> bool {
-    detect_image_unsupported(body) || {
-        let lower = body.to_ascii_lowercase();
-        lower.contains("reasoning")
-            || lower.contains("invalid_request")
-            || lower.contains("context length")
-            || lower.contains("too many tokens")
+fn is_transient_provider_400(body: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+    let transient = ["/error/code", "/error/type", "/code", "/type"]
+        .into_iter()
+        .filter_map(|pointer| value.pointer(pointer).and_then(Value::as_str))
+        .any(|identifier| {
+            TRANSIENT_PROVIDER_400_IDENTIFIERS
+                .iter()
+                .any(|known| identifier.eq_ignore_ascii_case(known))
+        });
+    transient
+}
+
+fn is_retryable_http_failure(status: reqwest::StatusCode, body: &str) -> bool {
+    !detect_image_unsupported(body)
+        && (status == reqwest::StatusCode::REQUEST_TIMEOUT
+            || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || status.is_server_error()
+            || (status == reqwest::StatusCode::BAD_REQUEST && is_transient_provider_400(body)))
+}
+
+fn is_retryable_transport_error(error: &reqwest::Error) -> bool {
+    !error.is_builder() && !error.is_redirect() && !error.is_decode()
+}
+
+fn retry_after_delay(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let value = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
     }
+    let retry_at = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    Some(
+        retry_at
+            .signed_duration_since(chrono::Utc::now())
+            .to_std()
+            .unwrap_or(Duration::ZERO),
+    )
+}
+
+fn exponential_backoff_with_jitter(retry_index: u32) -> Duration {
+    let exponent = retry_index.min(31);
+    let upper_millis = LLM_RETRY_BASE_DELAY
+        .as_millis()
+        .saturating_mul(1u128 << exponent)
+        .min(LLM_RETRY_MAX_DELAY.as_millis());
+    let lower_millis = upper_millis / 2;
+    let jitter_range = upper_millis.saturating_sub(lower_millis) + 1;
+    let jitter = uuid::Uuid::new_v4().as_u128() % jitter_range;
+    Duration::from_millis((lower_millis + jitter) as u64)
+}
+
+fn retry_delay(retry_index: u32, retry_after: Option<Duration>) -> Duration {
+    retry_after.map_or_else(
+        || exponential_backoff_with_jitter(retry_index),
+        |delay| delay.min(LLM_RETRY_AFTER_MAX_DELAY),
+    )
 }
 
 fn classify_request_failure(status: reqwest::StatusCode, text: String) -> AgentError {
@@ -266,31 +339,38 @@ fn classify_request_failure(status: reqwest::StatusCode, text: String) -> AgentE
     }
 }
 
-async fn post_json_with_400_retry(
+async fn post_json_with_retry(
     url: &str,
     api_key: &str,
     body: &Value,
 ) -> Result<reqwest::Response, AgentError> {
     let client = reqwest::Client::new();
-    let mut attempt = 0u32;
+    let mut retries = 0u32;
     loop {
-        let response = client
+        let response = match client
             .post(url)
             .bearer_auth(api_key)
             .json(body)
             .send()
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) if is_retryable_transport_error(&error) && retries < LLM_MAX_RETRIES => {
+                tokio::time::sleep(retry_delay(retries, None)).await;
+                retries += 1;
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
         if response.status().is_success() {
             return Ok(response);
         }
         let status = response.status();
+        let retry_after = retry_after_delay(response.headers());
         let text = response.text().await.unwrap_or_default();
-        if status.as_u16() == 400
-            && !is_permanent_llm_400(&text)
-            && attempt < LLM_400_MAX_RETRIES
-        {
-            attempt += 1;
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        if is_retryable_http_failure(status, &text) && retries < LLM_MAX_RETRIES {
+            tokio::time::sleep(retry_delay(retries, retry_after)).await;
+            retries += 1;
             continue;
         }
         return Err(classify_request_failure(status, text));
@@ -314,7 +394,7 @@ pub async fn chat_completions(
     tools: &[Value],
 ) -> Result<ChatMessagePayload, AgentError> {
     let (base, api_key, model) = resolve_endpoint(config)?;
-    let response = post_json_with_400_retry(
+    let response = post_json_with_retry(
         &format!("{base}/chat/completions"),
         &api_key,
         &request_body(&base, &model, messages, tools, ToolChoiceMode::Auto, false)?,
@@ -334,7 +414,7 @@ where
     F: FnMut(ChatStreamDelta),
 {
     let (base, api_key, model) = resolve_endpoint(config)?;
-    let response = post_json_with_400_retry(
+    let response = post_json_with_retry(
         &format!("{base}/chat/completions"),
         &api_key,
         &request_body(&base, &model, messages, tools, tool_choice, true)?,
@@ -765,7 +845,7 @@ async fn responses(
     tools: &[Value],
 ) -> Result<ChatMessagePayload, AgentError> {
     let (base, api_key, model) = resolve_endpoint(config)?;
-    let response = post_json_with_400_retry(
+    let response = post_json_with_retry(
         &format!("{base}/responses"),
         &api_key,
         &responses_request_body(&base, &model, messages, tools, ToolChoiceMode::Auto, false)?,
@@ -860,7 +940,7 @@ where
     F: FnMut(ChatStreamDelta),
 {
     let (base, api_key, model) = resolve_endpoint(config)?;
-    let response = post_json_with_400_retry(
+    let response = post_json_with_retry(
         &format!("{base}/responses"),
         &api_key,
         &responses_request_body(&base, &model, messages, tools, tool_choice, true)?,
@@ -1357,6 +1437,13 @@ mod tests {
     async fn spawn_mock_http_recording(
         responses: Vec<MockHttpResponse>,
     ) -> (String, Arc<Mutex<Vec<String>>>) {
+        spawn_mock_http_recording_with_headers(responses, Vec::new()).await
+    }
+
+    async fn spawn_mock_http_recording_with_headers(
+        responses: Vec<MockHttpResponse>,
+        response_headers: Vec<Vec<(&'static str, &'static str)>>,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let bodies = Arc::new(Mutex::new(responses));
@@ -1389,13 +1476,23 @@ data: [DONE]
                         })
                 };
                 index += 1;
+                if reply.status == 0 {
+                    continue;
+                }
                 let reason = if reply.status == 200 { "OK" } else { "Error" };
+                let extra_headers = response_headers
+                    .get(index - 1)
+                    .into_iter()
+                    .flatten()
+                    .map(|(name, value)| format!("{name}: {value}\r\n"))
+                    .collect::<String>();
                 let response = format!(
-                    "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n{}\r\n{}",
                     reply.status,
                     reason,
                     reply.content_type,
                     reply.body.len(),
+                    extra_headers,
                     reply.body
                 );
                 let _ = socket.write_all(response.as_bytes()).await;
@@ -1838,7 +1935,8 @@ data: [DONE]
             r#"{"error":{"message":"The reasoning_content in the thinking mode must be passed back to the API."}}"#.into(),
         );
         assert!(error.message.contains("reasoning_content"));
-        assert!(is_permanent_llm_400(
+        assert!(!is_retryable_http_failure(
+            reqwest::StatusCode::BAD_REQUEST,
             r#"{"error":{"message":"The reasoning_content in the thinking mode must be passed back to the API."}}"#
         ));
     }
@@ -2121,37 +2219,27 @@ data: {"type":"response.completed","response":{"status":"completed","output":[{"
         }
     }
 
-    #[tokio::test]
-    async fn chat_completions_classifies_image_unsupported_error() {
-        let base_url = spawn_mock_http(vec![MockHttpResponse {
-            status: 400,
-            content_type: "application/json",
-            body: r#"{"error":{"message":"image_url is not supported by this model"}}"#.into(),
-        }])
-        .await;
-        let config = LlmConfigInternal {
-            api_mode: LlmApiMode::ChatCompletions,
-            base_url: Some(base_url),
-            api_key: Some("test-key".into()),
-            model: Some("mock-model".into()),
-            context_window: None,
-            max_input_tokens: None,
-        };
-        let error = chat_completions(&config, &[json!({"role":"user","content":"hi"})], &[])
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, "llm_image_unsupported");
-    }
-
-    fn mock_chat_config(base_url: String) -> LlmConfigInternal {
+    fn mock_config(base_url: String, api_mode: LlmApiMode) -> LlmConfigInternal {
         LlmConfigInternal {
-            api_mode: LlmApiMode::ChatCompletions,
+            api_mode,
             base_url: Some(base_url),
             api_key: Some("test-key".into()),
             model: Some("mock-model".into()),
             context_window: None,
             max_input_tokens: None,
         }
+    }
+
+    fn success_http(api_mode: LlmApiMode) -> MockHttpResponse {
+        let body = match api_mode {
+            LlmApiMode::ChatCompletions => {
+                r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#
+            }
+            LlmApiMode::Responses => {
+                r#"{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}"#
+            }
+        };
+        json_http(200, body)
     }
 
     fn json_http(status: u16, body: &str) -> MockHttpResponse {
@@ -2162,49 +2250,156 @@ data: {"type":"response.completed","response":{"status":"completed","output":[{"
         }
     }
 
-    #[tokio::test]
-    async fn chat_completions_retries_http_400() {
-        let hi = [json!({"role":"user","content":"hi"})];
-
-        let (base_url, requests) = spawn_mock_http_recording(vec![
-            json_http(400, r#"{"error":{"message":"temporary"}}"#),
-            json_http(200, r#"{"choices":[{"message":{"role":"assistant","content":"ok"}}]}"#),
-        ])
-        .await;
-        let message = chat_completions(&mock_chat_config(base_url), &hi, &[])
-            .await
-            .unwrap();
-        assert_eq!(content_to_text(&message.content), "ok");
-        assert_eq!(requests.lock().await.len(), 2);
-
-        let replies = (0..6)
-            .map(|_| json_http(400, r#"{"error":{"message":"temporary"}}"#))
-            .collect();
-        let (base_url, requests) = spawn_mock_http_recording(replies).await;
-        let error = chat_completions(&mock_chat_config(base_url), &hi, &[])
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, "llm_request_failed");
-        assert_eq!(requests.lock().await.len(), 6);
-
+    async fn mock_complete(
+        api_mode: LlmApiMode,
+        responses: Vec<MockHttpResponse>,
+        response_headers: Vec<Vec<(&'static str, &'static str)>>,
+    ) -> (Result<ChatMessagePayload, AgentError>, usize) {
         let (base_url, requests) =
-            spawn_mock_http_recording(vec![json_http(500, r#"{"error":{"message":"internal"}}"#)])
-                .await;
-        let error = chat_completions(&mock_chat_config(base_url), &hi, &[])
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, "llm_request_failed");
-        assert_eq!(requests.lock().await.len(), 1);
-
-        let (base_url, requests) = spawn_mock_http_recording(vec![json_http(
-            400,
-            r#"{"error":{"message":"image_url is not supported by this model"}}"#,
-        )])
+            spawn_mock_http_recording_with_headers(responses, response_headers).await;
+        let result = complete(
+            &mock_config(base_url, api_mode),
+            &[json!({"role":"user","content":"hi"})],
+            &[],
+        )
         .await;
-        let error = chat_completions(&mock_chat_config(base_url), &hi, &[])
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, "llm_image_unsupported");
-        assert_eq!(requests.lock().await.len(), 1);
+        let request_count = requests.lock().await.len();
+        (result, request_count)
+    }
+
+    #[tokio::test]
+    async fn permanent_http_400_is_sent_once_in_both_api_modes() {
+        let permanent_errors = [
+            r#"{"error":{"type":"invalid_request_error","code":"invalid_parameter","message":"unknown parameter"}}"#,
+            r#"{"error":{"type":"invalid_request_error","code":"invalid_schema","message":"invalid tool schema"}}"#,
+            r#"{"error":{"type":"invalid_request_error","code":"context_length_exceeded","message":"too many tokens"}}"#,
+            r#"{"error":{"message":"temporary"}}"#,
+        ];
+
+        for api_mode in [LlmApiMode::ChatCompletions, LlmApiMode::Responses] {
+            for body in permanent_errors {
+                let (result, request_count) =
+                    mock_complete(api_mode, vec![json_http(400, body)], vec![]).await;
+
+                assert_eq!(result.unwrap_err().code, "llm_request_failed");
+                assert_eq!(request_count, 1, "{api_mode:?}: {body}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn image_capability_error_is_explicit_and_not_retried() {
+        for api_mode in [LlmApiMode::ChatCompletions, LlmApiMode::Responses] {
+            let (result, request_count) = mock_complete(
+                api_mode,
+                vec![json_http(
+                    400,
+                    r#"{"error":{"message":"image_url is not supported by this model"}}"#,
+                )],
+                vec![],
+            )
+            .await;
+
+            assert_eq!(result.unwrap_err().code, "llm_image_unsupported");
+            assert_eq!(request_count, 1, "{api_mode:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn structured_transient_provider_400_retries_in_both_api_modes() {
+        for (api_mode, transient) in [
+            (
+                LlmApiMode::ChatCompletions,
+                r#"{"error":{"code":"upstream_error","message":"gateway temporarily unavailable"}}"#,
+            ),
+            (
+                LlmApiMode::Responses,
+                r#"{"error":{"type":"overloaded_error","message":"provider overloaded"}}"#,
+            ),
+        ] {
+            let (result, request_count) = mock_complete(
+                api_mode,
+                vec![json_http(400, transient), success_http(api_mode)],
+                vec![],
+            )
+            .await;
+
+            assert_eq!(content_to_text(&result.unwrap().content), "ok");
+            assert_eq!(request_count, 2, "{api_mode:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn rate_limit_uses_retry_after_and_retries_in_both_api_modes() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "2".parse().unwrap());
+        assert_eq!(retry_after_delay(&headers), Some(Duration::from_secs(2)));
+        assert_eq!(
+            retry_delay(0, retry_after_delay(&headers)),
+            Duration::from_secs(2)
+        );
+
+        for api_mode in [LlmApiMode::ChatCompletions, LlmApiMode::Responses] {
+            let (result, request_count) = mock_complete(
+                api_mode,
+                vec![
+                    json_http(429, r#"{"error":{"type":"rate_limit_error"}}"#),
+                    success_http(api_mode),
+                ],
+                vec![vec![("Retry-After", "0")]],
+            )
+            .await;
+
+            assert_eq!(content_to_text(&result.unwrap().content), "ok");
+            assert_eq!(request_count, 2, "{api_mode:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn timeout_server_and_network_failures_retry_in_both_api_modes() {
+        for api_mode in [LlmApiMode::ChatCompletions, LlmApiMode::Responses] {
+            for status in [408, 500, 503] {
+                let (result, request_count) = mock_complete(
+                    api_mode,
+                    vec![
+                        json_http(status, r#"{"error":{"message":"transient"}}"#),
+                        success_http(api_mode),
+                    ],
+                    vec![],
+                )
+                .await;
+
+                assert_eq!(content_to_text(&result.unwrap().content), "ok");
+                assert_eq!(request_count, 2, "{api_mode:?}: {status}");
+            }
+
+            let (result, request_count) = mock_complete(
+                api_mode,
+                vec![json_http(0, ""), success_http(api_mode)],
+                vec![],
+            )
+            .await;
+
+            assert_eq!(content_to_text(&result.unwrap().content), "ok");
+            assert_eq!(request_count, 2, "{api_mode:?}: network");
+        }
+    }
+
+    #[tokio::test]
+    async fn transient_retry_exhaustion_is_bounded_in_both_api_modes() {
+        for api_mode in [LlmApiMode::ChatCompletions, LlmApiMode::Responses] {
+            let replies = vec![
+                json_http(503, r#"{"error":{"message":"still unavailable"}}"#);
+                (LLM_MAX_RETRIES + 1) as usize
+            ];
+            let (result, request_count) = mock_complete(api_mode, replies, vec![]).await;
+
+            assert_eq!(result.unwrap_err().code, "llm_request_failed");
+            assert_eq!(
+                request_count,
+                (LLM_MAX_RETRIES + 1) as usize,
+                "{api_mode:?}"
+            );
+        }
     }
 }
